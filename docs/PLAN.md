@@ -259,3 +259,32 @@ All six chunks done; live check (read-only, counts only) over 11 chats: every he
 - **Round 2.** mr-review: a test for the 9-digit cap, another alias, unsigned time parts. STYLE 5.4 over Tiger's else-if rule: the day prefix moved to `writeDay` with guard clauses, which satisfies both. Tiger Style: compound conditions in the escaping, qualifiers last (`at_day`), `parseIso` asserts its result, helpers split from `run` carry its name (`runChats`, `runUnread`), test constants in seconds.
 - **Round 3.** mr-review: `writeDay`'s comment read as "yesterday". STYLE 1.6: `writeDay`'s helpers carry its name. Tiger Style: the time is computed after the day is written, close to its use.
 - **Round 4:** all three reviews found nothing new. Gate passed. Polish pass resolved at 0.5.0.
+
+## M5: send messages, written in Markdown (planned, needs approval)
+
+Asked for by the owner on 2026-11-06: sending, with Markdown turned into Teams' format. Testing uses the owner's own account, sends only to their notes chat (`48:notes`), and is kept to a minimum.
+
+Protocol (from `inspo/`, facts only): `POST /v1/users/ME/conversations/{id}/messages` with JSON `content` (HTML), `messagetype: "RichText/Html"`, `contenttype: "text"`, `clientmessageid` (a fresh number) and `imdisplayname` (your name); the answer carries `OriginalArrivalTime`, the new message's id.
+
+Plan decisions:
+
+- `teams-zig send <chat> <text>`: `<chat>` as for `messages` (an exact name or an id), the text as one argument (quote it). No stdin, no files, no editing or replies.
+- A hard-coded allow list holds only `48:notes`. Any other chat, however chosen, fails with `error.SendNotAllowed` before a request is made. Widening it is a later owner decision.
+- A send is never retried, since a retry after a lost answer could post twice. Any failure is reported and the command stops.
+- Text over 16 KiB is refused before any request (Teams' own limit is near 28 KB of HTML, and escaping grows the text).
+- Markdown supported, mirroring what `messages` shows: paragraphs and line breaks, `**bold**`, `_italic_` and `*italic*`, `~~strike~~`, `` `code` ``, `[text](url)` (only `http`/`https` links; others stay as text), `- ` and `1. ` lists (one level), `> ` quotes, `` ``` `` fences and `#`–`###` headings. A `\` before punctuation keeps it literal. All text is HTML-escaped (`&`, `<`, `>`, `"`), so nothing typed becomes markup.
+- Tests check that rendering the produced HTML back with `markdown.writeHtml` gives the Markdown typed, for each supported form.
+- The zero-writes rule in CLAUDE.md stays as written; the owner's lift covers only sends to `48:notes` during M5.
+
+### Chunks
+
+1. **M5.1 Markdown inline to HTML.** Escaping, bold, italic, strike, code, links, backslash escapes, in a new `src/chat/teams_html.zig`. Round-trip tests.
+2. **M5.2 Markdown blocks to HTML.** Paragraphs, line breaks, lists, quotes, fences, headings. Round-trip tests.
+3. **M5.3 `Client.send`.** The POST, its JSON body built with `std.json`, no retry, the answer's id parsed. Tests on the body and the answer with fake values; no network.
+4. **M5.4 `send` command.** Parsing, the 16 KiB cap, the allow list checked after the chat is resolved and before the request, the new message's time printed. Tests for refused chats and sizes.
+5. **M5.5 one live send.** One message to `48:notes` holding each supported form, read back with `messages 48:notes 1` and compared by counts; at most one retry of the check, never of the send.
+6. **M5.6 0.6.0 and gate.**
+
+### Out of M5
+
+Sending anywhere but `48:notes`. Editing, deleting, reacting, replies, mentions, files and images. Marking as read. Nested lists.
