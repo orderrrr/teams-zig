@@ -14,6 +14,9 @@ marks: std.StringHashMapUnmanaged(u64),
 /// appears later shows only what arrived after `watch` started, by the service's clock.
 mark_first: u64,
 
+/// The most chats `marks` holds; space for them is reserved up front.
+pub const chat_count_limit = 1024;
+
 /// Records where every chat in the first poll stands, so nothing older is shown.
 pub fn init(
     gpa: std.mem.Allocator,
@@ -21,14 +24,16 @@ pub fn init(
 ) error{OutOfMemory}!Seen {
     var seen: Seen = .{ .gpa = gpa, .marks = .empty, .mark_first = 0 };
     errdefer seen.deinit();
+    try seen.marks.ensureTotalCapacity(gpa, chat_count_limit);
 
-    for (conversations) |*conversation| {
-        const last_message_id = conversation.last_message_id orelse continue;
-        seen.mark_first = @max(seen.mark_first, last_message_id);
-    }
+    // Each chat's own mark first: while `mark_first` is still zero, `record` keeps ids as they are.
     for (conversations) |*conversation| {
         const last_message_id = conversation.last_message_id orelse continue;
         try seen.record(conversation.id, last_message_id);
+    }
+    for (conversations) |*conversation| {
+        const last_message_id = conversation.last_message_id orelse continue;
+        seen.mark_first = @max(seen.mark_first, last_message_id);
     }
     return seen;
 }
@@ -51,21 +56,38 @@ pub fn changed(seen: *const Seen, conversation: *const chat.Conversation) bool {
     return last_message_id > seen.mark(conversation.id);
 }
 
-/// Moves a chat's mark forward to `message_id`; never back.
+/// Moves a chat's mark forward to `message_id`; never back. When `chat_count_limit` chats are
+/// marked, the marks are folded into `mark_first` (the newest of them) to make room: nothing
+/// already shown comes back, at the cost of skipping older unshown messages in unread chats.
 pub fn record(
     seen: *Seen,
     conversation_id: []const u8,
     message_id: u64,
 ) error{OutOfMemory}!void {
     std.debug.assert(conversation_id.len > 0);
-    const entry = try seen.marks.getOrPut(seen.gpa, conversation_id);
+    std.debug.assert(seen.marks.count() <= chat_count_limit);
+    if (seen.marks.count() == chat_count_limit and !seen.marks.contains(conversation_id)) {
+        seen.fold();
+    }
+    const entry = seen.marks.getOrPutAssumeCapacity(conversation_id);
     if (entry.found_existing) {
         entry.value_ptr.* = @max(entry.value_ptr.*, message_id);
         return;
     }
     errdefer seen.marks.removeByPtr(entry.key_ptr);
     entry.key_ptr.* = try seen.gpa.dupe(u8, conversation_id);
-    entry.value_ptr.* = message_id;
+    // Its mark was `mark_first` until now.
+    entry.value_ptr.* = @max(seen.mark_first, message_id);
+}
+
+/// Empties `marks`, raising `mark_first` to the newest mark so no chat goes back.
+fn fold(seen: *Seen) void {
+    var entries = seen.marks.iterator();
+    while (entries.next()) |entry| {
+        seen.mark_first = @max(seen.mark_first, entry.value_ptr.*);
+        seen.gpa.free(entry.key_ptr.*);
+    }
+    seen.marks.clearRetainingCapacity();
 }
 
 fn fakeConversation(id: []const u8, last_message_id: ?u64) chat.Conversation {
@@ -111,4 +133,21 @@ test "init with no messages anywhere starts from zero" {
     defer seen.deinit();
 
     try std.testing.expectEqual(0, seen.mark("19:fake@thread.v2"));
+}
+
+test "record folds the marks when full, so nothing shown comes back" {
+    var seen: Seen = try .init(std.testing.allocator, &.{});
+    defer seen.deinit();
+
+    var id_buffer: [32]u8 = undefined;
+    for (0..chat_count_limit) |index| {
+        const id = try std.fmt.bufPrint(&id_buffer, "19:fake-{d}@thread.v2", .{index});
+        try seen.record(id, 1000 + index);
+    }
+    try std.testing.expectEqual(chat_count_limit, seen.marks.count());
+
+    try seen.record("19:fake-new@thread.v2", 500);
+    try std.testing.expectEqual(1, seen.marks.count());
+    try std.testing.expectEqual(1000 + chat_count_limit - 1, seen.mark("19:fake-0@thread.v2"));
+    try std.testing.expectEqual(1000 + chat_count_limit - 1, seen.mark("19:fake-new@thread.v2"));
 }

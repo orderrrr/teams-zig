@@ -103,6 +103,9 @@ const name_lookup_count_limit = 40;
 comptime {
     std.debug.assert(conversation_count_limit <= std.math.maxInt(u16));
     std.debug.assert(name_lookup_count_limit < requests_seconds_max);
+    // Backing off never polls faster than normal, and a poll's reads fit the watchdog's limit.
+    std.debug.assert(watch_poll_seconds <= watch_backoff_seconds_max);
+    std.debug.assert(watch_read_count_limit < requests_seconds_max);
     std.debug.assert(conversation_count_default <= conversation_count_limit);
     std.debug.assert(message_count_default <= message_count_limit);
 }
@@ -512,7 +515,7 @@ fn printNewMessages(
     self_mri: []const u8,
     stdout: *Io.Writer,
 ) RunError!void {
-    // `changed` is only true for a conversation with a last message id.
+    std.debug.assert(seen.changed(conversation));
     const last_message_id = conversation.last_message_id.?;
     const recent = client.recentMessages(conversation.id, message_count_recent) catch |err| {
         if (!lookupErrorSkips(err, client.response_status)) return err;
