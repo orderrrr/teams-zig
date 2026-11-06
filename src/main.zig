@@ -1070,6 +1070,54 @@ test "printMessage starts each message on its time and sender line" {
     , out.written());
 }
 
+test "printMessagesAfter prints text messages past the mark, oldest first, after the chat's name" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    const zone = try core_foundation.TimeZone.createFixed(0);
+    defer core_foundation.release(zone);
+
+    const clock: Clock = .{ .zone = zone, .now = 1_793_966_400 };
+    const self_mri = "8:orgid:fake-self";
+    const conversation: chat.Conversation = .{
+        .id = "19:fake-group@thread.v2",
+        .kind = .chat,
+        .topic = "Fake topic",
+        .last_message_at = null,
+        .last_sender = null,
+        .last_sender_name = null,
+        .last_message_id = null,
+        .read_up_to_id = null,
+    };
+    const template: chat.Message = .{
+        .id = "",
+        .message_type = "Text",
+        .sender = "8:orgid:fake-other",
+        .sender_name = "Fake Other",
+        .content = "",
+        .arrived_at = "2026-11-06T11:00:00.000Z",
+        .deleted_at_ms = null,
+    };
+    var messages = [_]chat.Message{ template, template, template, template, template };
+    // Newest first, as the service returns them.
+    messages[0].id = "3000";
+    messages[0].content = "fake newest";
+    messages[1].id = "2500";
+    messages[1].message_type = "ThreadActivity/AddMember";
+    messages[2].id = "fake-id";
+    messages[3].id = "2000";
+    messages[3].content = "fake older";
+    messages[4].id = "1000";
+    messages[4].content = "fake at the mark";
+
+    try printMessagesAfter(&out.writer, &clock, &conversation, self_mri, &messages, 1000);
+    try std.testing.expectEqualStrings(
+        \\[Fake topic] 11:00  Fake Other: fake older
+        \\[Fake topic] 11:00  Fake Other: fake newest
+        \\
+    , out.written());
+}
+
 test "checkToken rejects line breaks" {
     try checkToken("fake-token");
     try std.testing.expectError(error.InvalidToken, checkToken("fake\r\nX-Injected: 1"));

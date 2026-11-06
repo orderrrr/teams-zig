@@ -9,7 +9,7 @@ One entry per milestone. The version lives in `build.zig.zon`.
 - A line someone typed that starts like Markdown (`#`, `>`, `- `, `1. `, `` ``` ``, `---`) gets a `\` in front, so it reads as typed rather than as a heading, quote or list.
 - Still read-only: nothing writes to Teams.
 
-Known limits: a typed `` ``` `` inside a code block still ends it early.
+Known limits: only formatted (HTML) messages are escaped, not plain-text ones; a typed `*` or `_` inside a line stays as typed; and a typed `` ``` `` inside a code block still ends it early.
 
 ## 0.4.0 (M4): readable messages
 
