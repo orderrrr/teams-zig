@@ -10,8 +10,9 @@ const chat = @import("teams").chat;
 gpa: std.mem.Allocator,
 /// Conversation id to the newest message id seen there.
 marks: std.StringHashMapUnmanaged(u64),
-/// The mark for a chat not seen before: the newest message id at the first poll, so a chat that
-/// appears later shows only what arrived after `watch` started, by the service's clock.
+/// The mark for a chat not in `marks`: the newest message id at the first poll, so a chat that
+/// appears later shows only what arrived after `watch` started, by the service's clock. Raised
+/// when `fold` empties `marks`.
 mark_first: u64,
 
 /// The most chats `marks` holds; space for them is reserved up front.
