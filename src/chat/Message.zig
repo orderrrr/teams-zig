@@ -4,6 +4,7 @@ const Message = @This();
 
 const std = @import("std");
 const json = @import("json.zig");
+const mri = @import("mri.zig");
 const text = @import("text.zig");
 const Owned = @import("Owned.zig").Owned;
 
@@ -111,7 +112,7 @@ pub fn parsePage(arena: std.mem.Allocator, body: []const u8) json.ParseError!Pag
         item.* = .{
             .id = raw.id,
             .message_type = raw.messagetype,
-            .sender = if (raw.from) |from| senderOf(from) else null,
+            .sender = if (raw.from) |from| mri.fromContactUrl(from) else null,
             .sender_name = raw.imdisplayname,
             .content = raw.content,
             .arrived_at = raw.originalarrivaltime,
@@ -120,12 +121,6 @@ pub fn parsePage(arena: std.mem.Allocator, body: []const u8) json.ParseError!Pag
     }
 
     return .{ .items = items, .backward_link = response._metadata.backwardLink };
-}
-
-/// `from` is a contact URL ending in the sender's MRI: `https://.../contacts/8:orgid:<uuid>`.
-fn senderOf(from: []const u8) []const u8 {
-    const start = if (std.mem.lastIndexOfScalar(u8, from, '/')) |slash| slash + 1 else 0;
-    return from[start..];
 }
 
 test "parsePage reads messages, the deleted marker and the backward link" {
@@ -260,10 +255,6 @@ test "writeText passes unknown entities and a bare ampersand through" {
 
     try message.writeText(&out.writer);
     try std.testing.expectEqualStrings("fake &copy; & done", out.written());
-}
-
-test "senderOf returns the whole value when from has no slash" {
-    try std.testing.expectEqualStrings("8:orgid:fake-uuid", senderOf("8:orgid:fake-uuid"));
 }
 
 test "writeText shows control bytes from both plain and HTML content" {

@@ -4,6 +4,7 @@ pub const Message = @import("Message.zig");
 pub const Owned = @import("Owned.zig").Owned;
 pub const User = @import("User.zig");
 pub const json = @import("json.zig");
+pub const mri = @import("mri.zig");
 pub const text = @import("text.zig");
 
 test {

@@ -4,6 +4,7 @@ const Conversation = @This();
 
 const std = @import("std");
 const json = @import("json.zig");
+const mri = @import("mri.zig");
 const Owned = @import("Owned.zig").Owned;
 
 // Every string borrows the arena of the `List` that parsed it.
@@ -13,6 +14,10 @@ kind: Kind,
 topic: ?[]const u8,
 /// ISO timestamp of the last message; null when the conversation has none.
 last_message_at: ?[]const u8,
+/// The MRI of whoever sent the last message; null when the service doesn't say.
+last_sender: ?[]const u8,
+/// The last sender's display name; null when the service doesn't send one.
+last_sender_name: ?[]const u8,
 
 pub const Kind = enum { chat, meeting, space, topic, notes, other };
 
@@ -24,7 +29,13 @@ const Response = struct {
         id: []const u8,
         threadProperties: ?ThreadProperties = null,
         properties: ?Properties = null,
+        lastMessage: ?LastMessage = null,
     },
+
+    const LastMessage = struct {
+        from: ?[]const u8 = null,
+        imdisplayname: ?[]const u8 = null,
+    };
 
     const Properties = struct { lastimreceivedtime: ?[]const u8 = null };
 
@@ -51,11 +62,14 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
             kind = kindOf(thread_type) orelse continue;
         }
         const properties: Response.Properties = raw.properties orelse .{};
+        const last_message: Response.LastMessage = raw.lastMessage orelse .{};
         items.appendAssumeCapacity(.{
             .id = raw.id,
             .kind = kind,
             .topic = thread.topic,
             .last_message_at = properties.lastimreceivedtime,
+            .last_sender = if (last_message.from) |from| mri.fromContactUrl(from) else null,
+            .last_sender_name = last_message.imdisplayname,
         });
     }
 
@@ -75,7 +89,9 @@ test "parseList keeps chats and the self-chat, and drops system streams" {
     const body =
         \\{"_metadata":{},"conversations":[
         \\  {"id":"19:fake-a_fake-b@unq.gbl.spaces","threadProperties":{"threadType":"chat"},
-        \\   "properties":{"lastimreceivedtime":"2026-11-01T10:00:00.000Z"}},
+        \\   "properties":{"lastimreceivedtime":"2026-11-01T10:00:00.000Z"},
+        \\   "lastMessage":{"imdisplayname":"Fake Person",
+        \\    "from":"https://x/v1/users/ME/contacts/8:orgid:fake-b"}},
         \\  {"id":"19:fake-meeting@thread.v2",
         \\   "threadProperties":{"threadType":"meeting","topic":"Fake standup"},
         \\   "properties":{"lastimreceivedtime":null}},
@@ -90,6 +106,9 @@ test "parseList keeps chats and the self-chat, and drops system streams" {
     try std.testing.expectEqual(Kind.chat, list.items[0].kind);
     try std.testing.expectEqual(null, list.items[0].topic);
     try std.testing.expectEqualStrings("2026-11-01T10:00:00.000Z", list.items[0].last_message_at.?);
+    try std.testing.expectEqualStrings("8:orgid:fake-b", list.items[0].last_sender.?);
+    try std.testing.expectEqualStrings("Fake Person", list.items[0].last_sender_name.?);
+    try std.testing.expectEqual(null, list.items[1].last_sender);
     try std.testing.expectEqual(Kind.meeting, list.items[1].kind);
     try std.testing.expectEqualStrings("Fake standup", list.items[1].topic.?);
     try std.testing.expectEqual(null, list.items[1].last_message_at);
