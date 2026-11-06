@@ -55,7 +55,7 @@ const usage =
     \\
     \\commands:
     \\  whoami                       show the signed-in user
-    \\  chats [count]                list your chats (default 50, at most 100)
+    \\  chats [count]                list your chats (default 50, at most 100); * is unread
     \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
     \\                               name as chats shows it (quote it if it has spaces) or its id
     \\
@@ -225,7 +225,7 @@ const Command = union(enum) {
                 requests_done.store(true, .release);
 
                 for (list.items, names) |*conversation, name| {
-                    try printChat(stdout, conversation, name);
+                    try printChat(stdout, conversation, name, conversation.isUnread(user.mri));
                 }
             },
             .messages => |messages| {
@@ -435,19 +435,22 @@ fn findChat(
             for (list.items, names) |*conversation, other_name| {
                 const chat_name = chatName(conversation, other_name) orelse continue;
                 if (!std.ascii.eqlIgnoreCase(chat_name, name)) continue;
-                try printChat(stdout, conversation, other_name);
+                const unread = conversation.isUnread(user.mri);
+                try printChat(stdout, conversation, other_name, unread);
             }
             return error.ChatNameAmbiguous;
         },
     }
 }
 
-/// One `chats` row: last message time, kind, name and id.
+/// One `chats` row: a `*` if unread, last message time, kind, name and id.
 fn printChat(
     stdout: *Io.Writer,
     conversation: *const chat.Conversation,
     other_name: ?[]const u8,
+    unread: bool,
 ) Io.Writer.Error!void {
+    try stdout.writeAll(if (unread) "* " else "  ");
     const last_message_at = conversation.last_message_at orelse "-";
     try writeVisible(stdout, last_message_at);
     try stdout.splatByteAll(' ', timestamp_width -| last_message_at.len);
