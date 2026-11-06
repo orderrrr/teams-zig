@@ -79,7 +79,8 @@ pub fn write(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     try writer.print("{d:0>2}:{d:0>2}", .{ hour, minute });
 }
 
-/// The day before the time: nothing for today, the weekday for the past six days, else the date.
+/// Writes the day part in front of the time: nothing for today, the weekday for the past six
+/// days, else the date.
 fn writeDay(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     const at_day = @divFloor(times.at_seconds, std.time.s_per_day);
     const now_day = @divFloor(times.now_seconds, std.time.s_per_day);
