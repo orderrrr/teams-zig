@@ -27,14 +27,15 @@ pub const Tag = struct {
     /// The raw value of attribute `name` (still entity-encoded), or null if the tag has none.
     pub fn attribute(tag: *const Tag, name: []const u8) ?[]const u8 {
         std.debug.assert(name.len > 0);
-        const attributes = tag.attributes;
-        for (0..attributes.len) |index| {
-            if (index > 0 and !std.ascii.isWhitespace(attributes[index - 1])) continue;
-            const rest = attributes[index..];
+        for (0..tag.attributes.len) |index| {
+            // Only a whole word counts, so `alt` doesn't match `data-alt`.
+            if (index > 0) {
+                if (!std.ascii.isWhitespace(tag.attributes[index - 1])) continue;
+            }
+            const rest = tag.attributes[index..];
             if (!std.ascii.startsWithIgnoreCase(rest, name)) continue;
             const after = rest[name.len..];
-            if (after.len == 0 or after[0] != '=') continue;
-            return attributeValue(after[1..]);
+            if (std.mem.startsWith(u8, after, "=")) return attributeValue(after[1..]);
         }
         return null;
     }
@@ -95,12 +96,11 @@ pub fn writeDecoded(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error
 }
 
 fn parseTag(inside: []const u8) Tag {
-    const closing = inside.len > 0 and inside[0] == '/';
+    const closing = std.mem.startsWith(u8, inside, "/");
     const after_slash = if (closing) inside[1..] else inside;
-    var name_len: usize = 0;
-    while (name_len < after_slash.len and std.ascii.isAlphanumeric(after_slash[name_len])) {
-        name_len += 1;
-    }
+    const name_len = for (after_slash, 0..) |byte, index| {
+        if (!std.ascii.isAlphanumeric(byte)) break index;
+    } else after_slash.len;
     return .{
         .name = after_slash[0..name_len],
         .closing = closing,
@@ -111,13 +111,16 @@ fn parseTag(inside: []const u8) Tag {
 /// The value at the start of `rest`: quoted with `"` or `'`, or up to the next space.
 fn attributeValue(rest: []const u8) []const u8 {
     if (rest.len == 0) return rest;
-    const quote = rest[0];
-    if (quote == '"' or quote == '\'') {
-        const end = std.mem.indexOfScalar(u8, rest[1..], quote) orelse rest.len - 1;
-        return rest[1..][0..end];
+    switch (rest[0]) {
+        '"', '\'' => |quote| {
+            const end = std.mem.indexOfScalar(u8, rest[1..], quote) orelse rest.len - 1;
+            return rest[1..][0..end];
+        },
+        else => {
+            const end = std.mem.indexOfAny(u8, rest, &std.ascii.whitespace) orelse rest.len;
+            return rest[0..end];
+        },
     }
-    const end = std.mem.indexOfAny(u8, rest, &std.ascii.whitespace) orelse rest.len;
-    return rest[0..end];
 }
 
 /// The entity `rest` starts with, as its text and its replacement; null if none matches.
