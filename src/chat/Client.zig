@@ -3,6 +3,7 @@
 const Client = @This();
 
 const std = @import("std");
+const User = @import("User.zig");
 
 allocator: std.mem.Allocator,
 http: std.http.Client,
@@ -54,6 +55,13 @@ pub fn get(client: *Client, path: []const u8) Error![]u8 {
         .unauthorized => return error.TokenExpired,
         else => return error.UnexpectedStatus,
     }
+}
+
+/// Returns the signed-in user, owned by the caller: free it with `User.deinit`.
+pub fn whoami(client: *Client) (Error || User.ParseError)!User {
+    const body = try client.get("/users/ME/properties");
+    defer client.allocator.free(body);
+    return User.parse(client.allocator, body);
 }
 
 fn url(client: *const Client, path: []const u8) error{OutOfMemory}![]u8 {
