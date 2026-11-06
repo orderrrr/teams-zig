@@ -22,6 +22,10 @@ Build this semi-autonomously. I'm involved at milestone boundaries, not chunk by
 - When one decision blocks you, park it, carry on with work that doesn't depend on it, and bring parked questions to the next checkpoint.
 - At the end of a milestone, run the gate, then give me one report: what was built, decisions you made, and parked questions.
 
+## Zero writes to Teams
+
+For now, nothing may write to Teams: no sending, editing, deleting, reacting, marking as read, changing presence or any other state change. Code, tests, scripts and live checks only make GET requests to read. This holds until I explicitly lift it; a plan or milestone that includes writes (such as M2) does not lift it on its own.
+
 ## Secrets
 
 Tokens, cookies and refresh tokens never go in the repo, in test fixtures, in logs or in chat. Tests use obviously fake values.
