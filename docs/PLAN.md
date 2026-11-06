@@ -126,3 +126,21 @@ Anything that writes to Teams. Search (needs a second token). Profiles and files
 **Round 6:** all three reviews found nothing new. Gate passed. M2 resolved.
 
 Live after each round (read-only, counts only): 41 of 41 1:1 chats named in 11–14 s; `chats 100` lists 94 in about 17 s; `messages 200` returns 200; `chats 0` prints usage.
+
+## M3: watch for new messages
+
+Goal: `teams-zig watch` prints new messages from all your chats as they arrive, and `chats` marks chats with unread messages. Still read-only: every request is a GET, so nothing registers an endpoint, opens a subscription or marks anything as read. The zero-writes rule in CLAUDE.md still holds.
+
+### Chunks
+
+1. **M3.1 unread state, checked live.** See whether `/users/ME/conversations` carries a read marker (most likely `properties.consumptionhorizon`, holding the last-read message id and time) and its shape: keys and format only, never content. If it isn't there, unread marks are dropped from M3 and noted here.
+2. **M3.2 unread in `chats`.** Parse the read marker and compare it with the last message's time; `chats` shows a `*` on chats with unread messages. Pure comparison with tests.
+3. **M3.3 a watchdog per request.** Today the watchdog ends the whole command after 60 seconds, which a long-running `watch` can't live with. It becomes a per-request deadline: each request that gets no answer within 60 seconds still stops the command with the network hint.
+4. **M3.4 change detection.** A pure function that compares two conversation lists and returns the chats whose last message time moved forward. Tests with canned lists: new chat, unchanged, moved, older.
+5. **M3.5 `teams-zig watch`.** Every 10 seconds, list the 50 newest conversations (one GET). For each chat that changed, read its newest page (one GET) and print the messages newer than the last one seen, with the chat's name, through `writeVisible`. Ctrl-C ends it. The first poll only records where things stand; it prints nothing old.
+6. **M3.6 limits.** At most 10 chats read per poll so a burst can't flood the service; a 429 or 5xx backs off (doubling, up to 5 minutes) instead of stopping; an expired token stops with the token-script hint.
+7. **M3.7 live check, 0.3.0 and gate.** Read-only live check (counts only), CHANGELOG, then the milestone gate.
+
+### Out of M3
+
+Sending or any other write. Push notifications through an endpoint subscription (registering one is a write). Search. Desktop notifications.
