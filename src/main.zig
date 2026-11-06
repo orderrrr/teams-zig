@@ -2,7 +2,6 @@ const std = @import("std");
 const Io = std.Io;
 const teams = @import("teams");
 const chat = teams.chat;
-const KeychainItem = teams.macos.KeychainItem;
 const writeVisible = chat.text.writeVisible;
 
 pub fn main(init: std.process.Init) !u8 {
@@ -72,6 +71,12 @@ const usage =
 /// Shared with scripts/teams-token.fish, which writes these items.
 const keychain_service = "teams-zig";
 
+/// Apple's keychain tool, which reads the items without a prompt (see `readKeychain`).
+const security_path = "/usr/bin/security";
+
+/// Far larger than any token; a bigger value means something else is stored there.
+const keychain_value_size_max = 64 * 1024;
+
 /// Test mode: set these to skip the keychain. See `usage`.
 const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
 const region_variable = "TEAMS_ZIG_REGION";
@@ -89,7 +94,13 @@ const command_seconds_max = 60;
 const timestamp_width = "2026-11-01T10:00:00.000Z".len;
 
 /// Failures reading the keychain or starting the client.
-const ConnectError = KeychainItem.Error || error{ UnknownRegion, InvalidToken };
+const ConnectError = error{
+    ItemNotFound,
+    KeychainReadFailed,
+    OutOfMemory,
+    UnknownRegion,
+    InvalidToken,
+};
 
 /// Failures running a command: the Chat Service's, or writing the output.
 const RunError = chat.Client.Error || Io.Writer.Error;
@@ -212,11 +223,10 @@ fn connect(
         }
     }
 
-    const token_item: KeychainItem = .{ .service = keychain_service, .account = "skype-token" };
-    const token = try token_item.read(gpa);
+    const token = try readKeychain(gpa, io, "skype-token");
     defer {
-        // Zeroed so our copy doesn't outlive its use. std's connection buffers and the keychain's
-        // CFData still hold copies until the process exits.
+        // Zeroed so our copy doesn't outlive its use. std's connection buffers still hold one
+        // until the process exits.
         std.crypto.secureZero(u8, token);
         gpa.free(token);
     }
@@ -224,8 +234,7 @@ fn connect(
     // An empty item means the script never stored a real token.
     if (token.len == 0) return error.ItemNotFound;
 
-    const region_item: KeychainItem = .{ .service = keychain_service, .account = "region" };
-    const region_name = region_item.read(gpa) catch |err| switch (err) {
+    const region_name = readKeychain(gpa, io, "region") catch |err| switch (err) {
         // The token is there but the region isn't: say so, not "no token".
         error.ItemNotFound => return error.UnknownRegion,
         else => |other| return other,
@@ -234,6 +243,53 @@ fn connect(
 
     try checkToken(token);
     try client.init(gpa, io, try parseRegion(region_name), token);
+}
+
+/// Reads one teams-zig keychain item through `/usr/bin/security`, which the token script also
+/// writes with. Items made by `security` trust it, so no build of teams-zig is ever prompted, as
+/// it would be reading through Security.framework itself. Owned by the caller.
+fn readKeychain(
+    gpa: std.mem.Allocator,
+    io: Io,
+    account: []const u8,
+) error{ ItemNotFound, KeychainReadFailed, OutOfMemory }![]u8 {
+    std.debug.assert(account.len > 0);
+    const result = std.process.run(gpa, io, .{
+        .exe = .detect,
+        .argv = &.{
+            security_path, "find-generic-password", "-s", keychain_service, "-a", account, "-w",
+        },
+        .stderr_limit = .limited(keychain_value_size_max),
+        .stdout_limit = .limited(keychain_value_size_max),
+        .reserve_amount = 64,
+        .cwd = .inherit,
+        .environ_map = null,
+        .expand_arg0 = .no_expand,
+        .progress_node = .none,
+        .create_no_window = true,
+        .timeout = .none,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.KeychainReadFailed,
+    };
+    gpa.free(result.stderr);
+    defer {
+        std.crypto.secureZero(u8, result.stdout);
+        gpa.free(result.stdout);
+    }
+
+    switch (result.term) {
+        .exited => |code| switch (code) {
+            0 => {},
+            // security's exit status for errSecItemNotFound.
+            44 => return error.ItemNotFound,
+            else => return error.KeychainReadFailed,
+        },
+        else => return error.KeychainReadFailed,
+    }
+    // security ends the value with a newline.
+    const value = std.mem.trimEnd(u8, result.stdout, "\n");
+    return gpa.dupe(u8, value);
 }
 
 /// The token goes into a request header, where a line break would end the header early.
@@ -277,10 +333,7 @@ fn reportError(
         error.InvalidToken => "the token contains a line break; " ++ rerun_script,
         error.UnknownRegion => "the region is missing or unknown; " ++ rerun_script ++
             " (in test mode, set " ++ region_variable ++ ")",
-        error.UserCanceled => "keychain access was cancelled",
-        error.AuthFailed => "the keychain refused access; check its teams-zig items",
-        error.InteractionNotAllowed => "the keychain is locked; unlock it and try again",
-        error.Unexpected => "the keychain returned an unexpected status",
+        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++ security_path,
         error.OutOfMemory => "out of memory",
         error.TokenExpired => "the skype token has expired; " ++ rerun_script,
         error.NotFound => "no conversation with that id, or it isn't yours",

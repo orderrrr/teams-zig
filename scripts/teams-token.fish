@@ -58,8 +58,8 @@ or begin
     exit 1
 end
 
-# -A opens the items' access list, but macOS's partition list still prompts each new teams-zig
-# build; test mode (TEAMS_ZIG_SKYPE_TOKEN) avoids that. See docs/PLAN.md M1.7.
+# -A opens the items' access list. macOS's partition list still trusts only security itself, which
+# is why teams-zig reads them back through /usr/bin/security too. See docs/PLAN.md M1.7.
 security add-generic-password -U -A -s $service -a skype-token -w $skype_token
 and security add-generic-password -U -A -s $service -a region -w $region
 or begin
