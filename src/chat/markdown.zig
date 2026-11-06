@@ -84,6 +84,12 @@ const Output = struct {
     list_depth: u8 = 0,
     /// The next line starts a list item, so it gets the item's marker.
     item_starting: bool = false,
+    /// Inside `<pre>`: text is written as it is, line by line, inside a fence.
+    in_code_block: bool = false,
+    /// The code block's current line holds nothing yet.
+    code_line_empty: bool = false,
+    /// No text yet in the code block, so a newline right after `<pre>` is dropped, as in HTML.
+    code_block_empty: bool = false,
 
     const List = struct {
         ordered: bool,
@@ -103,6 +109,7 @@ const Output = struct {
     /// HTML text: runs of whitespace collapse to one space, and `\r` goes with them.
     fn text(output: *Output, run: []const u8) std.Io.Writer.Error!void {
         std.debug.assert(run.len > 0);
+        if (output.in_code_block) return output.codeText(run);
         if (std.mem.indexOfScalar(u8, html_whitespace, run[0]) != null) output.space_pending = true;
         var words = std.mem.tokenizeAny(u8, run, html_whitespace);
         while (words.next()) |word| {
@@ -116,6 +123,12 @@ const Output = struct {
 
     /// A decoded entity. `&nbsp;` counts as whitespace; the rest are text.
     fn entity(output: *Output, replacement: []const u8) std.Io.Writer.Error!void {
+        if (output.in_code_block) {
+            try output.writer.writeAll(replacement);
+            output.code_line_empty = false;
+            output.code_block_empty = false;
+            return;
+        }
         if (std.mem.eql(u8, replacement, " ")) {
             output.space_pending = true;
             return;
@@ -131,6 +144,16 @@ const Output = struct {
     }
 
     fn tag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+        if (output.in_code_block) {
+            // Inside a code block only its end and line breaks count; markup is dropped.
+            if (html_tag.is("pre") and html_tag.closing) return output.closeCodeBlock();
+            if (html_tag.is("br")) return output.codeNewline();
+            return;
+        }
+        if (html_tag.is("pre")) {
+            if (html_tag.closing) return;
+            return output.openCodeBlock();
+        }
         if (markOf(html_tag)) |mark| {
             if (html_tag.closing) return output.closeMark(mark);
             if (mark == .link) output.link_href = html_tag.attribute("href") orelse "";
@@ -214,6 +237,54 @@ const Output = struct {
         output.quote_depth +|= 1;
     }
 
+    /// A code block starts on its own line with a fence; its text follows on the next.
+    fn openCodeBlock(output: *Output) std.Io.Writer.Error!void {
+        try output.endLine();
+        try output.flush();
+        try output.writer.writeAll("```\n");
+        try output.writeLinePrefix(false);
+        output.in_code_block = true;
+        output.code_line_empty = true;
+        output.code_block_empty = true;
+    }
+
+    fn closeCodeBlock(output: *Output) std.Io.Writer.Error!void {
+        if (!output.code_line_empty) {
+            try output.writer.writeByte('\n');
+            try output.writeLinePrefix(false);
+        }
+        try output.writer.writeAll("```");
+        output.in_code_block = false;
+        output.line_has_text = true;
+        try output.endLine();
+    }
+
+    /// Code keeps its spaces and line breaks. `\r` is dropped, splitting the text there.
+    fn codeText(output: *Output, run: []const u8) std.Io.Writer.Error!void {
+        var rest = run;
+        while (rest.len > 0) {
+            const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
+            if (end > 0) {
+                try writeVisible(output.writer, rest[0..end]);
+                output.code_line_empty = false;
+                output.code_block_empty = false;
+            }
+            if (end == rest.len) return;
+            if (rest[end] == '\n') try output.codeNewline();
+            rest = rest[end + 1 ..];
+        }
+    }
+
+    fn codeNewline(output: *Output) std.Io.Writer.Error!void {
+        if (output.code_block_empty) {
+            output.code_block_empty = false;
+            return;
+        }
+        try output.writer.writeByte('\n');
+        try output.writeLinePrefix(false);
+        output.code_line_empty = true;
+    }
+
     /// Lists start on their own line; the outermost ends with a blank line, since Markdown
     /// would otherwise carry its last item on into the next line.
     fn listTag(output: *Output, closing: bool, ordered: bool) std.Io.Writer.Error!void {
@@ -261,8 +332,9 @@ const Output = struct {
         try output.writer.writeAll("- ");
     }
 
-    /// Closes the marks the HTML left open, newest first.
+    /// Closes what the HTML left open: a code block, then marks, newest first.
     fn finish(output: *Output) std.Io.Writer.Error!void {
+        if (output.in_code_block) try output.closeCodeBlock();
         while (output.marks_open_count > 0) {
             const mark = output.marks_open[output.marks_open_count - 1];
             try output.closeMark(mark);
@@ -459,4 +531,26 @@ test "writeHtml shows lists deeper than its limit at the limit, and survives str
     try std.testing.expect(std.mem.endsWith(u8, out.written(), "- fake"));
 
     try expectMarkdown("</ul><li>fake</li></ol>", "fake");
+}
+
+test "writeHtml fences code blocks and keeps their spacing" {
+    try expectMarkdown("<p>fake</p><pre><code>if (x) {\n    y();\n}</code></pre><p>after</p>",
+        \\fake
+        \\```
+        \\if (x) {
+        \\    y();
+        \\}
+        \\```
+        \\after
+    );
+    try expectMarkdown("<pre>\none<br>  <b>two</b>\n</pre>", "```\none\n  two\n```");
+}
+
+test "writeHtml quotes a code block inside a quote" {
+    try expectMarkdown("<blockquote><pre>a\r\nb</pre></blockquote>", "> ```\n> a\n> b\n> ```");
+}
+
+test "writeHtml keeps control bytes escaped in code blocks and closes an unclosed one" {
+    try expectMarkdown("<pre>\xc2\r\x9b[2J\x1b</pre>", "```\n\\xc2\x9b[2J\\x1b\n```");
+    try expectMarkdown("<pre>fake", "```\nfake\n```");
 }
