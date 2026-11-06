@@ -87,6 +87,9 @@ const region_variable = "TEAMS_ZIG_REGION";
 const conversation_count_max = 50;
 const message_count_max = 50;
 
+/// How far back `chats` looks for the other person's name in a 1:1 chat where you spoke last.
+const recent_message_count = 20;
+
 /// Set once the Chat Service has answered. Static, so the detached watchdog can't outlive it.
 var chat_service_answered: std.atomic.Value(bool) = .init(false);
 
@@ -150,17 +153,29 @@ const Command = union(enum) {
                 try stdout.writeAll(">\n");
             },
             .chats => {
+                const user = try client.whoami();
+                defer user.deinit();
+
                 const list = try client.conversations(conversation_count_max);
                 defer list.deinit();
 
+                // Holds the names fetched for 1:1 chats; freed with the command.
+                var names_arena: std.heap.ArenaAllocator = .init(client.gpa);
+                defer names_arena.deinit();
+
+                const names = try names_arena.allocator().alloc(?[]const u8, list.items.len);
+                for (list.items, names) |*conversation, *name| {
+                    const arena = names_arena.allocator();
+                    name.* = try otherPersonName(client, arena, conversation, user.mri);
+                }
                 requests_done.store(true, .release);
 
-                for (list.items) |conversation| {
+                for (list.items, names) |conversation, name| {
                     const last_message_at = conversation.last_message_at orelse "-";
                     try writeVisible(stdout, last_message_at);
                     try stdout.splatByteAll(' ', timestamp_width -| last_message_at.len);
                     try stdout.print("  {t:<7}  ", .{conversation.kind});
-                    try writeVisible(stdout, conversation.topic orelse "(no topic)");
+                    try writeVisible(stdout, conversation.topic orelse name orelse "(no topic)");
                     try stdout.writeAll("  ");
                     try writeVisible(stdout, conversation.id);
                     try stdout.writeByte('\n');
@@ -298,6 +313,39 @@ fn checkToken(token: []const u8) error{InvalidToken}!void {
 
 fn parseRegion(region_name: []const u8) error{UnknownRegion}!chat.Client.Region {
     return std.meta.stringToEnum(chat.Client.Region, region_name) orelse error.UnknownRegion;
+}
+
+/// The other person in a 1:1 chat: the last sender when that isn't you, which costs nothing, and
+/// otherwise the newest sender in its recent messages who isn't you. Null for chats that aren't
+/// 1:1, and when the other person hasn't written recently.
+fn otherPersonName(
+    client: *chat.Client,
+    arena: std.mem.Allocator,
+    conversation: *const chat.Conversation,
+    self_mri: []const u8,
+) RunError!?[]const u8 {
+    if (!conversation.isOneToOne()) return null;
+    if (conversation.topic != null) return null;
+
+    const last_sender = conversation.last_sender orelse "";
+    if (!std.mem.eql(u8, last_sender, self_mri)) {
+        if (conversation.last_sender_name) |name| return name;
+    }
+
+    const recent = client.messages(conversation.id, recent_message_count) catch |err| switch (err) {
+        // One chat that can't be read shouldn't hide the rest of the list.
+        error.NotFound => return null,
+        else => |other| return other,
+    };
+    defer recent.deinit();
+
+    for (recent.items) |*message| {
+        const sender = message.sender orelse continue;
+        if (std.mem.eql(u8, sender, self_mri)) continue;
+        const name = message.sender_name orelse continue;
+        return try arena.dupe(u8, name);
+    }
+    return null;
 }
 
 fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {

@@ -94,8 +94,8 @@ Goal: `chats` names the other person in 1:1 chats, `chats` and `messages` can go
 1. **M2.1 M1 polish.** Why `security`'s "not found" exit status is 44; "no access prompt" wording; reflow the watchdog comment; drop `security.Status.duplicate_item`.
 2. **M2.2 who am I, as an MRI.** Find the signed-in user's MRI (`8:orgid:<uuid>`) from a read we already make, most likely `skypeName` in `/users/ME/properties`; check its shape live (keys and format only) before relying on it.
 3. **M2.3 last sender per conversation.** Parse the `lastMessage` sender MRI and display name that `/users/ME/conversations` already returns, at no extra request.
-4. **M2.4 members.** `Client.members(conversation_id)`: `GET /threads/{id}/members`, parsing each member's MRI and display name, with the same link and output safety as other requests.
-5. **M2.5 1:1 names in `chats`.** For a 1:1 chat, show the other person: the last sender's name when that isn't you (free), otherwise one members call for that chat. That bounds the extra requests to chats where you spoke last, instead of one per chat. Names still go through `writeVisible`.
+4. **M2.4 members (dropped).** A live check showed `/threads/{id}/members` gives no display names in 1:1 chats (`userDisplayName` is null), so it can't name anyone.
+5. **M2.5 1:1 names in `chats`.** For a 1:1 chat, show the other person: the last sender's name when that isn't you (free), otherwise the newest sender who isn't you among that chat's 20 most recent messages (one GET). Live: all 41 chats named in 13 s. Names still go through `writeVisible`.
 6. **M2.6 counts.** `teams-zig chats [count]` and `teams-zig messages <id> [count]`: optional, bounded counts (conversations follow `backwardLink` pages the way messages already do). Defaults stay 50.
 7. **M2.7 live check and gate.** Read-only checks in normal and test mode, then the milestone gate.
 

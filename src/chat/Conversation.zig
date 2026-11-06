@@ -45,6 +45,11 @@ const Response = struct {
     };
 };
 
+/// 1:1 chats have ids of the form `19:<uuid>_<uuid>@unq.gbl.spaces`; group chats don't.
+pub fn isOneToOne(conversation: *const Conversation) bool {
+    return std.mem.endsWith(u8, conversation.id, "@unq.gbl.spaces");
+}
+
 /// Parses a conversations response, leaving out system streams (notifications, mentions, ...).
 /// The result is owned by the caller: free it with `List.deinit`.
 pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List {
@@ -134,4 +139,19 @@ test "parseList keeps a conversation without a thread type as other" {
 test "parseList fails on a conversation without an id" {
     const body = "{\"conversations\":[{\"threadProperties\":{\"threadType\":\"chat\"}}]}";
     try std.testing.expectError(error.MissingField, parseList(std.testing.allocator, body));
+}
+
+test "isOneToOne tells 1:1 chats from group chats" {
+    var conversation: Conversation = .{
+        .id = "19:fake-a_fake-b@unq.gbl.spaces",
+        .kind = .chat,
+        .topic = null,
+        .last_message_at = null,
+        .last_sender = null,
+        .last_sender_name = null,
+    };
+    try std.testing.expect(conversation.isOneToOne());
+
+    conversation.id = "19:fake-group@thread.v2";
+    try std.testing.expect(!conversation.isOneToOne());
 }
