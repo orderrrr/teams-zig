@@ -64,6 +64,8 @@ const usage =
     \\commands:
     \\  whoami                       show the signed-in user
     \\  chats [count]                list your chats (default 50, at most 100); * is unread
+    \\  unread                       show what's new since you last read, in up to 10 of your
+    \\                               50 newest chats
     \\  watch                        print new messages from your 50 newest chats as they
     \\                               arrive; Ctrl-C stops
     \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
@@ -112,6 +114,7 @@ comptime {
     // Backing off never polls faster than normal, and a poll's reads fit the watchdog's limit.
     std.debug.assert(watch_poll_seconds <= watch_backoff_seconds_max);
     std.debug.assert(watch_read_count_limit < requests_seconds_max);
+    std.debug.assert(unread_read_count_limit < requests_seconds_max);
     // Each poll's chats fit in Seen without folding.
     std.debug.assert(conversation_count_default <= Seen.chat_count_limit);
     std.debug.assert(conversation_count_default <= conversation_count_limit);
@@ -132,6 +135,10 @@ const watch_poll_seconds = 10;
 
 /// At most this many changed chats are read per `watch` poll, so a burst can't flood the service.
 const watch_read_count_limit = 10;
+
+/// At most this many unread chats are read by `unread`, keeping its requests inside the
+/// watchdog's limit.
+const unread_read_count_limit = 10;
 
 /// The longest `watch` waits after throttling or a failure before trying again.
 const watch_backoff_seconds_max = 300;
@@ -187,6 +194,7 @@ const CommandError = ConnectError || RunError;
 const Command = union(enum) {
     whoami,
     watch,
+    unread,
     /// How many conversations to list.
     chats: u16,
     messages: Messages,
@@ -231,6 +239,10 @@ const Command = union(enum) {
             if (rest.len != 0) return null;
             return .watch;
         }
+        if (std.mem.eql(u8, name, "unread")) {
+            if (rest.len != 0) return null;
+            return .unread;
+        }
         if (std.mem.eql(u8, name, "chats")) {
             if (rest.len > 1) return null;
             if (rest.len == 0) return .{ .chats = conversation_count_default };
@@ -263,6 +275,7 @@ const Command = union(enum) {
     ) RunError!void {
         switch (command.*) {
             .watch => try watch(client, io, clock, stdout, stderr, started_at),
+            .unread => try printUnread(client, clock, stdout, started_at),
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
@@ -562,20 +575,33 @@ fn printNewMessages(
     };
     defer recent.deinit();
 
-    const known_name = switch (nameSource(conversation, self_mri)) {
-        .known => |known| known,
-        .none, .lookup => otherWriterName(recent.items, self_mri),
-    };
-    const name = chatName(conversation, known_name) orelse "(no topic)";
     // One page: in a chat that gets more than `message_count_recent` messages between polls,
     // the oldest of them aren't shown.
     const mark = seen.mark(conversation.id);
+    try printMessagesAfter(stdout, clock, conversation, self_mri, recent.items, mark);
+    try seen.record(conversation.id, last_message_id);
+}
 
-    // The service returns newest first; print oldest first, like a chat window.
-    var index = recent.items.len;
+/// Prints the text messages in `recent` (newest first, as the service returns them) whose id is
+/// past `mark`, oldest first, each after its chat's name: `[name] time  sender: body`.
+fn printMessagesAfter(
+    stdout: *Io.Writer,
+    clock: *const Clock,
+    conversation: *const chat.Conversation,
+    self_mri: []const u8,
+    recent: []const chat.Message,
+    mark: u64,
+) Io.Writer.Error!void {
+    const known_name = switch (nameSource(conversation, self_mri)) {
+        .known => |known| known,
+        .none, .lookup => otherWriterName(recent, self_mri),
+    };
+    const name = chatName(conversation, known_name) orelse "(no topic)";
+
+    var index = recent.len;
     while (index > 0) {
         index -= 1;
-        const message = &recent.items[index];
+        const message = &recent[index];
         if (!message.isText()) continue;
         const message_id = std.fmt.parseInt(u64, message.id, 10) catch continue;
         if (message_id <= mark) continue;
@@ -585,7 +611,58 @@ fn printNewMessages(
         try stdout.writeAll("] ");
         try printMessage(stdout, clock, message);
     }
-    try seen.record(conversation.id, last_message_id);
+}
+
+/// One unread chat and its newest page of messages, read before anything is printed.
+const UnreadChat = struct {
+    conversation: *const chat.Conversation,
+    recent: chat.Message.List,
+};
+
+/// Prints what's new since your read marker in up to `unread_read_count_limit` unread chats
+/// among your newest, the same way `watch` does. A chat that can't be read is counted with the
+/// ones not shown. Every request finishes before the first line is written.
+fn printUnread(
+    client: *chat.Client,
+    clock: *const Clock,
+    stdout: *Io.Writer,
+    started_at: *std.atomic.Value(i64),
+) RunError!void {
+    const user = try client.whoami();
+    defer user.deinit();
+
+    const list = try client.conversations(conversation_count_default);
+    defer list.deinit();
+
+    var reads_buffer: [unread_read_count_limit]UnreadChat = undefined;
+    var reads_count: u32 = 0;
+    defer for (reads_buffer[0..reads_count]) |*read| read.recent.deinit();
+
+    var unread_count: u32 = 0;
+    for (list.items) |*conversation| {
+        if (!conversation.isUnread(user.mri)) continue;
+        unread_count += 1;
+        if (reads_count == unread_read_count_limit) continue;
+
+        const recent = client.recentMessages(conversation.id, message_count_recent) catch |err| {
+            if (lookupErrorSkips(err, client.response_status)) continue;
+            return err;
+        };
+        reads_buffer[reads_count] = .{ .conversation = conversation, .recent = recent };
+        reads_count += 1;
+    }
+    started_at.store(requests_idle, .release);
+
+    if (unread_count == 0) return stdout.writeAll("No unread messages.\n");
+    for (reads_buffer[0..reads_count]) |*read| {
+        // isUnread holds only with a read marker.
+        const mark = read.conversation.read_up_to_id.?;
+        const items = read.recent.items;
+        try printMessagesAfter(stdout, clock, read.conversation, user.mri, items, mark);
+    }
+    if (unread_count > reads_count) {
+        try stdout.print("{d} more unread chats not shown.\n", .{unread_count - reads_count});
+    }
 }
 
 /// Whether `watch` should wait and try again after `err` rather than stop: throttling, server
@@ -866,8 +943,9 @@ test {
     _ = short_time;
 }
 
-test "Command.parse accepts the three commands and rejects anything else" {
+test "Command.parse accepts the commands and rejects anything else" {
     try std.testing.expectEqual(Command.whoami, Command.parse(&.{ "teams-zig", "whoami" }).?);
+    try std.testing.expectEqual(Command.unread, Command.parse(&.{ "teams-zig", "unread" }).?);
 
     const chats = Command.parse(&.{ "teams-zig", "chats" }).?;
     try std.testing.expectEqual(conversation_count_default, chats.chats);
@@ -890,6 +968,7 @@ test "Command.parse accepts the three commands and rejects anything else" {
 
     try std.testing.expectEqual(null, Command.parse(&.{"teams-zig"}));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "whoami", "x" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "unread", "5" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "chats", "0" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "chats", "101" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "chats", "ten" }));
