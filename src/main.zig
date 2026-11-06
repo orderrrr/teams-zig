@@ -17,18 +17,19 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     };
 
-    // Without a watchdog a stalled connect would hang forever; if the thread can't start, the
-    // command still runs, just unbounded.
-    if (std.Thread.spawn(.{}, watchdog, .{init.io})) |watchdog_thread| {
-        watchdog_thread.detach();
-    } else |_| {}
-
     var client: chat.Client = undefined;
     // No request has been made yet, so there is no response status to report.
     connect(&client, init.gpa, init.io, init.environ_map) catch |err| {
         return reportError(stderr, err, null);
     };
     defer client.deinit();
+
+    // Started after connect so a keychain prompt can take as long as it needs. Without a watchdog
+    // a stalled request would hang forever; if the thread can't start, the command still runs,
+    // just unbounded.
+    if (std.Thread.spawn(.{}, watchdog, .{init.io})) |watchdog_thread| {
+        watchdog_thread.detach();
+    } else |_| {}
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);

@@ -9,6 +9,7 @@ One entry per milestone. The version lives in `build.zig.zon`.
 - `src/macos/`: hand-written CoreFoundation and Security bindings and a keychain wrapper, the start of a Zig-friendly macOS API.
 - Test mode: set `TEAMS_ZIG_SKYPE_TOKEN` and `TEAMS_ZIG_REGION` to skip the keychain. Less secure, since child processes can read the environment.
 - Read-only: nothing writes to Teams.
+- A command that gets no answer from the Chat Service within 60 seconds stops with a network hint, rather than hanging (Zig 0.17's HTTP client has no working timeout).
 
 Known issue: each new build of teams-zig gets a keychain "allow access?" prompt, because macOS's partition list trusts builds one at a time. Use test mode to avoid it.
 
