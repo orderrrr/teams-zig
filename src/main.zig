@@ -202,7 +202,7 @@ fn reportError(
     const rerun_script = "run scripts/teams-token.fish";
     const hint = switch (err) {
         error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
-        error.UnknownRegion => "the stored region isn't amer, emea or apac; " ++ rerun_script,
+        error.UnknownRegion => "the region (from TEAMS_ZIG_REGION or the keychain) isn't known",
         error.UserCanceled => "keychain access was cancelled",
         error.AuthFailed => "the keychain refused access; check its teams-zig items",
         error.InteractionNotAllowed => "the keychain is locked; unlock it and try again",

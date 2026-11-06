@@ -58,7 +58,8 @@ or begin
     exit 1
 end
 
-# -A lets teams-zig read the items without a prompt after every rebuild; see docs/PLAN.md M1.7.
+# -A opens the items' access list, but macOS's partition list still prompts each new teams-zig
+# build; test mode (TEAMS_ZIG_SKYPE_TOKEN) avoids that. See docs/PLAN.md M1.7.
 security add-generic-password -U -A -s $service -a skype-token -w $skype_token
 and security add-generic-password -U -A -s $service -a region -w $region
 or begin
