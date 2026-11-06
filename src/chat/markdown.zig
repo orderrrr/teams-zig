@@ -165,7 +165,8 @@ const Output = struct {
         if (html_tag.is("img")) return output.image(html_tag);
         if (headingLevel(html_tag)) |level| {
             try output.endLine();
-            if (!html_tag.closing) output.heading_starting = level;
+            // Closing clears it, so an empty heading marks nothing after it.
+            output.heading_starting = if (html_tag.closing) 0 else level;
             return;
         }
         if (html_tag.is("blockquote")) return output.quoteTag(html_tag.closing);
@@ -313,6 +314,8 @@ const Output = struct {
     /// would otherwise carry its last item on into the next line.
     fn listTag(output: *Output, closing: bool, ordered: bool) std.Io.Writer.Error!void {
         try output.endLine();
+        // An item that held nothing leaves no marker for the line after its list.
+        output.item_starting = false;
         if (closing) {
             if (output.list_depth == 0) return;
             output.list_depth -= 1;
@@ -612,4 +615,9 @@ test "writeHtml writes an emoji as its alt text and other images as [image]" {
     const pasted = "<p>see<img itemtype=\"http://schema.skype.com/AMSImage\" src=\"x\"></p>";
     try expectMarkdown(pasted, "see[image]");
     try expectMarkdown("<img itemtype=\"x/Emoji\" alt=\"\x1b[2J\">", "\\x1b[2J");
+}
+
+test "writeHtml forgets an empty heading or list item" {
+    try expectMarkdown("<h2></h2><p>fake</p>", "fake");
+    try expectMarkdown("<ul><li>a<ul><li></li></ul>b</li></ul>", "- a\n  b");
 }
