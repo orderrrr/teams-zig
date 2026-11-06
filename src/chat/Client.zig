@@ -48,14 +48,14 @@ pub const Error = error{
 const body_size_max = 8 * 1024 * 1024;
 
 /// Keeps each response bounded; larger counts take more pages.
-const page_size_max = 200;
+const page_item_count_max = 200;
 
 /// Bounds how many pages `messages` follows. The service can send empty pages that still link to
 /// older ones, so the page count isn't tied to the message count.
 const page_count_max = 64;
 
 comptime {
-    std.debug.assert(page_size_max > 0);
+    std.debug.assert(page_item_count_max > 0);
     std.debug.assert(page_count_max > 0);
     std.debug.assert(body_size_max >= std.json.default_max_value_len);
 }
@@ -74,7 +74,18 @@ pub fn init(
 
     client.* = .{
         .gpa = gpa,
-        .http = .{ .allocator = gpa, .io = io },
+        // Configuration spelled out; the connection pool and CA bundle are state, left to std.
+        // No TLS key log: it would let anyone reading it decrypt the token.
+        .http = .{
+            .allocator = gpa,
+            .io = io,
+            .tls_buffer_size = std.crypto.tls.Client.min_buffer_len,
+            .ssl_key_log = null,
+            .read_buffer_size = 8192,
+            .write_buffer_size = 1024,
+            .http_proxy = null,
+            .https_proxy = null,
+        },
         .region = region,
         .authentication = authentication,
         .body_buffer = try gpa.alloc(u8, body_size_max),
@@ -109,6 +120,8 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
 
     var body: std.Io.Writer = .fixed(client.body_buffer);
+    // Redirects are refused, but std reads the head into this buffer and would heap-allocate one
+    // if it were null; RFC 9110 recommends room for at least 8000 bytes.
     var redirect_buffer: [8 * 1024]u8 = undefined;
     const result = client.http.fetch(.{
         .location = .{ .url = url },
@@ -159,15 +172,15 @@ pub fn whoami(client: *Client) (Error || json.ParseError)!User {
 
 /// Returns your most recent conversations, newest first, without system streams.
 /// The result is owned by the caller: free it with `List.deinit`.
-pub fn chats(client: *Client, page_size: u16) (Error || json.ParseError)!Conversation.List {
-    std.debug.assert(page_size > 0);
-    std.debug.assert(page_size <= page_size_max);
+pub fn chats(client: *Client, page_item_count: u16) (Error || json.ParseError)!Conversation.List {
+    std.debug.assert(page_item_count > 0);
+    std.debug.assert(page_item_count <= page_item_count_max);
 
     const path_prefix = "/users/ME/conversations?view=mychats&pageSize=";
     // A u16 has at most 5 decimal digits, so the formatted path always fits.
     comptime std.debug.assert(std.math.maxInt(u16) < 100_000);
     var path_buffer: [path_prefix.len + 5]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buffer, path_prefix ++ "{d}", .{page_size}) catch
+    const path = std.fmt.bufPrint(&path_buffer, path_prefix ++ "{d}", .{page_item_count}) catch
         unreachable;
 
     const body = try client.get(path);
@@ -184,12 +197,12 @@ pub fn messages(
 ) (Error || json.ParseError)!Message.List {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(message_count_max > 0);
-    const page_size = @min(message_count_max, page_size_max);
+    const page_item_count = @min(message_count_max, page_item_count_max);
 
     var list: Message.List = try .init(client.gpa);
     errdefer list.deinit();
 
-    const url_first = try client.messagesUrl(conversation_id, page_size);
+    const url_first = try client.messagesUrl(conversation_id, page_item_count);
     defer client.gpa.free(url_first);
 
     list.items = try collectMessages(list.arena.allocator(), client, url_first, message_count_max);
@@ -230,21 +243,22 @@ fn collectMessages(
 fn messagesUrl(
     client: *const Client,
     conversation_id: []const u8,
-    page_size: u32,
+    page_item_count: u32,
 ) error{OutOfMemory}![]u8 {
     std.debug.assert(conversation_id.len > 0);
-    std.debug.assert(page_size > 0);
-    std.debug.assert(page_size <= page_size_max);
+    std.debug.assert(page_item_count > 0);
+    std.debug.assert(page_item_count <= page_item_count_max);
 
     var url: std.Io.Writer.Allocating = .init(client.gpa);
     errdefer url.deinit();
 
     const writer = &url.writer;
     const base = client.region.baseUrl();
+    // An Allocating writer fails only when it can't grow, so every writer error here is OOM.
     writer.print("{s}/users/ME/conversations/", .{base}) catch return error.OutOfMemory;
     std.Uri.Component.percentEncode(writer, conversation_id, isUnreserved) catch
         return error.OutOfMemory;
-    writer.print("/messages?view=superchat&pageSize={d}", .{page_size}) catch
+    writer.print("/messages?view=superchat&pageSize={d}", .{page_item_count}) catch
         return error.OutOfMemory;
 
     const result = try url.toOwnedSlice();

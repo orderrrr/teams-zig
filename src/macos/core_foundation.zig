@@ -40,7 +40,12 @@ pub const Data = opaque {
     pub fn bytes(data: *const Data) []const u8 {
         const length = CFDataGetLength(data);
         std.debug.assert(length >= 0);
-        return CFDataGetBytePtr(data)[0..@intCast(length)];
+        if (length == 0) return &.{};
+
+        // Apple only promises a non-null pointer when there are bytes to point at.
+        const pointer = CFDataGetBytePtr(data);
+        std.debug.assert(pointer != null);
+        return pointer.?[0..@intCast(length)];
     }
 };
 
@@ -55,6 +60,7 @@ pub const Dictionary = opaque {
     /// Keys and values must be CoreFoundation objects; the dictionary retains them.
     pub fn create(entries: Entries) error{OutOfMemory}!*const Dictionary {
         std.debug.assert(entries.keys.len > 0);
+        std.debug.assert(entries.keys.len <= std.math.maxInt(Index));
         std.debug.assert(entries.keys.len == entries.values.len);
         return CFDictionaryCreate(
             null, // the default allocator
@@ -104,7 +110,7 @@ extern fn CFDataCreate(
     bytes: [*]const u8,
     length: Index,
 ) ?*const Data;
-extern fn CFDataGetBytePtr(data: *const Data) [*]const u8;
+extern fn CFDataGetBytePtr(data: *const Data) ?[*]const u8;
 extern fn CFDataGetLength(data: *const Data) Index;
 extern fn CFDictionaryCreate(
     allocator: ?*const Allocator,
@@ -134,4 +140,11 @@ test "dictionary holds string keys and data values" {
         .values = &.{value},
     });
     release(dictionary);
+}
+
+test "empty data has no bytes" {
+    const data = try Data.create("");
+    defer release(data);
+
+    try std.testing.expectEqual(0, data.bytes().len);
 }

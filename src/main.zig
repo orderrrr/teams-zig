@@ -26,8 +26,11 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_file_writer.interface;
 
     command.run(&client, stdout) catch |err| {
-        try stdout.flush();
-        return reportError(stderr, err, client.response_status);
+        const exit_code = try reportError(stderr, err, client.response_status);
+        // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
+        // would only hide that.
+        stdout.flush() catch {};
+        return exit_code;
     };
     try stdout.flush();
     return 0;

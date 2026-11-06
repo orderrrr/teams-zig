@@ -20,6 +20,34 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// The item's names as CoreFoundation strings, which every SecItem query needs.
+const Names = struct {
+    service: *const core_foundation.String,
+    account: *const core_foundation.String,
+
+    fn init(item: *const KeychainItem) error{OutOfMemory}!Names {
+        std.debug.assert(item.service.len > 0);
+        std.debug.assert(item.account.len > 0);
+
+        const service = try core_foundation.String.create(item.service);
+        errdefer core_foundation.release(service);
+
+        return .{ .service = service, .account = try core_foundation.String.create(item.account) };
+    }
+
+    fn deinit(names: *const Names) void {
+        core_foundation.release(names.service);
+        core_foundation.release(names.account);
+    }
+
+    fn query(names: *const Names) error{OutOfMemory}!*const core_foundation.Dictionary {
+        return core_foundation.Dictionary.create(.{
+            .keys = &.{ security.kSecClass, security.kSecAttrService, security.kSecAttrAccount },
+            .values = &.{ security.kSecClassGenericPassword, names.service, names.account },
+        });
+    }
+};
+
 /// Returns the stored value, owned by the caller: free it with `gpa`.
 pub fn read(item: *const KeychainItem, gpa: std.mem.Allocator) Error![]u8 {
     const names = try Names.init(item);
@@ -101,34 +129,6 @@ fn delete(item: *const KeychainItem) Error!void {
     try check(security.SecItemDelete(query));
 }
 
-/// The item's names as CoreFoundation strings, which every SecItem query needs.
-const Names = struct {
-    service: *const core_foundation.String,
-    account: *const core_foundation.String,
-
-    fn init(item: *const KeychainItem) error{OutOfMemory}!Names {
-        std.debug.assert(item.service.len > 0);
-        std.debug.assert(item.account.len > 0);
-
-        const service = try core_foundation.String.create(item.service);
-        errdefer core_foundation.release(service);
-
-        return .{ .service = service, .account = try core_foundation.String.create(item.account) };
-    }
-
-    fn deinit(names: *const Names) void {
-        core_foundation.release(names.service);
-        core_foundation.release(names.account);
-    }
-
-    fn query(names: *const Names) error{OutOfMemory}!*const core_foundation.Dictionary {
-        return core_foundation.Dictionary.create(.{
-            .keys = &.{ security.kSecClass, security.kSecAttrService, security.kSecAttrAccount },
-            .values = &.{ security.kSecClassGenericPassword, names.service, names.account },
-        });
-    }
-};
-
 fn check(status: security.Status) Error!void {
     return switch (status) {
         .success => {},
@@ -152,11 +152,14 @@ test "write then read returns the value, and a second write replaces it" {
 
     const first = try test_item.read(gpa);
     defer gpa.free(first);
+
     try std.testing.expectEqualStrings("fake-value-1", first);
 
     try test_item.write("fake-value-2");
+
     const second = try test_item.read(gpa);
     defer gpa.free(second);
+
     try std.testing.expectEqualStrings("fake-value-2", second);
 }
 

@@ -46,10 +46,10 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
     for (response.conversations) |raw| {
         const thread: Response.ThreadProperties = raw.threadProperties orelse .{};
         // A conversation without a thread type isn't a system stream, so it's kept as `.other`.
-        const kind: Kind = if (thread.threadType) |thread_type|
-            kindOf(thread_type) orelse continue
-        else
-            .other;
+        var kind: Kind = .other;
+        if (thread.threadType) |thread_type| {
+            kind = kindOf(thread_type) orelse continue;
+        }
         const properties: Response.Properties = raw.properties orelse .{};
         items.appendAssumeCapacity(.{
             .id = raw.id,
