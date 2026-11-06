@@ -19,7 +19,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     var client: chat.Client = undefined;
     // No request has been made yet, so there is no response status to report.
-    connect(&client, init.gpa, init.io) catch |err| return reportError(stderr, err, null);
+    connect(&client, init.gpa, init.io, init.environ_map) catch |err| {
+        return reportError(stderr, err, null);
+    };
     defer client.deinit();
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -33,7 +35,7 @@ pub fn main(init: std.process.Init) !u8 {
         stdout.flush() catch {};
         return exit_code;
     };
-    try stdout.flush();
+    stdout.flush() catch |err| return reportError(stderr, err, null);
     return 0;
 }
 
@@ -47,10 +49,20 @@ const usage =
     \\
     \\Sign in first with scripts/teams-token.fish, which stores the token in the login keychain.
     \\
+    \\Test mode (less secure: the token is in the environment, readable by child processes):
+    \\set TEAMS_ZIG_SKYPE_TOKEN and TEAMS_ZIG_REGION to skip the keychain, for example in fish:
+    \\  set -lx TEAMS_ZIG_SKYPE_TOKEN (security find-generic-password -s teams-zig \
+    \\      -a skype-token -w)
+    \\  set -lx TEAMS_ZIG_REGION (security find-generic-password -s teams-zig -a region -w)
+    \\
 ;
 
 /// Shared with scripts/teams-token.fish, which writes these items.
 const keychain_service = "teams-zig";
+
+/// Test mode: set these to skip the keychain. See `usage`.
+const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
+const region_variable = "TEAMS_ZIG_REGION";
 
 const conversation_count_max = 50;
 const message_count_max = 50;
@@ -127,8 +139,22 @@ const Command = union(enum) {
     }
 };
 
-/// Reads the token and region the token script stored, and starts a Chat Service client.
-fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) ConnectError!void {
+/// Starts a Chat Service client with the token and region from the environment (test mode) or,
+/// normally, from the login keychain where the token script stored them.
+fn connect(
+    client: *chat.Client,
+    gpa: std.mem.Allocator,
+    io: Io,
+    environment: *const std.process.Environ.Map,
+) ConnectError!void {
+    // Test mode: less secure, since any child process can read the environment, but it never
+    // touches the keychain. An empty variable counts as unset.
+    const environment_token = environment.get(token_variable) orelse "";
+    if (environment_token.len > 0) {
+        const region_name = environment.get(region_variable) orelse "";
+        return client.init(gpa, io, try parseRegion(region_name), environment_token);
+    }
+
     const token_item: KeychainItem = .{ .service = keychain_service, .account = "skype-token" };
     const token = try token_item.read(gpa);
     defer gpa.free(token);
@@ -140,9 +166,11 @@ fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) ConnectError!vo
     const region_name = try region_item.read(gpa);
     defer gpa.free(region_name);
 
-    const Region = chat.Client.Region;
-    const region = std.meta.stringToEnum(Region, region_name) orelse return error.UnknownRegion;
-    try client.init(gpa, io, region, token);
+    try client.init(gpa, io, try parseRegion(region_name), token);
+}
+
+fn parseRegion(region_name: []const u8) error{UnknownRegion}!chat.Client.Region {
+    return std.meta.stringToEnum(chat.Client.Region, region_name) orelse error.UnknownRegion;
 }
 
 fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {
