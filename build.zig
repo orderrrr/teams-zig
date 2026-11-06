@@ -24,11 +24,11 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    run_cmd.addPassthruArgs();
+    const run_command = b.addRunArtifact(exe);
+    run_command.step.dependOn(b.getInstallStep());
+    run_command.addPassthruArgs();
     const run_step = b.step("run", "Run teams-zig");
-    run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(&run_command.step);
 
     const run_teams_tests = b.addRunArtifact(b.addTest(.{ .root_module = teams }));
     const run_exe_tests = b.addRunArtifact(b.addTest(.{ .root_module = exe.root_module }));

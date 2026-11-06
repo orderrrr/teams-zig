@@ -3,45 +3,48 @@
 const User = @This();
 
 const std = @import("std");
+const json = @import("json.zig");
 
+gpa: std.mem.Allocator,
 name: []const u8,
 upn: []const u8,
 
-pub const ParseError = std.json.ParseError(std.json.Scanner);
-
 /// `properties` is the response body. Its `userDetails` field is itself a JSON string.
-pub fn parse(allocator: std.mem.Allocator, properties: []const u8) ParseError!User {
-    const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
-    const outer = try std.json.parseFromSlice(struct { userDetails: []const u8 }, allocator, properties, options);
+/// The result is owned by the caller: free it with `deinit`.
+pub fn parse(gpa: std.mem.Allocator, properties: []const u8) json.ParseError!User {
+    const Properties = struct { userDetails: []const u8 };
+    const outer = try std.json.parseFromSlice(Properties, gpa, properties, json.parse_options);
     defer outer.deinit();
-    const details = try std.json.parseFromSlice(
-        struct { name: []const u8, upn: []const u8 },
-        allocator,
-        outer.value.userDetails,
-        options,
-    );
+
+    const Details = struct { name: []const u8, upn: []const u8 };
+    const user_details = outer.value.userDetails;
+    const details = try std.json.parseFromSlice(Details, gpa, user_details, json.parse_options);
     defer details.deinit();
 
-    const name = try allocator.dupe(u8, details.value.name);
-    errdefer allocator.free(name);
-    return .{ .name = name, .upn = try allocator.dupe(u8, details.value.upn) };
+    const name = try gpa.dupe(u8, details.value.name);
+    errdefer gpa.free(name);
+
+    return .{ .gpa = gpa, .name = name, .upn = try gpa.dupe(u8, details.value.upn) };
 }
 
-pub fn deinit(user: User, allocator: std.mem.Allocator) void {
-    allocator.free(user.name);
-    allocator.free(user.upn);
+pub fn deinit(user: *const User) void {
+    user.gpa.free(user.name);
+    user.gpa.free(user.upn);
 }
 
 test "parse reads name and upn out of the nested userDetails string" {
     const properties =
-        \\{"locale":"en-gb","userDetails":"{\"name\":\"Fake Person\",\"upn\":\"fake@example.com\"}"}
+        \\{"locale":"en-gb",
+        \\ "userDetails":"{\"name\":\"Fake Person\",\"upn\":\"fake@example.com\"}"}
     ;
     const user = try parse(std.testing.allocator, properties);
-    defer user.deinit(std.testing.allocator);
+    defer user.deinit();
+
     try std.testing.expectEqualStrings("Fake Person", user.name);
     try std.testing.expectEqualStrings("fake@example.com", user.upn);
 }
 
 test "parse fails when userDetails is missing" {
-    try std.testing.expectError(error.MissingField, parse(std.testing.allocator, "{\"locale\":\"en-gb\"}"));
+    const result = parse(std.testing.allocator, "{\"locale\":\"en-gb\"}");
+    try std.testing.expectError(error.MissingField, result);
 }
