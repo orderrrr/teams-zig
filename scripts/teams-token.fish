@@ -34,6 +34,12 @@ set -l skype_token
 set -l region
 for second in (seq 2 2 $wait_seconds)
     set -l requests (agent-browser network requests --json | string collect)
+    or begin
+        # Usually the browser window was closed; polling again would only repeat the failure.
+        echo "teams-token: agent-browser stopped answering; was the browser window closed?" >&2
+        agent-browser close >/dev/null 2>&1
+        exit 1
+    end
     set skype_token (echo $requests | jq -r $skype_token_query)
     set region (echo $requests | jq -r $region_query)
     test -n "$skype_token" -a -n "$region"; and break
@@ -43,12 +49,12 @@ end
 agent-browser close >/dev/null
 test -n "$skype_token"
 or begin
-    echo "teams-token: no skype token seen before the timeout" >&2
+    echo "teams-token: no skype token seen in $wait_seconds seconds; did sign-in finish?" >&2
     exit 1
 end
 contains -- $region amer emea apac
 or begin
-    echo "teams-token: no known Chat Service region seen (got '$region')" >&2
+    echo "teams-token: no Chat Service region seen in $wait_seconds seconds (got '$region')" >&2
     exit 1
 end
 
