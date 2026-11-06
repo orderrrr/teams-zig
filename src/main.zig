@@ -169,9 +169,12 @@ const Command = union(enum) {
         /// Matched exactly, ignoring ASCII case, against the names `chats` shows.
         name: []const u8,
 
-        /// Ids start with a number and a colon (`19:…`, `48:notes`); names never do in practice.
+        /// Ids start with a number and a colon (`19:…`, `48:notes`) and never hold whitespace;
+        /// names can start with a time, as in "9:30 Standup", but then hold a space.
         fn parse(text: []const u8) Chat {
             std.debug.assert(text.len > 0);
+            const space = std.mem.indexOfAny(u8, text, &std.ascii.whitespace);
+            if (space != null) return .{ .name = text };
             const colon = std.mem.indexOfScalar(u8, text, ':') orelse return .{ .name = text };
             if (colon == 0) return .{ .name = text };
             for (text[0..colon]) |byte| {
@@ -523,6 +526,8 @@ fn printNewMessages(
         .none, .lookup => otherWriterName(recent.items, self_mri),
     };
     const name = chatName(conversation, known_name) orelse "(no topic)";
+    // One page: in a chat that gets more than `message_count_recent` messages between polls,
+    // the oldest of them aren't shown.
     const mark = seen.mark(conversation.id);
 
     // The service returns newest first; print oldest first, like a chat window.
@@ -843,6 +848,7 @@ test "Command.Chat.parse tells ids from names" {
     try std.testing.expectEqualStrings("Fake: standup", Command.Chat.parse("Fake: standup").name);
     try std.testing.expectEqualStrings(":fake", Command.Chat.parse(":fake").name);
     try std.testing.expectEqualStrings("2026 plans", Command.Chat.parse("2026 plans").name);
+    try std.testing.expectEqualStrings("9:30 Standup", Command.Chat.parse("9:30 Standup").name);
 }
 
 test "matchChat matches whole names ignoring case, and reports several" {
