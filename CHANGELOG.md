@@ -2,6 +2,17 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.4.0 (M4): readable messages
+
+- Messages render as Markdown: bold, italic, strikethrough, inline code, links as `[text](url)`, quoted replies and other quotes as `> `, bulleted and numbered lists, fenced code blocks and headings. An emoji shows as itself; other images show as `[image]`.
+- Line breaks come through, and the stray `\x0d` at line ends is gone.
+- Still read-only: nothing writes to Teams.
+
+Changed:
+- `messages` and `watch` print a header line per message (`time  sender`, with `[chat] ` first in `watch`), then the message on its own lines, then a blank line. Before, each message was one line, `time  sender: text`. Anything that parsed the old one-line form needs updating.
+
+Known limits: nothing is escaped, so a line someone typed starting with `#`, `>` or `- ` reads as Markdown, and a typed `` ``` `` inside a code block ends it early.
+
 ## 0.3.0 (M3): names and watch
 
 - `teams-zig messages <chat>` takes a chat's exact name as `chats` shows it (case doesn't matter; quote names with spaces), or its id as before. If several chats share the name, it lists them with their ids and reads none.
