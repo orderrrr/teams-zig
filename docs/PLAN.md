@@ -17,7 +17,7 @@ Protocol facts come from `inspo/teams-api/docs/findings.md`.
 
 The script and the client share one keychain service name, `teams-zig`, with two accounts:
 
-- `skype-token`: the `skypetoken_asm` cookie value.
+- `skype-token`: the skype token from the web client's `x-skypetoken` request header.
 - `region`: `amer`, `emea` or `apac`.
 
 ### Chunks
@@ -26,7 +26,7 @@ The script and the client share one keychain service name, `teams-zig`, with two
 2. **M1.2 CoreFoundation bindings.** `extern` declarations for the CFString, CFData, CFDictionary and CFRelease calls the keychain needs, and the framework links in `build.zig`. A test round-trips a CFString.
 3. **M1.3 Security bindings.** `extern` declarations for `SecItemCopyMatching`, `SecItemAdd`, `SecItemUpdate`, `SecItemDelete` and the `kSec*` constants they use.
 4. **M1.4 keychain wrapper.** `read(service, account)` and `write(service, account, value)` over the bindings, with OSStatus mapped to a Zig error set. Tests use a throwaway service name and fake values, and delete what they write. The rebuild prompt question is settled in M1.7.
-5. **M1.5 token script: sign-in and cookie.** agent-browser opens Teams for interactive sign-in, then reads `skypetoken_asm`. *Needs your sign-off: new outside tool, and it runs a live sign-in.*
+5. **M1.5 token script: sign-in and cookie.** agent-browser opens Teams for interactive sign-in, then reads the skype token from the `x-skypetoken` request header. A live probe found no `skypetoken_asm` cookie. *Needs your sign-off: new outside tool, and it runs a live sign-in.*
 6. **M1.6 token script: region.** Detect the region from the page's `chatsvc/{region}` or `{region}.ng.msg.teams.microsoft.com` requests. If agent-browser can't see network requests, park it and fall back to asking for the region once.
 7. **M1.7 token script: keychain write.** Store both values with `security add-generic-password -U -A` under the contract above. `-A` lets the client read them without a prompt after every rebuild. Items made by `security` are already readable by any process through `security` itself, so this barely widens exposure. A self-signed certificate with codesign is the tighter option for later.
 8. **M1.8 Chat Service request.** Build the base URL from the region, and send GET requests with the `Authentication: skypetoken=…` header using `std.http.Client`. Map 401 to a distinct "token expired, rerun the script" error.
