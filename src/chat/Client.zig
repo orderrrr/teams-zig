@@ -68,7 +68,7 @@ const page_item_count_max = 200;
 const page_count_max = 64;
 
 /// The most messages `messages` can ever collect.
-const message_count_limit = page_item_count_max * page_count_max;
+pub const message_count_limit = page_item_count_max * page_count_max;
 
 pub fn init(
     client: *Client,

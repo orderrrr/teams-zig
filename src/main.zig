@@ -54,9 +54,9 @@ const usage =
     \\usage: teams-zig <command>
     \\
     \\commands:
-    \\  whoami                     show the signed-in user
-    \\  chats                      list your chats
-    \\  messages <conversation-id> show a conversation's messages
+    \\  whoami                       show the signed-in user
+    \\  chats [count]                list your chats (default 50, at most 100)
+    \\  messages <id> [count]        show a conversation's messages (default 50)
     \\
     \\Sign in first with scripts/teams-token.fish, which stores the token in the login keychain.
     \\
@@ -84,8 +84,13 @@ const keychain_value_size_max = 64 * 1024;
 const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
 const region_variable = "TEAMS_ZIG_REGION";
 
-const conversation_count_max = 50;
-const message_count_max = 50;
+const conversation_count_default = 50;
+const message_count_default = 50;
+
+/// `chats` names 1:1 chats with up to one request each, all inside the watchdog's limit, so the
+/// list stays at one page of modest size.
+const conversation_count_max = 100;
+const message_count_max = chat.Client.message_count_limit;
 
 /// How far back `chats` looks for the other person's name in a 1:1 chat where you spoke last.
 const recent_message_count = 20;
@@ -113,24 +118,42 @@ const CommandError = ConnectError || RunError;
 
 const Command = union(enum) {
     whoami,
-    chats,
-    /// The conversation id. Borrows the argument slice, which lives as long as `main`.
-    messages: []const u8,
+    /// How many conversations to list.
+    chats: u16,
+    messages: Messages,
+
+    const Messages = struct {
+        /// Borrows the argument slice, which lives as long as `main`.
+        conversation_id: []const u8,
+        count: u32,
+    };
 
     fn parse(arguments: []const []const u8) ?Command {
-        switch (arguments.len) {
-            2 => {
-                if (std.mem.eql(u8, arguments[1], "whoami")) return .whoami;
-                if (std.mem.eql(u8, arguments[1], "chats")) return .chats;
-                return null;
-            },
-            3 => {
-                if (!std.mem.eql(u8, arguments[1], "messages")) return null;
-                if (arguments[2].len == 0) return null;
-                return .{ .messages = arguments[2] };
-            },
-            else => return null,
+        if (arguments.len < 2) return null;
+        const name = arguments[1];
+        const rest = arguments[2..];
+
+        if (std.mem.eql(u8, name, "whoami")) {
+            if (rest.len != 0) return null;
+            return .whoami;
         }
+        if (std.mem.eql(u8, name, "chats")) {
+            if (rest.len > 1) return null;
+            if (rest.len == 0) return .{ .chats = conversation_count_default };
+            const count = parseCount(rest[0], conversation_count_max) orelse return null;
+            return .{ .chats = @intCast(count) };
+        }
+        if (std.mem.eql(u8, name, "messages")) {
+            if (rest.len == 0) return null;
+            if (rest.len > 2) return null;
+            if (rest[0].len == 0) return null;
+            const count = if (rest.len == 2)
+                parseCount(rest[1], message_count_max) orelse return null
+            else
+                message_count_default;
+            return .{ .messages = .{ .conversation_id = rest[0], .count = count } };
+        }
+        return null;
     }
 
     /// Sets `requests_done` once the Chat Service has answered, before any output is written.
@@ -152,11 +175,11 @@ const Command = union(enum) {
                 try writeVisible(stdout, user.upn);
                 try stdout.writeAll(">\n");
             },
-            .chats => {
+            .chats => |conversation_count| {
                 const user = try client.whoami();
                 defer user.deinit();
 
-                const list = try client.conversations(conversation_count_max);
+                const list = try client.conversations(conversation_count);
                 defer list.deinit();
 
                 // Holds the names fetched for 1:1 chats; freed with the command.
@@ -181,8 +204,8 @@ const Command = union(enum) {
                     try stdout.writeByte('\n');
                 }
             },
-            .messages => |conversation_id| {
-                const list = try client.messages(conversation_id, message_count_max);
+            .messages => |messages| {
+                const list = try client.messages(messages.conversation_id, messages.count);
                 defer list.deinit();
 
                 requests_done.store(true, .release);
@@ -348,6 +371,14 @@ fn otherPersonName(
     return null;
 }
 
+/// A count from the command line: a whole number from 1 to `count_max`, or null.
+fn parseCount(text: []const u8, count_max: u32) ?u32 {
+    const count = std.fmt.parseInt(u32, text, 10) catch return null;
+    if (count == 0) return null;
+    if (count > count_max) return null;
+    return count;
+}
+
 fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {
     const sender = message.sender_name orelse message.sender orelse "(unknown sender)";
     try writeVisible(stdout, message.arrived_at);
@@ -413,14 +444,26 @@ fn reportError(
 
 test "Command.parse accepts the three commands and rejects anything else" {
     try std.testing.expectEqual(Command.whoami, Command.parse(&.{ "teams-zig", "whoami" }).?);
-    try std.testing.expectEqual(Command.chats, Command.parse(&.{ "teams-zig", "chats" }).?);
+
+    const chats = Command.parse(&.{ "teams-zig", "chats" }).?;
+    try std.testing.expectEqual(conversation_count_default, chats.chats);
+    const chats_ten = Command.parse(&.{ "teams-zig", "chats", "10" }).?;
+    try std.testing.expectEqual(10, chats_ten.chats);
 
     const messages = Command.parse(&.{ "teams-zig", "messages", "19:fake" }).?;
-    try std.testing.expectEqualStrings("19:fake", messages.messages);
+    try std.testing.expectEqualStrings("19:fake", messages.messages.conversation_id);
+    try std.testing.expectEqual(message_count_default, messages.messages.count);
+    const messages_five = Command.parse(&.{ "teams-zig", "messages", "19:fake", "5" }).?;
+    try std.testing.expectEqual(5, messages_five.messages.count);
 
     try std.testing.expectEqual(null, Command.parse(&.{"teams-zig"}));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "whoami", "x" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "chats", "0" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "chats", "101" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "chats", "ten" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "19:x", "-1" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send" }));
 }
 
