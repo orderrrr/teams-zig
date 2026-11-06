@@ -76,6 +76,8 @@ const Output = struct {
     marks_open_count: u8 = 0,
     /// The open link's target, still entity-encoded, borrowed from the content.
     link_href: []const u8 = "",
+    /// How many quotes are open; lines show at most `quote_depth_limit` of them.
+    quote_depth: u8 = 0,
 
     const mark_count = std.enums.values(Mark).len;
 
@@ -116,6 +118,7 @@ const Output = struct {
             return output.openMark(mark);
         }
         if (html_tag.is("br")) return output.lineBreak();
+        if (html_tag.is("blockquote")) return output.quote(html_tag.closing);
         if (html_tag.is("p") or html_tag.is("div")) {
             if (!html_tag.closing) {
                 output.block_empty = true;
@@ -176,6 +179,29 @@ const Output = struct {
         output.space_pending = false;
     }
 
+    /// Quotes start on their own line and end with a blank one, since Markdown would otherwise
+    /// carry the quote on into the next line.
+    fn quote(output: *Output, closing: bool) std.Io.Writer.Error!void {
+        try output.endLine();
+        if (closing) {
+            if (output.quote_depth == 0) return;
+            output.quote_depth -= 1;
+            output.blankLine();
+            return;
+        }
+        output.quote_depth +|= 1;
+    }
+
+    /// Writes the start of a line: `> ` for each quote shown. A blank line inside a quote is a
+    /// bare `>`.
+    fn writeLinePrefix(output: *Output, blank: bool) std.Io.Writer.Error!void {
+        const depth = @min(output.quote_depth, quote_depth_limit);
+        for (0..depth) |level| {
+            const last = level + 1 == depth;
+            try output.writer.writeAll(if (blank and last) ">" else "> ");
+        }
+    }
+
     /// Closes the marks the HTML left open, newest first.
     fn finish(output: *Output) std.Io.Writer.Error!void {
         while (output.marks_open_count > 0) {
@@ -200,9 +226,15 @@ const Output = struct {
         if (output.at_start) {
             output.at_start = false;
             output.breaks_pending = 0;
+            try output.writeLinePrefix(false);
         } else if (output.breaks_pending > 0) {
-            try output.writer.splatByteAll('\n', output.breaks_pending);
+            try output.writer.writeByte('\n');
+            if (output.breaks_pending == 2) {
+                try output.writeLinePrefix(true);
+                try output.writer.writeByte('\n');
+            }
             output.breaks_pending = 0;
+            try output.writeLinePrefix(false);
         } else if (output.space_pending and output.line_has_text) {
             try output.writer.writeByte(' ');
         }
@@ -215,6 +247,9 @@ const Output = struct {
         }
     }
 };
+
+/// Deeper quotes are shown at this depth.
+const quote_depth_limit = 8;
 
 /// What HTML collapses as whitespace, with `\r` among it so carriage returns are dropped.
 const html_whitespace = " \t\n\r\x0c";
@@ -285,4 +320,44 @@ test "writeHtml writes links with their target decoded and visible" {
     try expectMarkdown(link, "see [fake](https://x/?a=1&b=2)");
     try expectMarkdown("<a href=\"https://x/\x1b[2J\">fake</a>", "[fake](https://x/\\x1b[2J)");
     try expectMarkdown("<a href=\"https://x/\"></a>fake", "fake");
+}
+
+test "writeHtml quotes every line of a blockquote, and ends the quote with a blank line" {
+    try expectMarkdown("<blockquote><p>fake one</p><p>fake two</p></blockquote><p>after</p>",
+        \\> fake one
+        \\> fake two
+        \\
+        \\after
+    );
+    const spaced = "<blockquote>fake one<br><br>fake two</blockquote>";
+    try expectMarkdown(spaced, "> fake one\n>\n> fake two");
+}
+
+test "writeHtml quotes a reply the way Teams sends it" {
+    try expectMarkdown(
+        \\<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1">
+        \\<strong itemprop="mri" itemid="8:orgid:fake">Fake Person</strong>
+        \\<span itemprop="time" itemid="1"></span>
+        \\<p itemprop="preview">fake earlier words</p></blockquote><p>fake answer</p>
+    ,
+        \\> **Fake Person**
+        \\> fake earlier words
+        \\
+        \\fake answer
+    );
+}
+
+test "writeHtml nests quotes up to its limit and survives unbalanced ones" {
+    const nested = "<blockquote>a<blockquote>b</blockquote>c</blockquote>";
+    try expectMarkdown(nested, "> a\n> > b\n>\n> c");
+    var deep: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer deep.deinit();
+    var shown: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer shown.deinit();
+    for (0..quote_depth_limit + 4) |_| try deep.writer.writeAll("<blockquote>");
+    try deep.writer.writeAll("fake");
+    for (0..quote_depth_limit) |_| try shown.writer.writeAll("> ");
+    try shown.writer.writeAll("fake");
+    try expectMarkdown(deep.written(), shown.written());
+    try expectMarkdown("</blockquote>fake</blockquote>", "fake");
 }
