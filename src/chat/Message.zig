@@ -5,6 +5,7 @@ const Message = @This();
 const std = @import("std");
 const json = @import("json.zig");
 const mri = @import("mri.zig");
+const html = @import("html.zig");
 const text = @import("text.zig");
 const Owned = @import("Owned.zig").Owned;
 
@@ -47,15 +48,6 @@ const Response = struct {
     _metadata: struct { backwardLink: ?[]const u8 = null },
 };
 
-const entities = [_]struct { []const u8, []const u8 }{
-    .{ "&amp;", "&" },
-    .{ "&lt;", "<" },
-    .{ "&gt;", ">" },
-    .{ "&quot;", "\"" },
-    .{ "&#39;", "'" },
-    .{ "&nbsp;", " " },
-};
-
 pub fn isText(message: *const Message) bool {
     return isTextType(message.message_type);
 }
@@ -74,39 +66,12 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
         return text.writeVisible(writer, message.content);
     }
 
-    var rest = message.content;
-    while (rest.len > 0) {
-        const rest_len_before = rest.len;
-        defer std.debug.assert(rest.len < rest_len_before);
-
-        if (rest[0] == '<') {
-            // An unterminated tag runs to the end of the content, so all of it is dropped.
-            const close_index = std.mem.indexOfScalar(u8, rest, '>') orelse rest.len - 1;
-            rest = rest[close_index + 1 ..];
-            continue;
-        }
-        if (entityAt(rest)) |entity| {
-            // Advance before writing, so the progress check holds if the write fails.
-            rest = rest[entity[0].len..];
-            try writer.writeAll(entity[1]);
-            continue;
-        }
-        // Plain text runs to the next tag or entity; writing it whole keeps two-byte control
-        // characters together for writeVisible.
-        const next_markup = std.mem.indexOfAny(u8, rest[1..], "<&");
-        const run_len = if (next_markup) |index| index + 1 else rest.len;
-        const run = rest[0..run_len];
-        rest = rest[run.len..];
-        try text.writeVisible(writer, run);
-    }
-}
-
-/// The entity `rest` starts with, as its text and its replacement; null if none matches.
-fn entityAt(rest: []const u8) ?struct { []const u8, []const u8 } {
-    for (entities) |entity| {
-        if (std.mem.startsWith(u8, rest, entity[0])) return entity;
-    }
-    return null;
+    var reader: html.Reader = .init(message.content);
+    while (reader.next()) |token| switch (token) {
+        .text => |run| try text.writeVisible(writer, run),
+        .entity => |replacement| try writer.writeAll(replacement),
+        .tag => {},
+    };
 }
 
 /// Parses one messages response. `arena` owns everything returned.
@@ -277,10 +242,10 @@ test "writeText shows control bytes from both plain and HTML content" {
     };
     try plain.writeText(&out.writer);
 
-    var html = plain;
-    html.message_type = "RichText/Html";
-    html.content = "<p>fake\x1b[2J</p>";
-    try html.writeText(&out.writer);
+    var rich = plain;
+    rich.message_type = "RichText/Html";
+    rich.content = "<p>fake\x1b[2J</p>";
+    try rich.writeText(&out.writer);
 
     try std.testing.expectEqualStrings("fake\\x1b[2Jfake\\x1b[2J", out.written());
 }
