@@ -107,6 +107,14 @@ not:   src/types/      src/helpers/          src/services/
 
 ---
 
+### 1.6 — Function names are camelCase; acronyms are words
+
+Functions are `camelCase`, as in `std`: `parseList`, `writeText`. Acronyms are written as words, as `std.Uri` does: `getUrl`, not `getURL`. Variables and fields stay `snake_case`.
+
+> Overrides Tiger Style's `snake_case` rule for functions and its acronym capitalization rule. The trade: our code reads the same as the `std` calls it sits beside.
+
+---
+
 ## Section 2 — Structs & Responsibility
 
 ### 2.1 — A struct is a compartment of responsibility, not a bag of fields
