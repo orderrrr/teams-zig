@@ -66,9 +66,9 @@ fn parseCommand(args: []const []const u8) ?Command {
 }
 
 fn run(gpa: std.mem.Allocator, io: Io, command: Command, stdout: *Io.Writer) !void {
-    const token = try keychain.read(gpa, keychain_service, "skype-token");
+    const token = try keychain.read(gpa, .{ .service = keychain_service, .account = "skype-token" });
     defer gpa.free(token);
-    const region_name = try keychain.read(gpa, keychain_service, "region");
+    const region_name = try keychain.read(gpa, .{ .service = keychain_service, .account = "region" });
     defer gpa.free(region_name);
     const region = std.meta.stringToEnum(chat.Client.Region, region_name) orelse return error.UnknownRegion;
 

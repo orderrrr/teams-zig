@@ -63,7 +63,7 @@ pub fn writeText(message: Message, writer: *std.Io.Writer) std.Io.Writer.Error!v
     if (std.mem.eql(u8, message.message_type, "Text")) return writer.writeAll(message.content);
 
     const entities = [_]struct { []const u8, []const u8 }{
-        .{ "&amp;", "&" },   .{ "&lt;", "<" },   .{ "&gt;", ">" },
+        .{ "&amp;", "&" },   .{ "&lt;", "<" },  .{ "&gt;", ">" },
         .{ "&quot;", "\"" }, .{ "&#39;", "'" }, .{ "&nbsp;", " " },
     };
     var rest = message.content;

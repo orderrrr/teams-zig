@@ -1,7 +1,7 @@
 //! Generic passwords in the login keychain, keyed by service and account.
 
 const std = @import("std");
-const cf = @import("core_foundation.zig");
+const core_foundation = @import("core_foundation.zig");
 const security = @import("security.zig");
 
 pub const Error = error{
@@ -13,35 +13,46 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// The service and account names as CoreFoundation strings, which every SecItem query needs.
+/// Names one generic password. A struct, so service and account can't be swapped at a call site.
+pub const Item = struct {
+    service: []const u8,
+    account: []const u8,
+};
+
+/// The item's names as CoreFoundation strings, which every SecItem query needs.
 const Names = struct {
-    service: *const cf.String,
-    account: *const cf.String,
+    service: *const core_foundation.String,
+    account: *const core_foundation.String,
 
-    fn init(service: []const u8, account: []const u8) error{OutOfMemory}!Names {
-        const service_string = try cf.createString(service);
-        errdefer cf.release(service_string);
-        return .{ .service = service_string, .account = try cf.createString(account) };
+    fn init(item: Item) error{OutOfMemory}!Names {
+        std.debug.assert(item.service.len > 0);
+        std.debug.assert(item.account.len > 0);
+
+        const service = try core_foundation.createString(item.service);
+        errdefer core_foundation.release(service);
+
+        return .{ .service = service, .account = try core_foundation.createString(item.account) };
     }
 
-    fn deinit(names: Names) void {
-        cf.release(names.service);
-        cf.release(names.account);
+    fn deinit(names: *const Names) void {
+        core_foundation.release(names.service);
+        core_foundation.release(names.account);
     }
 
-    fn query(names: Names) error{OutOfMemory}!*const cf.Dictionary {
-        return cf.createDictionary(
+    fn query(names: *const Names) error{OutOfMemory}!*const core_foundation.Dictionary {
+        return core_foundation.createDictionary(
             &.{ security.kSecClass, security.kSecAttrService, security.kSecAttrAccount },
             &.{ security.kSecClassGenericPassword, names.service, names.account },
         );
     }
 };
 
-/// Returns the stored value, owned by the caller.
-pub fn read(allocator: std.mem.Allocator, service: []const u8, account: []const u8) Error![]u8 {
-    const names = try Names.init(service, account);
+/// Returns the stored value, owned by the caller: free it with `gpa`.
+pub fn read(gpa: std.mem.Allocator, item: Item) Error![]u8 {
+    const names = try Names.init(item);
     defer names.deinit();
-    const query = try cf.createDictionary(
+
+    const query = try core_foundation.createDictionary(
         &.{
             security.kSecClass,
             security.kSecAttrService,
@@ -53,48 +64,62 @@ pub fn read(allocator: std.mem.Allocator, service: []const u8, account: []const 
             security.kSecClassGenericPassword,
             names.service,
             names.account,
-            cf.kCFBooleanTrue,
+            core_foundation.kCFBooleanTrue,
             security.kSecMatchLimitOne,
         },
     );
-    defer cf.release(query);
+    defer core_foundation.release(query);
 
     var result: ?*const anyopaque = null;
     try check(security.SecItemCopyMatching(query, &result));
-    const data: *const cf.Data = @ptrCast(result.?);
-    defer cf.release(data);
-    return allocator.dupe(u8, cf.dataBytes(data));
+    // With kSecReturnData and a success status, SecItemCopyMatching always hands back the data.
+    std.debug.assert(result != null);
+    const data: *const core_foundation.Data = @ptrCast(result.?);
+    defer core_foundation.release(data);
+
+    return gpa.dupe(u8, core_foundation.dataBytes(data));
 }
 
-/// Stores `value`, replacing any value already under this service and account.
-pub fn write(service: []const u8, account: []const u8, value: []const u8) Error!void {
-    const names = try Names.init(service, account);
+/// Stores `value`, replacing any value already stored under `item`.
+pub fn write(item: Item, value: []const u8) Error!void {
+    const names = try Names.init(item);
     defer names.deinit();
-    const data = try cf.createData(value);
-    defer cf.release(data);
+
+    const data = try core_foundation.createData(value);
+    defer core_foundation.release(data);
 
     const query = try names.query();
-    defer cf.release(query);
-    const changes = try cf.createDictionary(&.{security.kSecValueData}, &.{data});
-    defer cf.release(changes);
+    defer core_foundation.release(query);
+
+    const changes = try core_foundation.createDictionary(&.{security.kSecValueData}, &.{data});
+    defer core_foundation.release(changes);
+
     switch (security.SecItemUpdate(query, changes)) {
         .item_not_found => {},
         else => |status| return check(status),
     }
 
-    const attributes = try cf.createDictionary(
-        &.{ security.kSecClass, security.kSecAttrService, security.kSecAttrAccount, security.kSecValueData },
+    const attributes = try core_foundation.createDictionary(
+        &.{
+            security.kSecClass,
+            security.kSecAttrService,
+            security.kSecAttrAccount,
+            security.kSecValueData,
+        },
         &.{ security.kSecClassGenericPassword, names.service, names.account, data },
     );
-    defer cf.release(attributes);
+    defer core_foundation.release(attributes);
+
     try check(security.SecItemAdd(attributes, null));
 }
 
-fn delete(service: []const u8, account: []const u8) Error!void {
-    const names = try Names.init(service, account);
+fn delete(item: Item) Error!void {
+    const names = try Names.init(item);
     defer names.deinit();
+
     const query = try names.query();
-    defer cf.release(query);
+    defer core_foundation.release(query);
+
     try check(security.SecItemDelete(query));
 }
 
@@ -109,26 +134,27 @@ fn check(status: security.Status) Error!void {
     };
 }
 
-const test_service = "teams-zig-test";
+const test_item: Item = .{ .service = "teams-zig-test", .account = "fake-account" };
 
 test "write then read returns the value, and a second write replaces it" {
-    const allocator = std.testing.allocator;
-    try write(test_service, "fake-account", "fake-value-1");
-    defer delete(test_service, "fake-account") catch unreachable;
+    const gpa = std.testing.allocator;
+    try write(test_item, "fake-value-1");
+    // A locked keychain can make cleanup fail; panic so the leftover item doesn't go unnoticed.
+    defer delete(test_item) catch |err| {
+        std.debug.panic("keychain test cleanup failed: {t}", .{err});
+    };
 
-    const first = try read(allocator, test_service, "fake-account");
-    defer allocator.free(first);
+    const first = try read(gpa, test_item);
+    defer gpa.free(first);
     try std.testing.expectEqualStrings("fake-value-1", first);
 
-    try write(test_service, "fake-account", "fake-value-2");
-    const second = try read(allocator, test_service, "fake-account");
-    defer allocator.free(second);
+    try write(test_item, "fake-value-2");
+    const second = try read(gpa, test_item);
+    defer gpa.free(second);
     try std.testing.expectEqualStrings("fake-value-2", second);
 }
 
 test "reading a missing item fails with ItemNotFound" {
-    try std.testing.expectError(
-        error.ItemNotFound,
-        read(std.testing.allocator, test_service, "missing-account"),
-    );
+    const missing: Item = .{ .service = "teams-zig-test", .account = "missing-account" };
+    try std.testing.expectError(error.ItemNotFound, read(std.testing.allocator, missing));
 }

@@ -41,7 +41,11 @@ extern fn CFStringCreateWithBytes(
     encoding: u32,
     is_external_representation: u8,
 ) ?*const String;
-extern fn CFDataCreate(allocator: ?*const Allocator, bytes: [*]const u8, length: Index) ?*const Data;
+extern fn CFDataCreate(
+    allocator: ?*const Allocator,
+    bytes: [*]const u8,
+    length: Index,
+) ?*const Data;
 extern fn CFDataGetBytePtr(data: *const Data) [*]const u8;
 extern fn CFDataGetLength(data: *const Data) Index;
 extern fn CFDictionaryCreate(
@@ -58,11 +62,19 @@ pub fn release(object: *const anyopaque) void {
 }
 
 pub fn createString(bytes: []const u8) error{OutOfMemory}!*const String {
-    return CFStringCreateWithBytes(null, bytes.ptr, @intCast(bytes.len), string_encoding_utf8, 0) orelse
-        error.OutOfMemory;
+    std.debug.assert(bytes.len <= std.math.maxInt(Index));
+    const string = CFStringCreateWithBytes(
+        null,
+        bytes.ptr,
+        @intCast(bytes.len),
+        string_encoding_utf8,
+        0,
+    );
+    return string orelse error.OutOfMemory;
 }
 
 pub fn createData(bytes: []const u8) error{OutOfMemory}!*const Data {
+    std.debug.assert(bytes.len <= std.math.maxInt(Index));
     return CFDataCreate(null, bytes.ptr, @intCast(bytes.len)) orelse error.OutOfMemory;
 }
 
@@ -78,6 +90,7 @@ pub fn createDictionary(
     keys: []const *const anyopaque,
     values: []const *const anyopaque,
 ) error{OutOfMemory}!*const Dictionary {
+    std.debug.assert(keys.len > 0);
     std.debug.assert(keys.len == values.len);
     return CFDictionaryCreate(
         null,
