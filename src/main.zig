@@ -56,7 +56,8 @@ const usage =
     \\commands:
     \\  whoami                       show the signed-in user
     \\  chats [count]                list your chats (default 50, at most 100)
-    \\  messages <id> [count]        show a conversation's messages (default 50)
+    \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
+    \\                               name as chats shows it (quote it if it has spaces) or its id
     \\
     \\Sign in first with scripts/teams-token.fish, which stores the token in the login keychain.
     \\
@@ -122,8 +123,11 @@ const ConnectError = KeychainReadError || error{ UnknownRegion, InvalidToken };
 /// Failures reading a keychain item through `security`.
 const KeychainReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory };
 
-/// Failures running a command: the Chat Service's, or writing the output.
-const RunError = chat.Client.Error || Io.Writer.Error;
+/// Failures running a command: the Chat Service's, writing the output, or a chat name that
+/// picks no chat or several.
+const RunError = chat.Client.Error || Io.Writer.Error || ChatNameError;
+
+const ChatNameError = error{ ChatNameNotFound, ChatNameAmbiguous };
 
 /// Every way a command can fail.
 const CommandError = ConnectError || RunError;
@@ -135,9 +139,27 @@ const Command = union(enum) {
     messages: Messages,
 
     const Messages = struct {
-        /// Borrows the argument slice, which lives as long as `main`.
-        conversation_id: []const u8,
+        chat: Chat,
         count: u32,
+    };
+
+    /// A chat as typed on the command line. Both borrow the argument slice, which lives as long
+    /// as `main`.
+    const Chat = union(enum) {
+        id: []const u8,
+        /// Matched exactly, ignoring ASCII case, against the names `chats` shows.
+        name: []const u8,
+
+        /// Ids start with a number and a colon (`19:…`, `48:notes`); names never do in practice.
+        fn parse(text: []const u8) Chat {
+            std.debug.assert(text.len > 0);
+            const colon = std.mem.indexOfScalar(u8, text, ':') orelse return .{ .name = text };
+            if (colon == 0) return .{ .name = text };
+            for (text[0..colon]) |byte| {
+                if (!std.ascii.isDigit(byte)) return .{ .name = text };
+            }
+            return .{ .id = text };
+        }
     };
 
     fn parse(arguments: []const []const u8) ?Command {
@@ -163,7 +185,7 @@ const Command = union(enum) {
                 parseCount(rest[1], message_count_limit) orelse return null
             else
                 message_count_default;
-            return .{ .messages = .{ .conversation_id = rest[0], .count = count } };
+            return .{ .messages = .{ .chat = .parse(rest[0]), .count = count } };
         }
         return null;
     }
@@ -202,19 +224,26 @@ const Command = union(enum) {
                 const names = try otherPersonNames(client, arena, list.items, user.mri);
                 requests_done.store(true, .release);
 
-                for (list.items, names) |conversation, name| {
-                    const last_message_at = conversation.last_message_at orelse "-";
-                    try writeVisible(stdout, last_message_at);
-                    try stdout.splatByteAll(' ', timestamp_width -| last_message_at.len);
-                    try stdout.print("  {t:<7}  ", .{conversation.kind});
-                    try writeVisible(stdout, conversation.topic orelse name orelse "(no topic)");
-                    try stdout.writeAll("  ");
-                    try writeVisible(stdout, conversation.id);
-                    try stdout.writeByte('\n');
+                for (list.items, names) |*conversation, name| {
+                    try printChat(stdout, conversation, name);
                 }
             },
             .messages => |messages| {
-                const list = try client.messages(messages.conversation_id, messages.count);
+                // Holds a looked-up chat's id; freed with the command.
+                var id_arena: std.heap.ArenaAllocator = .init(client.gpa);
+                defer id_arena.deinit();
+
+                const conversation_id = switch (messages.chat) {
+                    .id => |id| id,
+                    .name => |name| try findChat(
+                        client,
+                        id_arena.allocator(),
+                        name,
+                        stdout,
+                        requests_done,
+                    ),
+                };
+                const list = try client.messages(conversation_id, messages.count);
                 defer list.deinit();
 
                 requests_done.store(true, .release);
@@ -368,6 +397,100 @@ fn nameSource(conversation: *const chat.Conversation, self_mri: []const u8) Name
     return .{ .known = name };
 }
 
+/// The id, owned by `arena`, of the one chat among your newest `conversation_count_limit` named
+/// `name`. Free names are tried first; the per-chat lookups run only if none of them match.
+/// Several matches are listed on `stdout`, with their ids, before ChatNameAmbiguous.
+fn findChat(
+    client: *chat.Client,
+    arena: std.mem.Allocator,
+    name: []const u8,
+    stdout: *Io.Writer,
+    requests_done: *std.atomic.Value(bool),
+) RunError![]const u8 {
+    std.debug.assert(name.len > 0);
+    const user = try client.whoami();
+    defer user.deinit();
+
+    const list = try client.conversations(conversation_count_limit);
+    defer list.deinit();
+
+    var names = try arena.alloc(?[]const u8, list.items.len);
+    for (list.items, names) |*conversation, *other_name| {
+        other_name.* = switch (nameSource(conversation, user.mri)) {
+            .known => |known| known,
+            .none, .lookup => null,
+        };
+    }
+    var match = matchChat(list.items, names, name);
+    if (match == .none) {
+        names = try otherPersonNames(client, arena, list.items, user.mri);
+        match = matchChat(list.items, names, name);
+    }
+
+    switch (match) {
+        .none => return error.ChatNameNotFound,
+        .one => |index| return try arena.dupe(u8, list.items[index].id),
+        .several => {
+            requests_done.store(true, .release);
+            for (list.items, names) |*conversation, other_name| {
+                const chat_name = chatName(conversation, other_name) orelse continue;
+                if (!std.ascii.eqlIgnoreCase(chat_name, name)) continue;
+                try printChat(stdout, conversation, other_name);
+            }
+            return error.ChatNameAmbiguous;
+        },
+    }
+}
+
+/// One `chats` row: last message time, kind, name and id.
+fn printChat(
+    stdout: *Io.Writer,
+    conversation: *const chat.Conversation,
+    other_name: ?[]const u8,
+) Io.Writer.Error!void {
+    const last_message_at = conversation.last_message_at orelse "-";
+    try writeVisible(stdout, last_message_at);
+    try stdout.splatByteAll(' ', timestamp_width -| last_message_at.len);
+    try stdout.print("  {t:<7}  ", .{conversation.kind});
+    try writeVisible(stdout, chatName(conversation, other_name) orelse "(no topic)");
+    try stdout.writeAll("  ");
+    try writeVisible(stdout, conversation.id);
+    try stdout.writeByte('\n');
+}
+
+/// Which chats a name typed on the command line picks.
+const ChatMatch = union(enum) {
+    none,
+    one: usize,
+    several,
+};
+
+/// Finds the chats whose name, as `chats` shows it (`chatName`), equals `wanted` ignoring ASCII
+/// case. `other_names` holds the other person's name for each conversation, or null.
+fn matchChat(
+    conversations: []const chat.Conversation,
+    other_names: []const ?[]const u8,
+    wanted: []const u8,
+) ChatMatch {
+    std.debug.assert(conversations.len == other_names.len);
+    std.debug.assert(wanted.len > 0);
+    var match: ChatMatch = .none;
+    for (conversations, other_names, 0..) |*conversation, other_name, index| {
+        const name = chatName(conversation, other_name) orelse continue;
+        if (!std.ascii.eqlIgnoreCase(name, wanted)) continue;
+        match = switch (match) {
+            .none => .{ .one = index },
+            .one, .several => .several,
+        };
+    }
+    return match;
+}
+
+/// The name `chats` shows for a conversation: its topic, or the other person in a 1:1 chat.
+fn chatName(conversation: *const chat.Conversation, other_name: ?[]const u8) ?[]const u8 {
+    return conversation.topic orelse other_name;
+}
+
 /// The other person's name for each 1:1 chat in `conversations`, owned by `arena`; null where
 /// there's none to show. At most `name_lookup_count_limit` chats get a lookup, one request each.
 fn otherPersonNames(
@@ -483,6 +606,10 @@ fn reportError(
         error.OutOfMemory => "out of memory",
         error.TokenExpired => "the skype token has expired; " ++ rerun_script,
         error.NotFound => "no conversation with that id, or it isn't yours",
+        error.ChatNameNotFound => "no chat with exactly that name among your " ++
+            std.fmt.comptimePrint("{d}", .{conversation_count_limit}) ++
+            " newest; check the spelling, or use its id from teams-zig chats",
+        error.ChatNameAmbiguous => "several chats have that name; use one of the ids above",
         error.UnexpectedStatus => {
             // Client sets response_status before it returns UnexpectedStatus.
             std.debug.assert(response_status != null);
@@ -520,7 +647,7 @@ test "Command.parse accepts the three commands and rejects anything else" {
     try std.testing.expectEqual(conversation_count_limit, chats_max.chats);
 
     const messages = Command.parse(&.{ "teams-zig", "messages", "19:fake" }).?;
-    try std.testing.expectEqualStrings("19:fake", messages.messages.conversation_id);
+    try std.testing.expectEqualStrings("19:fake", messages.messages.chat.id);
     try std.testing.expectEqual(message_count_default, messages.messages.count);
     const messages_five = Command.parse(&.{ "teams-zig", "messages", "19:fake", "5" }).?;
     try std.testing.expectEqual(5, messages_five.messages.count);
@@ -540,6 +667,41 @@ test "Command.parse accepts the three commands and rejects anything else" {
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "19:x", "-1" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send" }));
+}
+
+test "Command.Chat.parse tells ids from names" {
+    const thread_id = "19:fake@thread.v2";
+    try std.testing.expectEqualStrings(thread_id, Command.Chat.parse(thread_id).id);
+    try std.testing.expectEqualStrings("48:notes", Command.Chat.parse("48:notes").id);
+    try std.testing.expectEqualStrings("Fake Person", Command.Chat.parse("Fake Person").name);
+    try std.testing.expectEqualStrings("Fake: standup", Command.Chat.parse("Fake: standup").name);
+    try std.testing.expectEqualStrings(":fake", Command.Chat.parse(":fake").name);
+    try std.testing.expectEqualStrings("2026 plans", Command.Chat.parse("2026 plans").name);
+}
+
+test "matchChat matches whole names ignoring case, and reports several" {
+    const template: chat.Conversation = .{
+        .id = "19:fake@thread.v2",
+        .kind = .chat,
+        .topic = null,
+        .last_message_at = null,
+        .last_sender = null,
+        .last_sender_name = null,
+    };
+    var conversations: [3]chat.Conversation = @splat(template);
+    conversations[1].topic = "Fake Standup";
+    const other_names = [_]?[]const u8{ "Fake Person", null, "Fake Other" };
+
+    const names = &other_names;
+    const person = matchChat(&conversations, names, "fake person");
+    try std.testing.expectEqual(ChatMatch{ .one = 0 }, person);
+    const standup = matchChat(&conversations, names, "FAKE STANDUP");
+    try std.testing.expectEqual(ChatMatch{ .one = 1 }, standup);
+    try std.testing.expectEqual(ChatMatch.none, matchChat(&conversations, names, "Fake"));
+    try std.testing.expectEqual(ChatMatch.none, matchChat(&conversations, names, "Fake Person 2"));
+
+    conversations[2].topic = "fake person";
+    try std.testing.expectEqual(ChatMatch.several, matchChat(&conversations, names, "Fake Person"));
 }
 
 test "checkToken rejects line breaks" {
