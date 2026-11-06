@@ -196,7 +196,21 @@ pub fn messages(
     const url_first = try client.messagesUrl(conversation_id, page_size);
     defer client.gpa.free(url_first);
 
-    const arena = list.arena.allocator();
+    list.items = try collectMessages(list.arena.allocator(), client, url_first, message_count_max);
+    return list;
+}
+
+/// Walks pages from `url_first` through each `backwardLink`, keeping up to `message_count_max`
+/// messages, and stops after `page_count_max` pages. `source.getUrl(url)` returns a page body,
+/// borrowed until its next call: the Client in use, a canned source in tests.
+fn collectMessages(
+    arena: std.mem.Allocator,
+    source: anytype,
+    url_first: []const u8,
+    message_count_max: u32,
+) (Error || json.ParseError)![]const Message {
+    std.debug.assert(message_count_max > 0);
+
     var items: std.ArrayList(Message) = .empty;
     var link: ?[]const u8 = url_first;
     var page_count: u32 = 0;
@@ -204,15 +218,15 @@ pub fn messages(
         if (items.items.len == message_count_max) break;
         if (page_count == page_count_max) break;
 
-        const page = try Message.parsePage(arena, try client.getUrl(page_url));
+        const page = try Message.parsePage(arena, try source.getUrl(page_url));
         const room = message_count_max - items.items.len;
         try items.appendSlice(arena, page.items[0..@min(page.items.len, room)]);
         link = page.backward_link;
     }
     std.debug.assert(items.items.len <= message_count_max);
+    std.debug.assert(page_count <= page_count_max);
 
-    list.items = items.items;
-    return list;
+    return items.items;
 }
 
 /// The first messages page for a conversation, with the id percent-encoded. Owned by the caller.
@@ -286,4 +300,63 @@ test "the Authentication header carries the skypetoken prefix" {
     defer client.deinit();
 
     try std.testing.expectEqualStrings("skypetoken=fake-token", client.authentication);
+}
+
+/// Serves canned page bodies in order, repeating the last one, and counts the requests.
+const CannedPages = struct {
+    bodies: []const []const u8,
+    request_count: u32 = 0,
+
+    fn getUrl(pages: *CannedPages, url: []const u8) Error![]const u8 {
+        std.debug.assert(url.len > 0);
+        const index = @min(pages.request_count, pages.bodies.len - 1);
+        pages.request_count += 1;
+        return pages.bodies[index];
+    }
+};
+
+const canned_empty_with_link =
+    \\{"_metadata":{"backwardLink":"https://x/older"},"messages":[]}
+;
+const canned_two_with_link =
+    \\{"_metadata":{"backwardLink":"https://x/older"},"messages":[
+    \\ {"id":"2","messagetype":"Text","originalarrivaltime":"2026-11-01T10:00:02Z"},
+    \\ {"id":"1","messagetype":"Text","originalarrivaltime":"2026-11-01T10:00:01Z"}]}
+;
+const canned_one_oldest =
+    \\{"_metadata":{"backwardLink":null},"messages":[
+    \\ {"id":"0","messagetype":"Text","originalarrivaltime":"2026-11-01T10:00:00Z"}]}
+;
+
+test "collectMessages keeps going past empty pages that link to older ones" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    var pages: CannedPages = .{
+        .bodies = &.{ canned_empty_with_link, canned_empty_with_link, canned_one_oldest },
+    };
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50);
+    try std.testing.expectEqual(1, items.len);
+    try std.testing.expectEqualStrings("0", items[0].id);
+    try std.testing.expectEqual(3, pages.request_count);
+}
+
+test "collectMessages stops at the message count without fetching further" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    var pages: CannedPages = .{ .bodies = &.{ canned_two_with_link, canned_two_with_link } };
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 3);
+    try std.testing.expectEqual(3, items.len);
+    try std.testing.expectEqual(2, pages.request_count);
+}
+
+test "collectMessages stops after page_count_max endless empty pages" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    var pages: CannedPages = .{ .bodies = &.{canned_empty_with_link} };
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50);
+    try std.testing.expectEqual(0, items.len);
+    try std.testing.expectEqual(page_count_max, pages.request_count);
 }
