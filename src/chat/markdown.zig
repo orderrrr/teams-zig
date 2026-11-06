@@ -119,15 +119,25 @@ const Output = struct {
 
     const mark_count = std.enums.values(Mark).len;
 
-    /// HTML text: runs of whitespace collapse to one space, and `\r` goes with them.
+    /// HTML text: runs of whitespace collapse to one space, and `\r` goes with them. A word that
+    /// starts a line and would read as a Markdown block marker gets a `\` (see `textEscapeIndex`).
     fn text(output: *Output, run: []const u8) std.Io.Writer.Error!void {
         std.debug.assert(run.len > 0);
         if (output.code_block != null) return output.textCode(run);
         if (std.mem.indexOfScalar(u8, html_whitespace, run[0]) != null) output.space_pending = true;
         var words = std.mem.tokenizeAny(u8, run, html_whitespace);
         while (words.next()) |word| {
+            const escape_index = if (output.startsLine()) textEscapeIndex(word) else null;
             try output.flush();
-            try writeVisible(output.writer, word);
+            if (escape_index) |index| {
+                // The split falls before an ASCII marker byte, so no control character forms
+                // across it.
+                try writeVisible(output.writer, word[0..index]);
+                try output.writer.writeByte('\\');
+                try writeVisible(output.writer, word[index..]);
+            } else {
+                try writeVisible(output.writer, word);
+            }
             output.wroteText();
             // A word followed by whitespace owes a space.
             output.space_pending = words.index < run.len;
@@ -145,9 +155,18 @@ const Output = struct {
             output.space_pending = true;
             return;
         }
+        // `&gt;` starting a line would read as a quote.
+        const escape = output.startsLine() and std.mem.eql(u8, replacement, ">");
         try output.flush();
+        if (escape) try output.writer.writeByte('\\');
         try output.writer.writeAll(replacement);
         output.wroteText();
+    }
+
+    /// The next text starts its line, with only the line's prefix before it: no text and no
+    /// marker that `flush` would write.
+    fn startsLine(output: *const Output) bool {
+        return !output.line_has_text and output.marks_open_count == 0;
     }
 
     fn wroteText(output: *Output) void {
@@ -472,6 +491,27 @@ const Output = struct {
     }
 };
 
+/// Where a `\` goes so that `word`, starting a line, reads as text rather than a Markdown block
+/// marker; null if it can't read as one. Catches quotes (`>`), fences (`` ``` ``, `~~~`),
+/// headings, bullets, rules and underlines (a word of one repeated `#`, `-`, `*`, `+`, `_` or
+/// `=`), and numbered items (`1.`, `2)`). Over-escaping is harmless: `\` before punctuation
+/// reads as the punctuation.
+fn textEscapeIndex(word: []const u8) ?usize {
+    std.debug.assert(word.len > 0);
+    if (word[0] == '>') return 0;
+    if (std.mem.startsWith(u8, word, "```")) return 0;
+    if (std.mem.startsWith(u8, word, "~~~")) return 0;
+    if (std.mem.indexOfScalar(u8, "#-*+_=", word[0]) != null) {
+        if (std.mem.indexOfNone(u8, word, word[0..1]) == null) return 0;
+        return null;
+    }
+    const digit_count = std.mem.indexOfNone(u8, word, "0123456789") orelse return null;
+    if (digit_count == 0) return null;
+    if (digit_count + 1 != word.len) return null;
+    if (word[digit_count] != '.' and word[digit_count] != ')') return null;
+    return digit_count;
+}
+
 /// The Markdown level of `h1`, `h2` or `h3`, or null for any other tag. Smaller headings are
 /// shown as plain lines.
 fn headingLevel(tag: *const html.Tag) ?u2 {
@@ -677,4 +717,38 @@ test "writeHtml writes an emoji as its alt text and other images as [image]" {
 test "writeHtml forgets an empty heading or list item" {
     try expectMarkdown("<h2></h2><p>fake</p>", "fake");
     try expectMarkdown("<ul><li>a<ul><li></li></ul>b</li></ul>", "- a\n  b");
+}
+
+test "writeHtml escapes typed text that would start a Markdown block" {
+    try expectMarkdown("<p># fake</p><p>- fake</p><p>* fake</p><p>+ fake</p>",
+        \\\# fake
+        \\\- fake
+        \\\* fake
+        \\\+ fake
+    );
+    try expectMarkdown("<p>&gt; fake</p><p>&gt;fake</p><p>12. fake</p><p>3) fake</p>",
+        \\\> fake
+        \\\>fake
+        \\12\. fake
+        \\3\) fake
+    );
+    try expectMarkdown("<p>```fake</p><p>~~~</p><p>---</p><p>===</p><p>## fake</p>",
+        \\\```fake
+        \\\~~~
+        \\\---
+        \\\===
+        \\\## fake
+    );
+}
+
+test "writeHtml escapes after a line's prefix, and only at a line's start" {
+    try expectMarkdown("<ul><li># fake</li></ul><blockquote>- fake</blockquote>",
+        \\- \# fake
+        \\>
+        \\> \- fake
+    );
+    try expectMarkdown("<p>fake # - 1. &gt; ```</p>", "fake # - 1. > ```");
+    try expectMarkdown("<p><b># fake</b></p>", "**# fake**");
+    try expectMarkdown("<p>#fake -fake 1.5 1.fake</p>", "#fake -fake 1.5 1.fake");
+    try expectMarkdown("<pre># fake</pre>", "```\n# fake\n```");
 }
