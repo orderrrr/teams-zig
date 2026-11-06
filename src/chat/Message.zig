@@ -68,7 +68,8 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
         defer std.debug.assert(rest.len < rest_len_before);
 
         if (rest[0] == '<') {
-            const end = std.mem.indexOfScalar(u8, rest, '>') orelse return;
+            // An unterminated tag runs to the end of the content, so all of it is dropped.
+            const end = std.mem.indexOfScalar(u8, rest, '>') orelse rest.len - 1;
             rest = rest[end + 1 ..];
             continue;
         }
@@ -189,4 +190,21 @@ test "writeText leaves plain Text content alone" {
 
     try message.writeText(&out.writer);
     try std.testing.expectEqualStrings("fake <not a tag> &amp;", out.written());
+}
+
+test "writeText drops an unterminated tag instead of failing" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "RichText/Html",
+        .sender = null,
+        .sender_name = null,
+        .content = "<p>fake 3 <b",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try message.writeText(&out.writer);
+    try std.testing.expectEqualStrings("fake 3 ", out.written());
 }
