@@ -276,8 +276,8 @@ pub fn whoami(client: *Client) Error!User {
     return User.parse(client.gpa, body) catch |err| parseError(err);
 }
 
-/// Returns your most recent conversations, newest first, without system streams.
-/// The result is owned by the caller: free it with `List.deinit`.
+/// Returns up to `conversation_count_max` of your most recent conversations, newest first,
+/// without system streams. The result is owned by the caller: free it with `List.deinit`.
 pub fn conversations(
     client: *Client,
     conversation_count_max: u16,
@@ -294,7 +294,10 @@ pub fn conversations(
         unreachable;
 
     const body = try client.get(path);
-    return Conversation.parseList(client.gpa, body) catch |err| parseError(err);
+    var list = Conversation.parseList(client.gpa, body) catch |err| return parseError(err);
+    // The page size is a request, so a service sending more mustn't overrun callers' buffers.
+    list.items = list.items[0..@min(list.items.len, conversation_count_max)];
+    return list;
 }
 
 /// Returns up to `message_count_max` of a conversation's messages, newest first, following older

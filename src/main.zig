@@ -106,6 +106,8 @@ comptime {
     // Backing off never polls faster than normal, and a poll's reads fit the watchdog's limit.
     std.debug.assert(watch_poll_seconds <= watch_backoff_seconds_max);
     std.debug.assert(watch_read_count_limit < requests_seconds_max);
+    // Each poll's chats fit in Seen without folding.
+    std.debug.assert(conversation_count_default <= Seen.chat_count_limit);
     std.debug.assert(conversation_count_default <= conversation_count_limit);
     std.debug.assert(message_count_default <= message_count_limit);
 }
@@ -146,9 +148,12 @@ const KeychainReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory }
 
 /// Failures running a command: the Chat Service's, writing the output, or a chat name that
 /// picks no chat or several.
-const RunError = chat.Client.Error || Io.Writer.Error || ChatNameError;
+const RunError = chat.Client.Error || Io.Writer.Error || ChatNameError || WatchError;
 
 const ChatNameError = error{ ChatNameNotFound, ChatNameAmbiguous };
+
+/// Failures of `watch` beyond the Chat Service's and the output's.
+const WatchError = Seen.Error;
 
 /// Every way a command can fail.
 const CommandError = ConnectError || RunError;
@@ -565,7 +570,7 @@ fn watchErrorRetries(err: RunError, status: ?std.http.Status) bool {
 }
 
 /// The id, owned by `arena`, of the one chat among your newest `conversation_count_limit` named
-/// `name`. Free names are tried first; the per-chat lookups run only if none of them match.
+/// `name`. Known names are tried first; the per-chat lookups run only if none of them match.
 /// Several matches are listed on `stdout`, with their ids, before ChatNameAmbiguous.
 fn findChat(
     client: *chat.Client,
@@ -583,8 +588,8 @@ fn findChat(
 
     // conversations() returns at most the count it was asked for.
     std.debug.assert(list.items.len <= conversation_count_limit);
-    var free_names: [conversation_count_limit]?[]const u8 = undefined;
-    var names: []?[]const u8 = free_names[0..list.items.len];
+    var known_names_buffer: [conversation_count_limit]?[]const u8 = undefined;
+    var names: []?[]const u8 = known_names_buffer[0..list.items.len];
     for (list.items, names) |*conversation, *other_name| {
         other_name.* = switch (nameSource(conversation, user.mri)) {
             .known => |known| known,
@@ -783,6 +788,8 @@ fn reportError(
             std.fmt.comptimePrint("{d}", .{conversation_count_limit}) ++
             " newest; check the spelling, or use its id from teams-zig chats",
         error.ChatNameAmbiguous => "several chats have that name; use one of the ids above",
+        error.ConversationIdTooLong => "the Chat Service sent a chat id longer than teams-zig " ++
+            "keeps track of",
         error.UnexpectedStatus => {
             // Client sets response_status before it returns UnexpectedStatus.
             std.debug.assert(response_status != null);
