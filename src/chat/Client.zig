@@ -61,14 +61,14 @@ pub const Error = error{
 const body_size_max = 8 * 1024 * 1024;
 
 /// Keeps each response bounded; larger counts take more pages.
-const page_item_count_max = 200;
+const page_item_count_limit = 200;
 
 /// Bounds how many pages `messages` follows. The service can send empty pages that still link to
 /// older ones, so the page count isn't tied to the message count.
 const page_count_limit = 64;
 
 /// The most messages `messages` can ever collect.
-pub const message_count_limit = page_item_count_max * page_count_limit;
+pub const message_count_limit = page_item_count_limit * page_count_limit;
 
 pub fn init(
     client: *Client,
@@ -283,11 +283,12 @@ pub fn conversations(
     conversation_count_max: u16,
 ) Error!Conversation.List {
     std.debug.assert(conversation_count_max > 0);
-    std.debug.assert(conversation_count_max <= page_item_count_max);
+    std.debug.assert(conversation_count_max <= page_item_count_limit);
 
     const path_prefix = "/users/ME/conversations?view=mychats&pageSize=";
     // Sized for the largest count the assert above allows, so the formatted path always fits.
-    var path_buffer: [path_prefix.len + std.fmt.count("{d}", .{page_item_count_max})]u8 = undefined;
+    const path_size_max = path_prefix.len + std.fmt.count("{d}", .{page_item_count_limit});
+    var path_buffer: [path_size_max]u8 = undefined;
     const path_format = path_prefix ++ "{d}";
     const path = std.fmt.bufPrint(&path_buffer, path_format, .{conversation_count_max}) catch
         unreachable;
@@ -313,7 +314,7 @@ pub fn recentMessages(
     conversation_id: []const u8,
     message_count_max: u32,
 ) Error!Message.List {
-    std.debug.assert(message_count_max <= page_item_count_max);
+    std.debug.assert(message_count_max <= page_item_count_limit);
     return client.fetchMessages(conversation_id, message_count_max, 1);
 }
 
@@ -327,7 +328,7 @@ fn fetchMessages(
     std.debug.assert(message_count_max > 0);
     // page_count_limit pages can't hold more, so a larger count would only reserve dead memory.
     std.debug.assert(message_count_max <= message_count_limit);
-    const page_item_count = @min(message_count_max, page_item_count_max);
+    const page_item_count = @min(message_count_max, page_item_count_limit);
 
     var list: Message.List = try .init(client.gpa);
     errdefer list.deinit();
@@ -383,7 +384,7 @@ fn messagesUrl(
 ) error{OutOfMemory}![]u8 {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(page_item_count > 0);
-    std.debug.assert(page_item_count <= page_item_count_max);
+    std.debug.assert(page_item_count <= page_item_count_limit);
 
     var url: std.Io.Writer.Allocating = .init(client.gpa);
     errdefer url.deinit();
