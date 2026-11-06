@@ -197,6 +197,7 @@ pub fn messages(
     defer client.gpa.free(url_first);
 
     list.items = try collectMessages(list.arena.allocator(), client, url_first, message_count_max);
+    std.debug.assert(list.items.len <= message_count_max);
     return list;
 }
 
@@ -209,9 +210,10 @@ fn collectMessages(
     url_first: []const u8,
     message_count_max: u32,
 ) (Error || json.ParseError)![]const Message {
+    std.debug.assert(url_first.len > 0);
     std.debug.assert(message_count_max > 0);
 
-    var items: std.ArrayList(Message) = .empty;
+    var items: std.ArrayList(Message) = try .initCapacity(arena, message_count_max);
     var link: ?[]const u8 = url_first;
     var page_count: u32 = 0;
     while (link) |page_url| : (page_count += 1) {
@@ -220,7 +222,7 @@ fn collectMessages(
 
         const page = try Message.parsePage(arena, try source.getUrl(page_url));
         const room = message_count_max - items.items.len;
-        try items.appendSlice(arena, page.items[0..@min(page.items.len, room)]);
+        items.appendSliceAssumeCapacity(page.items[0..@min(page.items.len, room)]);
         link = page.backward_link;
     }
     std.debug.assert(items.items.len <= message_count_max);
@@ -309,6 +311,7 @@ const CannedPages = struct {
 
     fn getUrl(pages: *CannedPages, url: []const u8) Error![]const u8 {
         std.debug.assert(url.len > 0);
+        std.debug.assert(pages.bodies.len > 0);
         const index = @min(pages.request_count, pages.bodies.len - 1);
         pages.request_count += 1;
         return pages.bodies[index];

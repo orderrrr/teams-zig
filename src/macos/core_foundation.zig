@@ -3,17 +3,23 @@
 
 const std = @import("std");
 
+/// CFIndex, a C `long`: platform-sized on purpose, to match the C ABI.
 pub const Index = isize;
 pub const Allocator = opaque {};
+
+pub fn release(object: *const anyopaque) void {
+    CFRelease(object);
+}
+
 pub const String = opaque {
     pub fn create(contents: []const u8) error{OutOfMemory}!*const String {
         std.debug.assert(contents.len <= std.math.maxInt(Index));
         const string = CFStringCreateWithBytes(
-            null,
+            null, // the default allocator
             contents.ptr,
             @intCast(contents.len),
             string_encoding_utf8,
-            0,
+            0, // not an external representation: no byte-order mark
         );
         return string orelse error.OutOfMemory;
     }
@@ -22,7 +28,12 @@ pub const String = opaque {
 pub const Data = opaque {
     pub fn create(contents: []const u8) error{OutOfMemory}!*const Data {
         std.debug.assert(contents.len <= std.math.maxInt(Index));
-        return CFDataCreate(null, contents.ptr, @intCast(contents.len)) orelse error.OutOfMemory;
+        const data = CFDataCreate(
+            null, // the default allocator
+            contents.ptr,
+            @intCast(contents.len),
+        );
+        return data orelse error.OutOfMemory;
     }
 
     /// Borrows the bytes: they live as long as `data` does.
@@ -45,7 +56,7 @@ pub const Dictionary = opaque {
         std.debug.assert(entries.keys.len > 0);
         std.debug.assert(entries.keys.len == entries.values.len);
         return CFDictionaryCreate(
-            null,
+            null, // the default allocator
             entries.keys.ptr,
             entries.values.ptr,
             @intCast(entries.keys.len),
@@ -102,10 +113,6 @@ extern fn CFDictionaryCreate(
     key_callbacks: *const DictionaryKeyCallBacks,
     value_callbacks: *const DictionaryValueCallBacks,
 ) ?*const Dictionary;
-
-pub fn release(object: *const anyopaque) void {
-    CFRelease(object);
-}
 
 test "data round-trips its bytes" {
     const data = try Data.create("fake-token-value");

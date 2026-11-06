@@ -17,8 +17,12 @@ pub fn parse(gpa: std.mem.Allocator, properties: []const u8) json.ParseError!Use
     defer outer.deinit();
 
     const Details = struct { name: []const u8, upn: []const u8 };
-    const user_details = outer.value.userDetails;
-    const details = try std.json.parseFromSlice(Details, gpa, user_details, json.parse_options);
+    const details = try std.json.parseFromSlice(
+        Details,
+        gpa,
+        outer.value.userDetails,
+        json.parse_options,
+    );
     defer details.deinit();
 
     const name = try gpa.dupe(u8, details.value.name);
@@ -47,4 +51,10 @@ test "parse reads name and upn out of the nested userDetails string" {
 test "parse fails when userDetails is missing" {
     const result = parse(std.testing.allocator, "{\"locale\":\"en-gb\"}");
     try std.testing.expectError(error.MissingField, result);
+}
+
+test "parse fails when userDetails isn't valid JSON" {
+    const properties = "{\"userDetails\":\"not json\"}";
+    const result = parse(std.testing.allocator, properties);
+    try std.testing.expectError(error.SyntaxError, result);
 }

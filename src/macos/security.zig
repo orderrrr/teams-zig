@@ -40,6 +40,7 @@ pub extern fn SecItemDelete(query: *const core_foundation.Dictionary) Status;
 test "looking up a missing item reports item_not_found" {
     const service = try core_foundation.String.create("teams-zig-test-missing");
     defer core_foundation.release(service);
+
     const query = try core_foundation.Dictionary.create(.{
         .keys = &.{ kSecClass, kSecAttrService },
         .values = &.{ kSecClassGenericPassword, service },

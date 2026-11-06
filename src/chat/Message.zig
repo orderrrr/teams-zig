@@ -60,6 +60,7 @@ pub fn isText(message: *const Message) bool {
 /// Writes `content` as plain text: tags dropped, the common entities decoded.
 /// Plain `Text` messages pass through unchanged.
 pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    std.debug.assert(message.isText());
     if (std.mem.eql(u8, message.message_type, "Text")) return writer.writeAll(message.content);
 
     var rest = message.content;
@@ -232,4 +233,25 @@ test "writeText reports a failing writer instead of tripping its progress check"
     var buffer: [4]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try std.testing.expectError(error.WriteFailed, message.writeText(&writer));
+}
+
+test "writeText passes unknown entities and a bare ampersand through" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "RichText/Html",
+        .sender = null,
+        .sender_name = null,
+        .content = "fake &copy; & done",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try message.writeText(&out.writer);
+    try std.testing.expectEqualStrings("fake &copy; & done", out.written());
+}
+
+test "senderOf returns the whole value when from has no slash" {
+    try std.testing.expectEqualStrings("8:orgid:fake-uuid", senderOf("8:orgid:fake-uuid"));
 }
