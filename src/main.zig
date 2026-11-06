@@ -130,6 +130,7 @@ const Command = union(enum) {
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
+
                 requests_done.store(true, .release);
 
                 try writeVisible(stdout, user.name);
@@ -140,6 +141,7 @@ const Command = union(enum) {
             .chats => {
                 const list = try client.conversations(conversation_count_max);
                 defer list.deinit();
+
                 requests_done.store(true, .release);
 
                 for (list.items) |conversation| {
@@ -156,6 +158,7 @@ const Command = union(enum) {
             .messages => |conversation_id| {
                 const list = try client.messages(conversation_id, message_count_max);
                 defer list.deinit();
+
                 requests_done.store(true, .release);
 
                 // The service returns newest first; print oldest first, like a chat window.

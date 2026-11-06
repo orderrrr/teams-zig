@@ -146,7 +146,7 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         if (byte <= ' ') return error.ForeignLink;
         if (byte >= 0x7f) return error.ForeignLink;
     }
-    const uri = std.Uri.parse(url) catch return error.BadResponse;
+    const uri = std.Uri.parse(url) catch return error.ForeignLink;
     var request = client.http.request(.GET, uri, .{
         .version = .@"HTTP/1.1",
         .handle_continue = true,
