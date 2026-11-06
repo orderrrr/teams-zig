@@ -3,6 +3,7 @@ const Io = std.Io;
 const teams = @import("teams");
 const chat = teams.chat;
 const KeychainItem = teams.macos.KeychainItem;
+const writeVisible = chat.text.writeVisible;
 
 pub fn main(init: std.process.Init) !u8 {
     var stderr_buffer: [1024]u8 = undefined;
@@ -54,6 +55,15 @@ const keychain_service = "teams-zig";
 const conversation_count_max = 50;
 const message_count_max = 50;
 
+/// Failures reading the keychain or starting the client.
+const ConnectError = KeychainItem.Error || error{UnknownRegion};
+
+/// Failures running a command: the Chat Service's, or writing the output.
+const RunError = chat.Client.Error || Io.Writer.Error;
+
+/// Every way a command can fail.
+const CommandError = ConnectError || RunError;
+
 const Command = union(enum) {
     whoami,
     chats,
@@ -76,25 +86,30 @@ const Command = union(enum) {
         }
     }
 
-    fn run(command: *const Command, client: *chat.Client, stdout: *Io.Writer) !void {
+    fn run(command: *const Command, client: *chat.Client, stdout: *Io.Writer) RunError!void {
         switch (command.*) {
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
 
-                try stdout.print("{s} <{s}>\n", .{ user.name, user.upn });
+                try writeVisible(stdout, user.name);
+                try stdout.writeAll(" <");
+                try writeVisible(stdout, user.upn);
+                try stdout.writeAll(">\n");
             },
             .chats => {
                 const list = try client.conversations(conversation_count_max);
                 defer list.deinit();
 
                 for (list.items) |conversation| {
-                    try stdout.print("{s:<24}  {t:<7}  {s}  {s}\n", .{
-                        conversation.last_message_at orelse "-",
-                        conversation.kind,
-                        conversation.topic orelse "(no topic)",
-                        conversation.id,
-                    });
+                    const last_message_at = conversation.last_message_at orelse "-";
+                    try writeVisible(stdout, last_message_at);
+                    try stdout.splatByteAll(' ', 24 -| last_message_at.len);
+                    try stdout.print("  {t:<7}  ", .{conversation.kind});
+                    try writeVisible(stdout, conversation.topic orelse "(no topic)");
+                    try stdout.writeAll("  ");
+                    try writeVisible(stdout, conversation.id);
+                    try stdout.writeByte('\n');
                 }
             },
             .messages => |conversation_id| {
@@ -113,7 +128,7 @@ const Command = union(enum) {
 };
 
 /// Reads the token and region the token script stored, and starts a Chat Service client.
-fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) !void {
+fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) ConnectError!void {
     const token_item: KeychainItem = .{ .service = keychain_service, .account = "skype-token" };
     const token = try token_item.read(gpa);
     defer gpa.free(token);
@@ -132,34 +147,41 @@ fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) !void {
 
 fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {
     const sender = message.sender_name orelse message.sender orelse "(unknown sender)";
-    try stdout.print("{s}  {s}: ", .{ message.arrived_at, sender });
+    try writeVisible(stdout, message.arrived_at);
+    try stdout.writeAll("  ");
+    try writeVisible(stdout, sender);
+    try stdout.writeAll(": ");
 
     if (message.deleted_at_ms != null) {
         try stdout.writeAll("(deleted)");
     } else if (message.isText()) {
         try message.writeText(stdout);
     } else {
-        try stdout.print("[{s}]", .{message.message_type});
+        try stdout.writeByte('[');
+        try writeVisible(stdout, message.message_type);
+        try stdout.writeByte(']');
     }
     try stdout.writeByte('\n');
 }
 
-/// Prints a one-line hint for errors you can act on. Anything else is a bug and propagates.
-fn reportError(stderr: *Io.Writer, err: anyerror, response_status: ?std.http.Status) !u8 {
+/// Prints a one-line hint for every way a command can fail. The switch is exhaustive, so a new
+/// error in the client or keychain doesn't compile until it has a hint.
+fn reportError(
+    stderr: *Io.Writer,
+    err: CommandError,
+    response_status: ?std.http.Status,
+) Io.Writer.Error!u8 {
     const rerun_script = "run scripts/teams-token.fish";
-    switch (err) {
-        error.ItemNotFound => try stderr.writeAll(
-            "teams-zig: no token in the login keychain; " ++ rerun_script ++ "\n",
-        ),
-        error.UnknownRegion => try stderr.writeAll(
-            "teams-zig: the stored region isn't amer, emea or apac; " ++ rerun_script ++ "\n",
-        ),
-        error.TokenExpired => try stderr.writeAll(
-            "teams-zig: the skype token has expired; " ++ rerun_script ++ "\n",
-        ),
-        error.NotFound => try stderr.writeAll(
-            "teams-zig: no conversation with that id, or it isn't yours\n",
-        ),
+    const hint = switch (err) {
+        error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
+        error.UnknownRegion => "the stored region isn't amer, emea or apac; " ++ rerun_script,
+        error.UserCanceled => "keychain access was cancelled",
+        error.AuthFailed => "the keychain refused access; check its teams-zig items",
+        error.InteractionNotAllowed => "the keychain is locked; unlock it and try again",
+        error.Unexpected => "the keychain returned an unexpected status",
+        error.OutOfMemory => "out of memory",
+        error.TokenExpired => "the skype token has expired; " ++ rerun_script,
+        error.NotFound => "no conversation with that id, or it isn't yours",
         error.UnexpectedStatus => {
             // Client sets response_status before it returns UnexpectedStatus.
             std.debug.assert(response_status != null);
@@ -167,26 +189,21 @@ fn reportError(stderr: *Io.Writer, err: anyerror, response_status: ?std.http.Sta
                 "teams-zig: the Chat Service answered HTTP {d}\n",
                 .{@backingInt(response_status.?)},
             );
+            try stderr.flush();
+            return 1;
         },
-        error.ForeignLink => try stderr.writeAll(
-            "teams-zig: the Chat Service linked to another host; not following it\n",
-        ),
-        // Client refuses redirects, so std reports any redirect as too many.
-        error.TooManyHttpRedirects => try stderr.writeAll(
-            "teams-zig: the Chat Service redirected; not following it, to keep the token there\n",
-        ),
-        error.SendFailed => try stderr.writeAll(
-            "teams-zig: couldn't send the request to the Chat Service; try again\n",
-        ),
+        error.ForeignLink => "the Chat Service linked to another host; not following it",
+        error.Redirected => "the Chat Service redirected; not following, so the token stays there",
+        error.ConnectFailed => "couldn't reach the Chat Service; check the network",
+        error.SendFailed => "couldn't send the request to the Chat Service; try again",
+        error.ConnectionDropped => "the connection dropped mid-response; try again",
+        error.BadResponse => "the Chat Service sent a response that isn't valid HTTP",
+        error.UnexpectedJson => "the Chat Service's reply had an unexpected shape",
+        error.ResponseTooLarge => "the Chat Service sent a response larger than teams-zig accepts",
         // Only writes to stdout return WriteFailed here, as when a pipe reader like `head` exits.
-        error.WriteFailed => try stderr.writeAll(
-            "teams-zig: couldn't write the output; was the pipe closed?\n",
-        ),
-        error.ResponseTooLarge => try stderr.writeAll(
-            "teams-zig: the Chat Service sent a response larger than teams-zig accepts\n",
-        ),
-        else => return err,
-    }
+        error.WriteFailed => "couldn't write the output; was the pipe closed?",
+    };
+    try stderr.print("teams-zig: {s}\n", .{hint});
     try stderr.flush();
     return 1;
 }

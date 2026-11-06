@@ -4,6 +4,7 @@ const Message = @This();
 
 const std = @import("std");
 const json = @import("json.zig");
+const text = @import("text.zig");
 const Owned = @import("Owned.zig").Owned;
 
 // Every string borrows the arena of the `List` or page that parsed it.
@@ -59,11 +60,13 @@ pub fn isText(message: *const Message) bool {
     return std.mem.eql(u8, message.message_type, "RichText/Html");
 }
 
-/// Writes `content` as plain text: tags dropped, the common entities decoded.
-/// Plain `Text` messages pass through unchanged.
+/// Writes `content` as plain text: tags dropped, the common entities decoded. Plain `Text`
+/// messages keep their text. Either way, control bytes are shown as `\xNN` (see `writeVisible`).
 pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     std.debug.assert(message.isText());
-    if (std.mem.eql(u8, message.message_type, "Text")) return writer.writeAll(message.content);
+    if (std.mem.eql(u8, message.message_type, "Text")) {
+        return text.writeVisible(writer, message.content);
+    }
 
     var rest = message.content;
     while (rest.len > 0) {
@@ -84,7 +87,7 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
         }
         const byte = rest[0];
         rest = rest[1..];
-        try writer.writeByte(byte);
+        try text.writeVisible(writer, &.{byte});
     }
 }
 
@@ -257,4 +260,27 @@ test "writeText passes unknown entities and a bare ampersand through" {
 
 test "senderOf returns the whole value when from has no slash" {
     try std.testing.expectEqualStrings("8:orgid:fake-uuid", senderOf("8:orgid:fake-uuid"));
+}
+
+test "writeText shows control bytes from both plain and HTML content" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    const plain: Message = .{
+        .id = "1",
+        .message_type = "Text",
+        .sender = null,
+        .sender_name = null,
+        .content = "fake\x1b[2J",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    try plain.writeText(&out.writer);
+
+    var html = plain;
+    html.message_type = "RichText/Html";
+    html.content = "<p>fake\x1b[2J</p>";
+    try html.writeText(&out.writer);
+
+    try std.testing.expectEqualStrings("fake\\x1b[2Jfake\\x1b[2J", out.written());
 }

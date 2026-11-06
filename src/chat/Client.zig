@@ -42,9 +42,20 @@ pub const Error = error{
     /// stays with the Chat Service.
     ForeignLink,
     ResponseTooLarge,
-    /// Sending the request failed, such as on a dropped connection.
+    /// Couldn't reach the Chat Service: the name lookup, the connection or TLS failed.
+    ConnectFailed,
+    /// Sending the request failed, such as on a connection the server had closed.
     SendFailed,
-} || std.http.Client.FetchError || std.mem.Allocator.Error;
+    /// The connection dropped before the whole response arrived.
+    ConnectionDropped,
+    /// The response broke HTTP: malformed headers or chunks, or an unsupported encoding.
+    BadResponse,
+    /// The service redirected. Redirects are refused, so the token stays with the Chat Service.
+    Redirected,
+    /// The JSON didn't have the shape the client expects; the service may have changed it.
+    UnexpectedJson,
+    OutOfMemory,
+};
 
 /// Big enough for a full page of HTML-heavy messages; anything larger is refused, not truncated.
 const body_size_max = 8 * 1024 * 1024;
@@ -120,12 +131,16 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
 
-    var body: std.Io.Writer = .fixed(client.body_buffer);
-    const result = client.http.fetch(.{
-        .location = .{ .url = url },
-        .raw_uri = false,
-        .method = .GET,
-        .payload = null,
+    const uri = std.Uri.parse(url) catch return error.BadResponse;
+    var request = client.http.request(.GET, uri, .{
+        .version = .@"HTTP/1.1",
+        .handle_continue = true,
+        .keep_alive = true,
+        // Redirects are refused so the token never leaves the Chat Service host. std would keep
+        // extra headers across a cross-domain redirect, and in 0.17 it never sends
+        // privileged_headers at all, so those can't carry the token instead.
+        .redirect_behavior = .not_allowed,
+        .connection = null,
         .headers = .{
             .host = .default,
             .authorization = .default,
@@ -134,46 +149,86 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
             .accept_encoding = .default,
             .content_type = .default,
         },
-        .keep_alive = true,
-        // Redirects are refused so the token never leaves the Chat Service host. std would
-        // keep extra headers across a cross-domain redirect, and in 0.17 it never sends
-        // privileged_headers at all, so those can't carry the token instead.
-        .redirect_behavior = .not_allowed,
-        // Never used: redirects are refused before std needs it. Non-null, so fetch doesn't
-        // allocate one.
-        .redirect_buffer = &.{},
-        .decompress_buffer = null,
-        .response_writer = &body,
         .extra_headers = &.{
             .{ .name = "Authentication", .value = client.authentication },
             .{ .name = "Accept", .value = "application/json" },
         },
         .privileged_headers = &.{},
-    }) catch |err| return fetchError(err, body.end);
+    }) catch |err| return requestError(err);
+    defer request.deinit();
 
-    client.response_status = result.status;
-    return switch (result.status) {
-        .ok => body.buffered(),
-        .unauthorized => error.TokenExpired,
-        .not_found => error.NotFound,
-        else => error.UnexpectedStatus,
+    request.sendBodiless() catch return error.SendFailed;
+    // Redirects are refused, so receiveHead never needs a redirect buffer.
+    var response = request.receiveHead(&.{}) catch |err| return receiveHeadError(err);
+
+    client.response_status = response.head.status;
+    switch (response.head.status) {
+        .ok => {},
+        .unauthorized => return error.TokenExpired,
+        .not_found => return error.NotFound,
+        else => return error.UnexpectedStatus,
+    }
+
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try client.gpa.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try client.gpa.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.BadResponse,
+    };
+    defer client.gpa.free(decompress_buffer);
+
+    var body: std.Io.Writer = .fixed(client.body_buffer);
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    // Read here rather than through fetch: fetch unwraps bodyErr() on ReadFailed, which is null
+    // when the connection drops mid-body, and crashes.
+    _ = reader.streamRemaining(&body) catch |err| return bodyError(err, response.bodyErr());
+
+    return body.buffered();
+}
+
+/// DNS, TCP and TLS failures all mean the Chat Service couldn't be reached.
+fn requestError(err: std.http.Client.RequestError) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ConnectFailed,
     };
 }
 
-/// Maps a fetch error. WriteFailed comes from sending the request too, and the request is sent
-/// before any body byte arrives: only a failure after body bytes means the body outgrew the
-/// buffer.
-fn fetchError(err: std.http.Client.FetchError, body_byte_count: usize) Error {
+fn receiveHeadError(err: std.http.Client.Request.ReceiveHeadError) Error {
     return switch (err) {
-        error.WriteFailed => if (body_byte_count == 0) error.SendFailed else error.ResponseTooLarge,
-        else => |other| other,
+        error.OutOfMemory => error.OutOfMemory,
+        error.TooManyHttpRedirects => error.Redirected,
+        error.ReadFailed, error.HttpRequestTruncated, error.HttpConnectionClosing => {
+            return error.ConnectionDropped;
+        },
+        error.WriteFailed => error.SendFailed,
+        else => error.BadResponse,
+    };
+}
+
+/// The body writer is a fixed buffer, so its only failure is running out of room. A read failure
+/// is a broken chunk when std recorded a body error, and a dropped connection when it didn't.
+fn bodyError(err: std.Io.Reader.StreamRemainingError, body_err: ?std.http.Reader.BodyError) Error {
+    return switch (err) {
+        error.WriteFailed => error.ResponseTooLarge,
+        error.ReadFailed => if (body_err == null) error.ConnectionDropped else error.BadResponse,
+    };
+}
+
+/// Running out of memory stays itself; any other parse failure means the JSON's shape changed.
+fn parseError(err: json.ParseError) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.UnexpectedJson,
     };
 }
 
 /// Returns the signed-in user, owned by the caller: free it with `User.deinit`.
-pub fn whoami(client: *Client) (Error || json.ParseError)!User {
+pub fn whoami(client: *Client) Error!User {
     const body = try client.get("/users/ME/properties");
-    return User.parse(client.gpa, body);
+    return User.parse(client.gpa, body) catch |err| parseError(err);
 }
 
 /// Returns your most recent conversations, newest first, without system streams.
@@ -181,7 +236,7 @@ pub fn whoami(client: *Client) (Error || json.ParseError)!User {
 pub fn conversations(
     client: *Client,
     conversation_count_max: u16,
-) (Error || json.ParseError)!Conversation.List {
+) Error!Conversation.List {
     std.debug.assert(conversation_count_max > 0);
     std.debug.assert(conversation_count_max <= page_item_count_max);
 
@@ -193,7 +248,7 @@ pub fn conversations(
         unreachable;
 
     const body = try client.get(path);
-    return Conversation.parseList(client.gpa, body);
+    return Conversation.parseList(client.gpa, body) catch |err| parseError(err);
 }
 
 /// Returns up to `message_count_max` of a conversation's messages, newest first, following older
@@ -203,7 +258,7 @@ pub fn messages(
     client: *Client,
     conversation_id: []const u8,
     message_count_max: u32,
-) (Error || json.ParseError)!Message.List {
+) Error!Message.List {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(message_count_max > 0);
     // page_count_max pages can't hold more, so a larger count would only reserve dead memory.
@@ -228,7 +283,7 @@ fn collectMessages(
     source: anytype,
     url_first: []const u8,
     message_count_max: u32,
-) (Error || json.ParseError)![]const Message {
+) Error![]const Message {
     std.debug.assert(url_first.len > 0);
     std.debug.assert(message_count_max > 0);
     std.debug.assert(message_count_max <= message_count_limit);
@@ -240,7 +295,8 @@ fn collectMessages(
         if (items.items.len == message_count_max) break;
         if (page_count == page_count_max) break;
 
-        const page = try Message.parsePage(arena, try source.getUrl(page_url));
+        const body = try source.getUrl(page_url);
+        const page = Message.parsePage(arena, body) catch |err| return parseError(err);
         const room_count = message_count_max - items.items.len;
         items.appendSliceAssumeCapacity(page.items[0..@min(page.items.len, room_count)]);
         link = page.backward_link;
@@ -385,8 +441,23 @@ test "collectMessages stops after page_count_max endless empty pages" {
     try std.testing.expectEqual(page_count_max, pages.request_count);
 }
 
-test "fetchError tells a failed send from an oversized body" {
-    try std.testing.expectEqual(error.SendFailed, fetchError(error.WriteFailed, 0));
-    try std.testing.expectEqual(error.ResponseTooLarge, fetchError(error.WriteFailed, 4096));
-    try std.testing.expectEqual(error.ConnectionRefused, fetchError(error.ConnectionRefused, 0));
+test "bodyError tells a dropped connection from a broken chunk and a full buffer" {
+    try std.testing.expectEqual(error.ConnectionDropped, bodyError(error.ReadFailed, null));
+    const broken_chunk = bodyError(error.ReadFailed, error.HttpChunkInvalid);
+    try std.testing.expectEqual(error.BadResponse, broken_chunk);
+    try std.testing.expectEqual(error.ResponseTooLarge, bodyError(error.WriteFailed, null));
+}
+
+test "request and head errors map to what the user can act on" {
+    try std.testing.expectEqual(error.ConnectFailed, requestError(error.TlsInitializationFailed));
+    try std.testing.expectEqual(error.OutOfMemory, requestError(error.OutOfMemory));
+    try std.testing.expectEqual(error.Redirected, receiveHeadError(error.TooManyHttpRedirects));
+    try std.testing.expectEqual(error.ConnectionDropped, receiveHeadError(error.ReadFailed));
+    try std.testing.expectEqual(error.SendFailed, receiveHeadError(error.WriteFailed));
+    try std.testing.expectEqual(error.BadResponse, receiveHeadError(error.HttpHeadersInvalid));
+}
+
+test "parse errors other than running out of memory mean unexpected JSON" {
+    try std.testing.expectEqual(error.UnexpectedJson, parseError(error.MissingField));
+    try std.testing.expectEqual(error.OutOfMemory, parseError(error.OutOfMemory));
 }
