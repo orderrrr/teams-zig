@@ -6,9 +6,20 @@ set -l profile "$HOME/Library/Application Support/teams-zig/browser"
 set -l wait_seconds 300
 set -lx AGENT_BROWSER_SESSION teams-zig
 
-# The web client sends the skype token as a request header, not as the skypetoken_asm cookie.
-set -l skype_token_query '[.data.requests[].headers | to_entries[]
-    | select(.key | ascii_downcase == "x-skypetoken") | .value | sub("^skypetoken="; "")] | first // empty'
+# The web client never sets the skypetoken_asm cookie. At startup it posts the skype token to
+# .../v1/skypetokenauth as a form body; some loads also send it as an x-skypetoken header.
+set -l skype_token_query '[(.data.requests[]
+        | select(.method == "POST" and (.url | test("/v1/skypetokenauth$")))
+        | .postData // "" | select(startswith("skypetoken=")) | ltrimstr("skypetoken=")),
+    (.data.requests[].headers | to_entries[]
+        | select(.key | ascii_downcase == "x-skypetoken") | .value | sub("^skypetoken="; ""))]
+    | map(select(length > 0)) | first // empty'
+# Chat Service URLs carry the region in the host or, on the newer web host, in the path.
+# The comma makes capture try each pattern.
+set -l region_query '[.data.requests[].url
+    | capture("^https://(?<region>[a-z]+)[.]ng[.]msg[.]teams[.]microsoft[.]com/",
+        "^https://teams[.]cloud[.]microsoft/api/(?:chatsvc|mt)/(?<region>[a-z]+)/")
+    | .region] | first // empty'
 
 mkdir -p $profile
 agent-browser --headed --profile $profile open https://teams.microsoft.com >/dev/null
@@ -19,9 +30,12 @@ end
 
 echo "Sign in to Teams in the browser window if asked. Waiting up to $wait_seconds seconds..." >&2
 set -l skype_token
+set -l region
 for second in (seq 2 2 $wait_seconds)
-    set skype_token (agent-browser network requests --json | jq -r $skype_token_query)
-    test -n "$skype_token"; and break
+    set -l requests (agent-browser network requests --json | string collect)
+    set skype_token (echo $requests | jq -r $skype_token_query)
+    set region (echo $requests | jq -r $region_query)
+    test -n "$skype_token" -a -n "$region"; and break
     sleep 2
 end
 
@@ -31,4 +45,9 @@ or begin
     echo "teams-token: no skype token seen before the timeout" >&2
     exit 1
 end
-echo "Found the skype token." >&2
+contains -- $region amer emea apac
+or begin
+    echo "teams-token: no known Chat Service region seen (got '$region')" >&2
+    exit 1
+end
+echo "Found the skype token and region $region." >&2
