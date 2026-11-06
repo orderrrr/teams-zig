@@ -205,3 +205,23 @@ Live after the rounds (read-only, counts only): `watch` printed real incoming me
 
 Not done in M3: the self-chat row in `chats` stays as `notes (no topic) 48:notes`; the owner chose to keep it.
 
+
+## M4 gate
+
+**Round 1** (mr-review, STYLE.md and Tiger Style reviews of `d6f219f..ee877dc`):
+- An empty heading put `## ` on the next paragraph, and an empty item in a nested list gave the outer item's next line a stray `- `; both fixed and tested (`169ac60`).
+- Owner request during the gate: the compact layout stays (`time  sender: ` then the body, continuing below), not a header line, body and blank line (`7bd0ae3`).
+- STYLE fixes: an optional heading level, no trivial `Reader.init`, one optional code-block state, one record of open marks, no flag picking two prefix paths (`a59e49f`).
+- Tiger fixes: compound conditions split, sized integers, no aliases, positive flags, asserts on values the writer controls (`5872606`).
+
+**Round 2:** `tag` dispatches once to open and close handlers, so no handler takes a flag picking between two paths (STYLE 5.5); spacing uses early returns (STYLE 5.4); no alias to the code-block state, and a written mark is asserted to be open (`abf2df2`).
+
+**Round 3:** helpers split from one caller carry its name (`ac2312e`).
+
+**Round 4:** the same naming applied to every single-caller helper in `markdown.zig`; two one-caller helpers folded into their callers (`fef24e0`).
+
+**Round 5:** mr-review and STYLE.md found nothing. Tiger raised whether the call-history naming rule reaches a type's own methods (`Output.text`, `entity`, `tag`, `finish`, called only by `writeHtml`; `List.markerWidth`). Parked for the owner: the literal reading renames the type's whole interface.
+
+Live after each round (read-only, counts only): about 505 messages across 11 chats (48:notes and the 10 newest) render with no `\x0d`, no raw control bytes and no leftover tags; code fences pair up.
+
+Decided along the way: compound conditions, aliases and flag parameters are refactored away rather than waived; the incremental compiler was tried at the owner's request and isn't usable on arm64 macOS with Zig 0.17 (it crashes, and the self-hosted backend emits a binary that won't run), so builds stay as they are (about 3.3 s per rebuild).
