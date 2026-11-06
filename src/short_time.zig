@@ -71,11 +71,11 @@ pub const Times = struct {
 pub fn write(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     std.debug.assert(times.at_seconds >= 0);
     std.debug.assert(times.now_seconds >= 0);
+    try writeDay(writer, times);
     // Unsigned, so they print without a sign.
     const at_day_seconds: u64 = @intCast(@mod(times.at_seconds, std.time.s_per_day));
     const hour = @divFloor(at_day_seconds, std.time.s_per_hour);
     const minute = @divFloor(@mod(at_day_seconds, std.time.s_per_hour), std.time.s_per_min);
-    try writeDay(writer, times);
     try writer.print("{d:0>2}:{d:0>2}", .{ hour, minute });
 }
 
