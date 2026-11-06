@@ -47,6 +47,7 @@ pub const Data = opaque {
 pub const Dictionary = opaque {
     /// Keys and values side by side. A struct, so the two lists can't be swapped at a call site.
     pub const Entries = struct {
+        /// Both lists are borrowed for the length of the `create` call.
         keys: []const *const anyopaque,
         values: []const *const anyopaque,
     };

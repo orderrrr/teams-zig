@@ -6,6 +6,7 @@ const std = @import("std");
 const json = @import("json.zig");
 const Owned = @import("Owned.zig").Owned;
 
+// Every string borrows the arena of the `List` that parsed it.
 id: []const u8,
 kind: Kind,
 /// Null for 1:1 chats, which have no topic.
@@ -57,7 +58,6 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
             .last_message_at = properties.lastimreceivedtime,
         });
     }
-    std.debug.assert(items.items.len <= response.conversations.len);
 
     list.items = items.items;
     return list;

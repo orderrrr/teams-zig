@@ -6,6 +6,7 @@ const std = @import("std");
 const json = @import("json.zig");
 const Owned = @import("Owned.zig").Owned;
 
+// Every string borrows the arena of the `List` or page that parsed it.
 id: []const u8,
 /// `Text` and `RichText/Html` are user-written; anything else (`ThreadActivity/AddMember`,
 /// `Event/Call`, ...) is an event whose content isn't meant for reading.
@@ -26,6 +27,7 @@ pub const List = Owned(Message);
 
 /// One response: its messages, and the URL of the next older page if there is one.
 pub const Page = struct {
+    /// Both fields borrow the arena passed to `parsePage`.
     items: []const Message,
     backward_link: ?[]const u8,
 };
@@ -105,7 +107,6 @@ pub fn parsePage(arena: std.mem.Allocator, body: []const u8) json.ParseError!Pag
             .deleted_at_ms = if (raw.properties) |properties| properties.deletetime else null,
         };
     }
-    std.debug.assert(items.len == response.messages.len);
 
     return .{ .items = items, .backward_link = response._metadata.backwardLink };
 }

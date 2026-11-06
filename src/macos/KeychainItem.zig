@@ -7,6 +7,7 @@ const std = @import("std");
 const core_foundation = @import("core_foundation.zig");
 const security = @import("security.zig");
 
+/// Both names are borrowed: they must outlive every call on the item.
 service: []const u8,
 account: []const u8,
 

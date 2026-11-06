@@ -107,7 +107,6 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     const base = client.region.baseUrl();
     if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
-    std.debug.assert(url.len > base.len);
 
     var body: std.Io.Writer = .fixed(client.body_buffer);
     var redirect_buffer: [8 * 1024]u8 = undefined;
@@ -145,10 +144,7 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
 
     client.response_status = result.status;
     return switch (result.status) {
-        .ok => okBody: {
-            std.debug.assert(body.buffered().len <= body_size_max);
-            break :okBody body.buffered();
-        },
+        .ok => body.buffered(),
         .unauthorized => error.TokenExpired,
         .not_found => error.NotFound,
         else => error.UnexpectedStatus,
@@ -197,7 +193,6 @@ pub fn messages(
     defer client.gpa.free(url_first);
 
     list.items = try collectMessages(list.arena.allocator(), client, url_first, message_count_max);
-    std.debug.assert(list.items.len <= message_count_max);
     return list;
 }
 

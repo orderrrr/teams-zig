@@ -13,9 +13,7 @@ pub fn Owned(comptime T: type) type {
             const arena = try gpa.create(std.heap.ArenaAllocator);
             arena.* = .init(gpa);
 
-            const owned: Self = .{ .arena = arena, .items = &.{} };
-            std.debug.assert(owned.items.len == 0);
-            return owned;
+            return .{ .arena = arena, .items = &.{} };
         }
 
         pub fn deinit(owned: *const Self) void {

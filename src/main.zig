@@ -62,7 +62,6 @@ const Command = union(enum) {
     messages: []const u8,
 
     fn parse(arguments: []const []const u8) ?Command {
-        std.debug.assert(arguments.len >= 1);
         switch (arguments.len) {
             2 => {
                 if (std.mem.eql(u8, arguments[1], "whoami")) return .whoami;
@@ -129,7 +128,6 @@ fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) !void {
 
     const Region = chat.Client.Region;
     const region = std.meta.stringToEnum(Region, region_name) orelse return error.UnknownRegion;
-    std.debug.assert(token.len > 0);
     try client.init(gpa, io, region, token);
 }
 
