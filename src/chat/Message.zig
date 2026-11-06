@@ -5,7 +5,7 @@ const Message = @This();
 const std = @import("std");
 const json = @import("json.zig");
 const mri = @import("mri.zig");
-const html = @import("html.zig");
+const markdown = @import("markdown.zig");
 const text = @import("text.zig");
 const Owned = @import("Owned.zig").Owned;
 
@@ -58,20 +58,15 @@ pub fn isTextType(message_type: []const u8) bool {
     return std.mem.eql(u8, message_type, "RichText/Html");
 }
 
-/// Writes `content` as plain text: tags dropped, the common entities decoded. Plain `Text`
-/// messages keep their text. Either way, control bytes are shown as `\xNN` (see `writeVisible`).
+/// Writes `content` for a terminal: HTML as Markdown (see `markdown.writeHtml`), plain `Text` as
+/// it is. Either way, control bytes are shown as `\xNN` (see `writeVisible`).
 pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     std.debug.assert(message.isText());
     if (std.mem.eql(u8, message.message_type, "Text")) {
         return text.writeVisible(writer, message.content);
     }
 
-    var reader: html.Reader = .init(message.content);
-    while (reader.next()) |token| switch (token) {
-        .text => |run| try text.writeVisible(writer, run),
-        .entity => |replacement| try writer.writeAll(replacement),
-        .tag => {},
-    };
+    return markdown.writeHtml(writer, message.content);
 }
 
 /// Parses one messages response. `arena` owns everything returned.
@@ -184,7 +179,7 @@ test "writeText drops an unterminated tag instead of failing" {
     defer out.deinit();
 
     try message.writeText(&out.writer);
-    try std.testing.expectEqualStrings("fake 3 ", out.written());
+    try std.testing.expectEqualStrings("fake 3", out.written());
 }
 
 test "parsePage fails on a message without an arrival time" {
