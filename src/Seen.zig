@@ -103,7 +103,6 @@ fn fold(seen: *Seen) void {
     var marks = seen.marks.valueIterator();
     while (marks.next()) |chat_mark| seen.mark_first = @max(seen.mark_first, chat_mark.*);
     seen.marks.clearRetainingCapacity();
-    std.debug.assert(seen.marks.count() == 0);
     seen.id_bytes_used = 0;
 }
 
