@@ -85,6 +85,20 @@ Decided along the way: STYLE 1.6 (camelCase, JSON and extern name exceptions), S
 
 Carried to M2 as optional polish: say why `security`'s "not found" exit status is 44 (the low byte of errSecItemNotFound); "no access prompt" wording next to the unlock-dialog comment; reflow the watchdog comment; drop or use `security.Status.duplicate_item`, which nothing references.
 
-## M2: not yet planned
+## M2: read-only improvements
 
-Writes (sending, editing, deleting, reactions) are blocked by the zero-writes rule in CLAUDE.md until the owner lifts it. Named so far: 1:1 chat names in `chats`.
+Goal: `chats` names the other person in 1:1 chats, `chats` and `messages` can go back further than the newest 50, and M1's carried polish is done. Everything stays read-only: the zero-writes rule in CLAUDE.md still holds, and every request is a GET.
+
+### Chunks
+
+1. **M2.1 M1 polish.** Why `security`'s "not found" exit status is 44; "no access prompt" wording; reflow the watchdog comment; drop `security.Status.duplicate_item`.
+2. **M2.2 who am I, as an MRI.** Find the signed-in user's MRI (`8:orgid:<uuid>`) from a read we already make, most likely `skypeName` in `/users/ME/properties`; check its shape live (keys and format only) before relying on it.
+3. **M2.3 last sender per conversation.** Parse the `lastMessage` sender MRI and display name that `/users/ME/conversations` already returns, at no extra request.
+4. **M2.4 members.** `Client.members(conversation_id)`: `GET /threads/{id}/members`, parsing each member's MRI and display name, with the same link and output safety as other requests.
+5. **M2.5 1:1 names in `chats`.** For a 1:1 chat, show the other person: the last sender's name when that isn't you (free), otherwise one members call for that chat. That bounds the extra requests to chats where you spoke last, instead of one per chat. Names still go through `writeVisible`.
+6. **M2.6 counts.** `teams-zig chats [count]` and `teams-zig messages <id> [count]`: optional, bounded counts (conversations follow `backwardLink` pages the way messages already do). Defaults stay 50.
+7. **M2.7 live check and gate.** Read-only checks in normal and test mode, then the milestone gate.
+
+### Out of M2
+
+Anything that writes to Teams. Search (needs a second token). Profiles and files.
