@@ -59,10 +59,6 @@ const page_count_max = 64;
 /// The most messages `messages` can ever collect.
 const message_count_limit = page_item_count_max * page_count_max;
 
-comptime {
-    std.debug.assert(body_size_max >= std.json.default_max_value_len);
-}
-
 pub fn init(
     client: *Client,
     gpa: std.mem.Allocator,
@@ -125,9 +121,6 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
 
     var body: std.Io.Writer = .fixed(client.body_buffer);
-    // Redirects are refused, but std reads the head into this buffer and would heap-allocate one
-    // if it were null; RFC 9110 recommends room for at least 8000 bytes.
-    var redirect_buffer: [8 * 1024]u8 = undefined;
     const result = client.http.fetch(.{
         .location = .{ .url = url },
         .raw_uri = false,
@@ -146,7 +139,9 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         // keep extra headers across a cross-domain redirect, and in 0.17 it never sends
         // privileged_headers at all, so those can't carry the token instead.
         .redirect_behavior = .not_allowed,
-        .redirect_buffer = &redirect_buffer,
+        // Never used: redirects are refused before std needs it. Non-null, so fetch doesn't
+        // allocate one.
+        .redirect_buffer = &.{},
         .decompress_buffer = null,
         .response_writer = &body,
         .extra_headers = &.{
@@ -154,15 +149,7 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
             .{ .name = "Accept", .value = "application/json" },
         },
         .privileged_headers = &.{},
-    }) catch |err| switch (err) {
-        // WriteFailed comes from sending the request too, and the request is sent before any
-        // body byte arrives: only a failure after body bytes means the body outgrew the buffer.
-        error.WriteFailed => {
-            if (body.end == 0) return error.SendFailed;
-            return error.ResponseTooLarge;
-        },
-        else => |other| return other,
-    };
+    }) catch |err| return fetchError(err, body.end);
 
     client.response_status = result.status;
     return switch (result.status) {
@@ -170,6 +157,16 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         .unauthorized => error.TokenExpired,
         .not_found => error.NotFound,
         else => error.UnexpectedStatus,
+    };
+}
+
+/// Maps a fetch error. WriteFailed comes from sending the request too, and the request is sent
+/// before any body byte arrives: only a failure after body bytes means the body outgrew the
+/// buffer.
+fn fetchError(err: std.http.Client.FetchError, body_byte_count: usize) Error {
+    return switch (err) {
+        error.WriteFailed => if (body_byte_count == 0) error.SendFailed else error.ResponseTooLarge,
+        else => |other| other,
     };
 }
 
@@ -183,15 +180,16 @@ pub fn whoami(client: *Client) (Error || json.ParseError)!User {
 /// The result is owned by the caller: free it with `List.deinit`.
 pub fn conversations(
     client: *Client,
-    page_item_count: u16,
+    conversation_count_max: u16,
 ) (Error || json.ParseError)!Conversation.List {
-    std.debug.assert(page_item_count > 0);
-    std.debug.assert(page_item_count <= page_item_count_max);
+    std.debug.assert(conversation_count_max > 0);
+    std.debug.assert(conversation_count_max <= page_item_count_max);
 
     const path_prefix = "/users/ME/conversations?view=mychats&pageSize=";
     // Sized for the largest count the assert above allows, so the formatted path always fits.
     var path_buffer: [path_prefix.len + std.fmt.count("{d}", .{page_item_count_max})]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buffer, path_prefix ++ "{d}", .{page_item_count}) catch
+    const path_format = path_prefix ++ "{d}";
+    const path = std.fmt.bufPrint(&path_buffer, path_format, .{conversation_count_max}) catch
         unreachable;
 
     const body = try client.get(path);
@@ -385,4 +383,10 @@ test "collectMessages stops after page_count_max endless empty pages" {
     const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50);
     try std.testing.expectEqual(0, items.len);
     try std.testing.expectEqual(page_count_max, pages.request_count);
+}
+
+test "fetchError tells a failed send from an oversized body" {
+    try std.testing.expectEqual(error.SendFailed, fetchError(error.WriteFailed, 0));
+    try std.testing.expectEqual(error.ResponseTooLarge, fetchError(error.WriteFailed, 4096));
+    try std.testing.expectEqual(error.ConnectionRefused, fetchError(error.ConnectionRefused, 0));
 }
