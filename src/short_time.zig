@@ -87,12 +87,12 @@ fn writeDay(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     const days_ago = now_day - at_day;
     if (days_ago == 0) return;
     // A time in a later day than now: the full date.
-    if (days_ago < 0) return writeDate(writer, at_day);
-    if (days_ago <= 6) return writeWeekday(writer, at_day);
-    return writeDate(writer, at_day);
+    if (days_ago < 0) return writeDayDate(writer, at_day);
+    if (days_ago <= 6) return writeDayWeekday(writer, at_day);
+    return writeDayDate(writer, at_day);
 }
 
-fn writeWeekday(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
+fn writeDayWeekday(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
     std.debug.assert(day >= 0);
     // 1970-01-01 was a Thursday.
     const weekday_names = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
@@ -100,7 +100,7 @@ fn writeWeekday(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
     try writer.writeByte(' ');
 }
 
-fn writeDate(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
+fn writeDayDate(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
     std.debug.assert(day >= 0);
     const epoch_day: std.time.epoch.EpochDay = .{ .day = @intCast(day) };
     const year_day = epoch_day.calculateYearDay();
