@@ -339,8 +339,8 @@ fn parseRegion(region_name: []const u8) error{UnknownRegion}!chat.Client.Region 
 }
 
 /// The other person in a 1:1 chat: the last sender when that isn't you, which costs nothing, and
-/// otherwise the newest sender in its recent messages who isn't you. Null for chats that aren't
-/// 1:1, and when the other person hasn't written recently.
+/// otherwise the newest writer in its recent messages who isn't you. Null for chats that aren't
+/// 1:1, and when the other person hasn't written recently. The name is owned by `arena`.
 fn otherPersonName(
     client: *chat.Client,
     arena: std.mem.Allocator,
@@ -350,9 +350,12 @@ fn otherPersonName(
     if (!conversation.isOneToOne()) return null;
     if (conversation.topic != null) return null;
 
-    const last_sender = conversation.last_sender orelse "";
-    if (!std.mem.eql(u8, last_sender, self_mri)) {
-        if (conversation.last_sender_name) |name| return name;
+    const self_sent_last = if (conversation.last_sender) |sender|
+        std.mem.eql(u8, sender, self_mri)
+    else
+        false;
+    if (!self_sent_last) {
+        if (conversation.last_sender_name) |name| return try arena.dupe(u8, name);
     }
 
     const recent = client.messages(conversation.id, recent_message_count) catch |err| switch (err) {
@@ -362,17 +365,25 @@ fn otherPersonName(
     };
     defer recent.deinit();
 
-    for (recent.items) |*message| {
+    const name = otherWriterName(recent.items, self_mri) orelse return null;
+    return try arena.dupe(u8, name);
+}
+
+/// The display name on the newest user-written message (`messages` is newest first) from someone
+/// other than `self_mri`. System events and their senders don't count. Borrows from `messages`.
+fn otherWriterName(messages: []const chat.Message, self_mri: []const u8) ?[]const u8 {
+    for (messages) |*message| {
+        if (!message.isText()) continue;
         const sender = message.sender orelse continue;
         if (std.mem.eql(u8, sender, self_mri)) continue;
-        const name = message.sender_name orelse continue;
-        return try arena.dupe(u8, name);
+        return message.sender_name orelse continue;
     }
     return null;
 }
 
 /// A count from the command line: a whole number from 1 to `count_max`, or null.
 fn parseCount(text: []const u8, count_max: u32) ?u32 {
+    std.debug.assert(count_max > 0);
     const count = std.fmt.parseInt(u32, text, 10) catch return null;
     if (count == 0) return null;
     if (count > count_max) return null;
@@ -471,4 +482,29 @@ test "checkToken rejects line breaks" {
     try checkToken("fake-token");
     try std.testing.expectError(error.InvalidToken, checkToken("fake\r\nX-Injected: 1"));
     try std.testing.expectError(error.InvalidToken, checkToken("fake\n"));
+}
+
+test "otherWriterName takes the newest user-written message from someone else" {
+    const self_mri = "8:orgid:fake-self";
+    const template: chat.Message = .{
+        .id = "",
+        .message_type = "RichText/Html",
+        .sender = self_mri,
+        .sender_name = "Fake Self",
+        .content = "",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    var messages = [_]chat.Message{ template, template, template, template };
+    // Newest first: mine, a system event from a bot, then the other person, then older.
+    messages[1].message_type = "ThreadActivity/AddMember";
+    messages[1].sender = "28:fake-bot";
+    messages[1].sender_name = "Fake Bot";
+    messages[2].sender = "8:orgid:fake-other";
+    messages[2].sender_name = "Fake Other";
+    messages[3].sender = "8:orgid:fake-older";
+    messages[3].sender_name = "Fake Older";
+
+    try std.testing.expectEqualStrings("Fake Other", otherWriterName(&messages, self_mri).?);
+    try std.testing.expectEqual(null, otherWriterName(messages[0..2], self_mri));
 }
