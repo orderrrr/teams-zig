@@ -158,6 +158,30 @@ Decided by the owner on 2026-11-06, after `messages 48:notes` printed `\x0d` and
 - M3 stays as approved: `watch` prints through today's `writeText` until M4.
 - No JSON or HTML output; Markdown is the format.
 
+### What the messages hold
+
+Measured live over the newest 50 messages of 30 chats (tag and attribute names and counts only): `p` 1872, `br` 773, `span` 439 (mostly `@`mentions), `strong` 149, `blockquote` 130 (125 are quoted replies), `img` 110 (81 pasted images, 28 emoji), `a` 106, `li` 21, `code` 17, `pre` 12, `div` 11, `ul` 5, `ol` 2, `h2`/`h3` 1 each. About 1100 lines of HTML content hold a `\r`.
+
+### Chunks
+
+Planned 2026-11-06 under the owner's instruction to plan, review and complete M4, and revised after a plan review. Plan decisions beyond the owner's list: `s`/`strike`/`del` → `~~`, `h1`–`h3` → `#`, images other than emoji → `[image]`.
+
+Safety holds throughout: every byte from the message (text, `href`, `alt`, `<pre>` content) goes through `writeVisible`; only the writer's own markers (`**`, `` ` ``, `> `, `- `, fences) are written raw. Wherever a byte is dropped or collapsed (`\r`, HTML whitespace), the text is split there and each piece is written separately, never joined in a buffer, so a C1 control can't form across the gap. Numeric entities (`&#27;`) are not decoded.
+
+1. **M4.1 HTML reader.** A pure iterator over a message's HTML yielding text runs, entities and tags (name, opening or closing, and an attribute lookup for `href`, `alt` and `itemtype`). The first `>` ends a tag, as today (Teams writes `>` in values as `&gt;`). `writeText` switches to it with unchanged output; it keeps its guarantees (always moves forward, an unterminated tag is dropped, unknown entities pass through). Tests, including `<a href="x>y">` degrading harmlessly.
+2. **M4.2 Markdown writer: lines and whitespace.** A writer that collapses the HTML's own whitespace, trims it at every line start (so no line becomes an indented code block), drops `\r`, turns `p`, `div` and `br` into line breaks, writes at most one blank line in a row, and trims blank lines at both ends. One line-start routine writes every line's prefix (empty for now). Existing `writeText` expectations change here, since line breaks now appear. Tests per rule, plus `\xc2\r\x9b` and `\xc2\n\x9b` staying escaped.
+3. **M4.3 inline markup.** `b`/`strong` → `**`, `i`/`em` → `_`, `s`/`strike`/`del` → `~~`, `code` → `` ` ``, `u` → plain, `a href` → `[text](url)`. An opening marker waits for the first non-space text (one pending marker), so empty markup writes nothing and edge spaces sit outside the markers. Mentions stay plain text. A test with `\x1b` in an `href`.
+4. **M4.4 quotes.** `blockquote` → `> ` per level at every line start, depth bounded at 8 (deeper shown at 8). Tests include a reply quote in Teams' shape (`itemtype` ending `/Reply`, a `strong` sender, a `p` preview; fake values).
+5. **M4.5 lists.** `ul`/`ol` → `- ` and `1. `, nested lists indented two spaces per level, a stack bounded at 8 (deeper shown at 8); `br` inside `li` continues the item. Tests include a list inside a quote.
+6. **M4.6 code blocks.** `pre` → a fenced block, whitespace kept and `\r` still dropped, every line still prefixed (quotes stay quoted). Tests include `pre` inside a quote and `\xc2\r\x9b` inside `pre`.
+7. **M4.7 headings and images.** `h1`–`h3` → `#`, `##`, `###`. An `img` whose `itemtype` ends `/Emoji` → its `alt` text; any other `img` → `[image]`. Tests with `\x1b` in `alt`.
+8. **M4.8 layout.** `messages` and `watch` print a header line per message (`time  sender`, through `writeVisible`, sender falling back to the MRI, then "(unknown sender)"; `watch` adds `[chat] ` first), then the body, then a blank line after every message, the last included. Plain `Text` messages drop `\r` (split, as above) and get the same layout; `(deleted)` and `[type]` bodies sit under their header the same way.
+9. **M4.9 live check, 0.4.0 and gate.** Read-only live check, counts only: no `\x0d`, no leftover tags (`<` followed by one of the measured tag names and `>` or a space), escaped control bytes counted, emoji alt outputs about equal to emoji images, headers equal to messages. CHANGELOG with the new `messages` and `watch` layout under "Changed", then the milestone gate.
+
+### Out of M4
+
+Sending or any other write. Escaping, so body lines starting with `#`, `>`, `- ` or `1. ` read as Markdown, and `` ``` `` inside a code block ends it early. Leading spaces in plain `Text` messages are kept. Colours. JSON or HTML output. Short local times, an `unread` command and `help` (candidates for later).
+
 ## M3 gate
 
 **Round 1** (mr-review, STYLE.md and Tiger Style reviews of `2818892..20fc333`):
@@ -179,3 +203,4 @@ Decided by the owner on 2026-11-06, after `messages 48:notes` printed `\x0d` and
 Live after the rounds (read-only, counts only): `watch` printed real incoming messages; `chats 100` lists 94; chats open by exact name, upper-cased names match, and a missing name ends with the hint.
 
 Not done in M3: the self-chat row in `chats` stays as `notes (no topic) 48:notes`; the owner chose to keep it.
+
