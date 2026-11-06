@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !u8 {
         .stack_size = std.Thread.SpawnConfig.default_stack_size,
         .allocator = null,
     };
-    const watchdog_arguments = .{ init.io, &chat_service_answered };
+    const watchdog_arguments = .{ init.io, &requests_started_at };
     if (std.Thread.spawn(spawn_config, watchdog, watchdog_arguments)) |watchdog_thread| {
         watchdog_thread.detach();
     } else |_| {}
@@ -39,7 +39,8 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    command.run(&client, stdout, &chat_service_answered) catch |err| {
+    requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
+    command.run(&client, stdout, &requests_started_at) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
         // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
         // would only hide that.
@@ -98,7 +99,7 @@ const name_lookup_count_limit = 40;
 
 comptime {
     std.debug.assert(conversation_count_limit <= std.math.maxInt(u16));
-    std.debug.assert(name_lookup_count_limit < command_seconds_max);
+    std.debug.assert(name_lookup_count_limit < requests_seconds_max);
     std.debug.assert(conversation_count_default <= conversation_count_limit);
     std.debug.assert(message_count_default <= message_count_limit);
 }
@@ -108,11 +109,16 @@ const message_count_limit = chat.Client.message_count_limit;
 /// How far back `chats` looks for the other person's name in a 1:1 chat where you spoke last.
 const message_count_recent = 20;
 
-/// Set once the Chat Service has answered. Static, so the detached watchdog can't outlive it.
-var chat_service_answered: std.atomic.Value(bool) = .init(false);
+/// When the current batch of requests started, in awake-clock seconds, or `requests_idle` while
+/// none is waiting on the Chat Service. Static, so the detached watchdog can't outlive it.
+var requests_started_at: std.atomic.Value(i64) = .init(requests_idle);
 
-/// Every command normally finishes in a few seconds; past this, the network has stalled.
-const command_seconds_max = 60;
+/// Far in the future, so an idle watchdog never fires.
+const requests_idle = std.math.maxInt(i64);
+
+/// A command's requests, or one `watch` poll's, normally take a few seconds; past this, the
+/// network has stalled.
+const requests_seconds_max = 60;
 
 /// Pads the `chats` timestamp column to the width of the service's ISO timestamps.
 const timestamp_width = "2026-11-01T10:00:00.000Z".len;
@@ -190,19 +196,19 @@ const Command = union(enum) {
         return null;
     }
 
-    /// Sets `requests_done` once the Chat Service has answered, before any output is written.
+    /// Sets `started_at` to idle once the Chat Service has answered, before any output is written.
     fn run(
         command: *const Command,
         client: *chat.Client,
         stdout: *Io.Writer,
-        requests_done: *std.atomic.Value(bool),
+        started_at: *std.atomic.Value(i64),
     ) RunError!void {
         switch (command.*) {
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
 
-                requests_done.store(true, .release);
+                started_at.store(requests_idle, .release);
 
                 try writeVisible(stdout, user.name);
                 try stdout.writeAll(" <");
@@ -222,7 +228,7 @@ const Command = union(enum) {
 
                 const arena = names_arena.allocator();
                 const names = try otherPersonNames(client, arena, list.items, user.mri);
-                requests_done.store(true, .release);
+                started_at.store(requests_idle, .release);
 
                 for (list.items, names) |*conversation, name| {
                     try printChat(stdout, conversation, name, conversation.isUnread(user.mri));
@@ -240,13 +246,13 @@ const Command = union(enum) {
                         id_arena.allocator(),
                         name,
                         stdout,
-                        requests_done,
+                        started_at,
                     ),
                 };
                 const list = try client.messages(conversation_id, messages.count);
                 defer list.deinit();
 
-                requests_done.store(true, .release);
+                started_at.store(requests_idle, .release);
 
                 // The service returns newest first; print oldest first, like a chat window.
                 var index = list.items.len;
@@ -259,24 +265,33 @@ const Command = union(enum) {
     }
 };
 
-/// Ends the process if the Chat Service hasn't answered within `command_seconds_max`. std 0.17
-/// has no read timeout and ignores its connect timeout, so a held connection (say, one a
-/// per-app firewall is waiting to approve) would hang indefinitely. Output time isn't counted: a
-/// slow pager reading the output is fine.
-fn watchdog(io: Io, requests_done: *const std.atomic.Value(bool)) void {
-    io.sleep(.fromSeconds(command_seconds_max), .awake) catch |err| switch (err) {
-        // Only cancellation ends the sleep early, and nothing cancels this detached thread; if
-        // something ever does, the watchdog's job is over.
-        error.Canceled => return,
-    };
-    if (requests_done.load(.acquire)) return;
+/// Ends the process if a batch of requests hasn't been answered within `requests_seconds_max`.
+/// std 0.17 has no read timeout and ignores its connect timeout, so a held connection (say, one
+/// a per-app firewall is waiting to approve) would hang indefinitely. Output time isn't counted:
+/// a slow pager reading the output is fine.
+fn watchdog(io: Io, started_at: *const std.atomic.Value(i64)) void {
+    while (true) {
+        io.sleep(.fromSeconds(1), .awake) catch |err| switch (err) {
+            // Only cancellation ends the sleep early, and nothing cancels this detached thread;
+            // if something ever does, the watchdog's job is over.
+            error.Canceled => return,
+        };
+        const now = Io.Clock.awake.now(io).toSeconds();
+        if (requestsStalled(now, started_at.load(.acquire))) break;
+    }
 
     std.debug.print(
         "teams-zig: no answer from the Chat Service in {d} seconds; check the network\n",
-        .{command_seconds_max},
+        .{requests_seconds_max},
     );
     // _exit, not exit: exit handlers mustn't run on this thread while main is still working.
     std.c._exit(1);
+}
+
+/// Whether requests started at `started_at` (awake-clock seconds, or `requests_idle`) have gone
+/// unanswered for `requests_seconds_max` by `now`.
+fn requestsStalled(now: i64, started_at: i64) bool {
+    return now -| started_at >= requests_seconds_max;
 }
 
 /// Starts a Chat Service client with the token and region from the environment (test mode) or,
@@ -405,7 +420,7 @@ fn findChat(
     arena: std.mem.Allocator,
     name: []const u8,
     stdout: *Io.Writer,
-    requests_done: *std.atomic.Value(bool),
+    started_at: *std.atomic.Value(i64),
 ) RunError![]const u8 {
     std.debug.assert(name.len > 0);
     const user = try client.whoami();
@@ -431,7 +446,7 @@ fn findChat(
         .none => return error.ChatNameNotFound,
         .one => |index| return try arena.dupe(u8, list.items[index].id),
         .several => {
-            requests_done.store(true, .release);
+            started_at.store(requests_idle, .release);
             for (list.items, names) |*conversation, other_name| {
                 const chat_name = chatName(conversation, other_name) orelse continue;
                 if (!std.ascii.eqlIgnoreCase(chat_name, name)) continue;
@@ -707,6 +722,14 @@ test "matchChat matches whole names ignoring case, and reports several" {
 
     conversations[2].topic = "fake person";
     try std.testing.expectEqual(ChatMatch.several, matchChat(&conversations, names, "Fake Person"));
+}
+
+test "requestsStalled fires only after the limit, and never while idle" {
+    try std.testing.expect(!requestsStalled(1000, 1000));
+    try std.testing.expect(!requestsStalled(1000 + requests_seconds_max - 1, 1000));
+    try std.testing.expect(requestsStalled(1000 + requests_seconds_max, 1000));
+    try std.testing.expect(!requestsStalled(1000, requests_idle));
+    try std.testing.expect(!requestsStalled(std.math.maxInt(i64), requests_idle));
 }
 
 test "checkToken rejects line breaks" {
