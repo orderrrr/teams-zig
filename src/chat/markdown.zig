@@ -170,11 +170,11 @@ const Output = struct {
             if (mark == .link) output.link_href = html_tag.attribute("href") orelse "";
             return output.openMark(mark);
         }
-        if (html_tag.closing) return output.closeTag(html_tag);
-        return output.openTag(html_tag);
+        if (html_tag.closing) return output.tagClose(html_tag);
+        return output.tagOpen(html_tag);
     }
 
-    fn openTag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+    fn tagOpen(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
         if (html_tag.is("pre")) return output.openCodeBlock();
         if (html_tag.is("br")) return output.lineBreak();
         if (html_tag.is("img")) return output.image(html_tag);
@@ -191,7 +191,7 @@ const Output = struct {
         if (html_tag.is("div")) return output.openBlock();
     }
 
-    fn closeTag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+    fn tagClose(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
         if (headingLevel(html_tag) != null) {
             try output.endLine();
             // An empty heading marks nothing after it.
@@ -447,7 +447,7 @@ const Output = struct {
     }
 
     /// Writes the line breaks or space owed before the next text, with each new line's prefix.
-    fn writeSpacing(output: *Output) std.Io.Writer.Error!void {
+    fn flushSpacing(output: *Output) std.Io.Writer.Error!void {
         std.debug.assert(output.breaks_pending <= 2);
         defer output.space_pending = false;
         if (output.at_start) {
@@ -471,7 +471,7 @@ const Output = struct {
 
     /// Writes what's owed before the next text: line breaks or a space, then pending openers.
     fn flush(output: *Output) std.Io.Writer.Error!void {
-        try output.writeSpacing();
+        try output.flushSpacing();
         for (output.marks_open[0..output.marks_open_count]) |mark| {
             if (output.marks_written.contains(mark)) continue;
             try output.writer.writeAll(mark.marker());
