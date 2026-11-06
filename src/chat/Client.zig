@@ -78,6 +78,8 @@ pub fn init(
     skype_token: []const u8,
 ) error{OutOfMemory}!void {
     std.debug.assert(skype_token.len > 0);
+    // The token goes into a header, where a line break would end it early.
+    std.debug.assert(std.mem.indexOfAny(u8, skype_token, "\r\n") == null);
 
     const authentication = try std.fmt.allocPrint(gpa, "skypetoken={s}", .{skype_token});
     errdefer gpa.free(authentication);
@@ -148,8 +150,8 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
             .authorization = .default,
             .user_agent = .default,
             .connection = .default,
-            // Written out: with only identity enabled, std 0.17 writes the header as
-            // "accept-encodin" (it undoes two bytes of a list it never wrote), which gets a 400.
+            // Written out: with only identity enabled, std 0.17 sends a bare "accept-encoding" line
+            // with no colon (it undoes the ", " of a list it never wrote), which gets a 400.
             .accept_encoding = .{ .override = "identity" },
             .content_type = .default,
         },
@@ -187,12 +189,21 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     // when the connection drops mid-body, and crashes.
     _ = reader.streamRemaining(&body) catch |err| return bodyError(err, response.bodyErr());
 
-    // A clean close mid-body reads as the end of the stream, so check the length was met.
-    switch (request.reader.state) {
-        .body_remaining_content_length => return error.ConnectionDropped,
-        else => {},
-    }
+    try bodyEndCheck(request.reader.state);
     return body.buffered();
+}
+
+/// After a clean read, says whether the whole body arrived. A clean close mid-body reads as the
+/// end of the stream, so a content length not yet met means the connection dropped.
+fn bodyEndCheck(state: std.http.Reader.State) error{ConnectionDropped}!void {
+    switch (state) {
+        .ready => {},
+        // No length to check against: the body runs until the server closes the connection.
+        .body_none => {},
+        .body_remaining_content_length => return error.ConnectionDropped,
+        // streamRemaining only ends cleanly in the states above, and a client never closes.
+        .received_head, .body_remaining_chunk_len, .closing => unreachable,
+    }
 }
 
 /// Name lookup, TCP and TLS failures, and failing to load the system's root certificates, all
@@ -477,4 +488,11 @@ test "request and head errors map to what the user can act on" {
 test "parse errors other than running out of memory mean unexpected JSON" {
     try std.testing.expectEqual(error.UnexpectedJson, parseError(error.MissingField));
     try std.testing.expectEqual(error.OutOfMemory, parseError(error.OutOfMemory));
+}
+
+test "bodyEndCheck catches a body short of its content length" {
+    try bodyEndCheck(.ready);
+    try bodyEndCheck(.body_none);
+    const short = bodyEndCheck(.{ .body_remaining_content_length = 10 });
+    try std.testing.expectError(error.ConnectionDropped, short);
 }

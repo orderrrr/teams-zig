@@ -87,8 +87,9 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
         }
         // Plain text runs to the next tag or entity; writing it whole keeps two-byte control
         // characters together for writeVisible.
-        const run_len = std.mem.indexOfAny(u8, rest[1..], "<&") orelse rest.len - 1;
-        const run = rest[0 .. run_len + 1];
+        const next_markup = std.mem.indexOfAny(u8, rest[1..], "<&");
+        const run_len = if (next_markup) |index| index + 1 else rest.len;
+        const run = rest[0..run_len];
         rest = rest[run.len..];
         try text.writeVisible(writer, run);
     }
@@ -286,4 +287,22 @@ test "writeText shows control bytes from both plain and HTML content" {
     try html.writeText(&out.writer);
 
     try std.testing.expectEqualStrings("fake\\x1b[2Jfake\\x1b[2J", out.written());
+}
+
+test "writeText doesn't let a dropped tag join a C1 control back together" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "RichText/Html",
+        .sender = null,
+        .sender_name = null,
+        .content = "<p>\xc2<b>\x9b[2J</p>",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try message.writeText(&out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\xc2\x9b") == null);
+    try std.testing.expectEqualStrings("\\xc2\x9b[2J", out.written());
 }

@@ -11,6 +11,7 @@ pub fn writeVisible(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Err
     var index: usize = 0;
     while (index < bytes.len) {
         const control_len = controlLenAt(bytes[index..]);
+        std.debug.assert(control_len <= bytes.len - index);
         if (control_len == 0) {
             index += 1;
             continue;
@@ -25,12 +26,13 @@ pub fn writeVisible(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Err
 }
 
 /// How many bytes of control character `rest` starts with: 0 for none, 1 for C0 or DEL, 2 for a
-/// UTF-8-encoded C1 control.
-fn controlLenAt(rest: []const u8) usize {
+/// UTF-8-encoded C1 control. A `C2` with nothing after it counts as 1: whatever follows in the
+/// output (say, after a dropped HTML tag) could complete it into a C1 control.
+fn controlLenAt(rest: []const u8) u8 {
     std.debug.assert(rest.len > 0);
     if (!isVisible(rest[0])) return 1;
     if (rest[0] != 0xc2) return 0;
-    if (rest.len < 2) return 0;
+    if (rest.len < 2) return 1;
     if (rest[1] < 0x80) return 0;
     if (rest[1] > 0x9f) return 0;
     return 2;
@@ -68,4 +70,12 @@ test "writeVisible shows UTF-8 C1 controls and keeps other two-byte characters" 
 
     try writeVisible(&out.writer, "fake \xc2\x9b2J \xc2\xa9 é");
     try std.testing.expectEqualStrings("fake \\xc2\\x9b2J \xc2\xa9 é", out.written());
+}
+
+test "writeVisible shows a trailing C2 lead byte" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeVisible(&out.writer, "fake \xc2");
+    try std.testing.expectEqualStrings("fake \\xc2", out.written());
 }

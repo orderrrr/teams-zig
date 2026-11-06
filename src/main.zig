@@ -65,10 +65,10 @@ const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
 const region_variable = "TEAMS_ZIG_REGION";
 
 const conversation_count_max = 50;
+const message_count_max = 50;
 
 /// Pads the `chats` timestamp column to the width of the service's ISO timestamps.
 const timestamp_width = "2026-11-01T10:00:00.000Z".len;
-const message_count_max = 50;
 
 /// Failures reading the keychain or starting the client.
 const ConnectError = KeychainItem.Error || error{ UnknownRegion, InvalidToken };
