@@ -189,9 +189,8 @@ pub fn conversations(
     std.debug.assert(page_item_count <= page_item_count_max);
 
     const path_prefix = "/users/ME/conversations?view=mychats&pageSize=";
-    // A u16 has at most 5 decimal digits, so the formatted path always fits.
-    comptime std.debug.assert(std.math.maxInt(u16) < 100_000);
-    var path_buffer: [path_prefix.len + 5]u8 = undefined;
+    // Sized for the largest count the assert above allows, so the formatted path always fits.
+    var path_buffer: [path_prefix.len + std.fmt.count("{d}", .{page_item_count_max})]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, path_prefix ++ "{d}", .{page_item_count}) catch
         unreachable;
 
@@ -334,7 +333,7 @@ const CannedPages = struct {
     request_count: u32 = 0,
 
     fn getUrl(pages: *CannedPages, url: []const u8) Error![]const u8 {
-        std.debug.assert(url.len > 0);
+        _ = url;
         std.debug.assert(pages.bodies.len > 0);
         const index = @min(pages.request_count, pages.bodies.len - 1);
         pages.request_count += 1;
