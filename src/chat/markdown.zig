@@ -165,48 +165,60 @@ const Output = struct {
             if (html_tag.is("br")) return output.codeNewline();
             return;
         }
-        if (html_tag.is("pre")) {
-            if (html_tag.closing) return;
-            return output.openCodeBlock();
-        }
         if (markOf(html_tag)) |mark| {
             if (html_tag.closing) return output.closeMark(mark);
             if (mark == .link) output.link_href = html_tag.attribute("href") orelse "";
             return output.openMark(mark);
         }
+        if (html_tag.closing) return output.closeTag(html_tag);
+        return output.openTag(html_tag);
+    }
+
+    fn openTag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+        if (html_tag.is("pre")) return output.openCodeBlock();
         if (html_tag.is("br")) return output.lineBreak();
         if (html_tag.is("img")) return output.image(html_tag);
         if (headingLevel(html_tag)) |level| {
             try output.endLine();
-            // Closing clears it, so an empty heading marks nothing after it.
-            output.heading_starting = if (html_tag.closing) null else level;
+            output.heading_starting = level;
             return;
         }
-        if (html_tag.is("blockquote")) return output.quoteTag(html_tag.closing);
-        if (html_tag.is("ul")) {
-            return output.listTag(.{ .closing = html_tag.closing, .ordered = false });
-        }
-        if (html_tag.is("ol")) {
-            return output.listTag(.{ .closing = html_tag.closing, .ordered = true });
-        }
-        if (html_tag.is("li")) return output.itemTag(html_tag.closing);
-        if (html_tag.is("p")) return output.blockTag(html_tag.closing);
-        if (html_tag.is("div")) return output.blockTag(html_tag.closing);
+        if (html_tag.is("blockquote")) return output.openQuote();
+        if (html_tag.is("ul")) return output.openList(false);
+        if (html_tag.is("ol")) return output.openList(true);
+        if (html_tag.is("li")) return output.openItem();
+        if (html_tag.is("p")) return output.openBlock();
+        if (html_tag.is("div")) return output.openBlock();
     }
 
-    /// `p` and `div` start a line; one that held no text, like `<p>&nbsp;</p>`, is a blank
-    /// line.
-    fn blockTag(output: *Output, closing: bool) std.Io.Writer.Error!void {
-        if (closing) {
-            if (output.block_empty) {
-                output.block_empty = false;
-                return output.blankLine();
-            }
-            return output.endLine();
-        } else {
-            output.block_empty = true;
-            return output.endLine();
+    fn closeTag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+        if (headingLevel(html_tag) != null) {
+            try output.endLine();
+            // An empty heading marks nothing after it.
+            output.heading_starting = null;
+            return;
         }
+        if (html_tag.is("blockquote")) return output.closeQuote();
+        if (html_tag.is("ul")) return output.closeList();
+        if (html_tag.is("ol")) return output.closeList();
+        if (html_tag.is("li")) return output.endLine();
+        if (html_tag.is("p")) return output.closeBlock();
+        if (html_tag.is("div")) return output.closeBlock();
+    }
+
+    /// `p` and `div` start a line.
+    fn openBlock(output: *Output) std.Io.Writer.Error!void {
+        output.block_empty = true;
+        try output.endLine();
+    }
+
+    /// A block that held no text, like `<p>&nbsp;</p>`, is a blank line.
+    fn closeBlock(output: *Output) std.Io.Writer.Error!void {
+        if (output.block_empty) {
+            output.block_empty = false;
+            return output.blankLine();
+        }
+        try output.endLine();
     }
 
     fn openMark(output: *Output, mark: Mark) void {
@@ -217,7 +229,11 @@ const Output = struct {
     }
 
     fn closeMark(output: *Output, mark: Mark) std.Io.Writer.Error!void {
-        const index = output.markIndex(mark) orelse return;
+        const index = output.markIndex(mark) orelse {
+            // Only open marks are ever written.
+            std.debug.assert(!output.marks_written.contains(mark));
+            return;
+        };
         const open = output.marks_open[0..output.marks_open_count];
         std.mem.copyForwards(Mark, open[index..], open[index + 1 ..]);
         output.marks_open_count -= 1;
@@ -261,15 +277,16 @@ const Output = struct {
 
     /// Quotes start on their own line and end with a blank one, since Markdown would otherwise
     /// carry the quote on into the next line.
-    fn quoteTag(output: *Output, closing: bool) std.Io.Writer.Error!void {
+    fn openQuote(output: *Output) std.Io.Writer.Error!void {
         try output.endLine();
-        if (closing) {
-            if (output.quote_depth == 0) return;
-            output.quote_depth -= 1;
-            output.blankLine();
-            return;
-        }
         output.quote_depth +|= 1;
+    }
+
+    fn closeQuote(output: *Output) std.Io.Writer.Error!void {
+        try output.endLine();
+        if (output.quote_depth == 0) return;
+        output.quote_depth -= 1;
+        output.blankLine();
     }
 
     /// An emoji is its `alt` text, which holds the emoji itself; any other image is `[image]`.
@@ -323,46 +340,46 @@ const Output = struct {
     }
 
     fn codeNewline(output: *Output) std.Io.Writer.Error!void {
-        const block = &output.code_block.?;
-        if (block.empty) {
-            block.empty = false;
+        if (output.code_block.?.empty) {
+            output.code_block.?.empty = false;
             return;
         }
         try output.writer.writeByte('\n');
         try output.writeLinePrefix();
-        block.line_has_text = false;
+        output.code_block.?.line_has_text = false;
     }
 
     fn wroteCode(output: *Output) void {
-        const block = &output.code_block.?;
-        block.line_has_text = true;
-        block.empty = false;
+        output.code_block.?.line_has_text = true;
+        output.code_block.?.empty = false;
     }
 
     /// Lists start on their own line; the outermost ends with a blank line, since Markdown
     /// would otherwise carry its last item on into the next line.
-    fn listTag(
-        output: *Output,
-        options: struct { closing: bool, ordered: bool },
-    ) std.Io.Writer.Error!void {
-        try output.endLine();
-        // An item that held nothing leaves no marker for the line after its list.
-        output.item_starting = false;
-        if (options.closing) {
-            if (output.list_depth == 0) return;
-            output.list_depth -= 1;
-            if (output.list_depth == 0) output.blankLine();
-            return;
-        }
+    fn openList(output: *Output, ordered: bool) std.Io.Writer.Error!void {
+        try output.endListLine();
         if (output.list_depth < list_depth_limit) {
-            output.lists[output.list_depth] = .{ .ordered = options.ordered };
+            output.lists[output.list_depth] = .{ .ordered = ordered };
         }
         output.list_depth +|= 1;
     }
 
-    fn itemTag(output: *Output, closing: bool) std.Io.Writer.Error!void {
+    fn closeList(output: *Output) std.Io.Writer.Error!void {
+        try output.endListLine();
+        if (output.list_depth == 0) return;
+        output.list_depth -= 1;
+        if (output.list_depth == 0) output.blankLine();
+    }
+
+    /// Ends the line before a list starts or ends. An item that held nothing leaves no marker
+    /// for the line after its list.
+    fn endListLine(output: *Output) std.Io.Writer.Error!void {
         try output.endLine();
-        if (closing) return;
+        output.item_starting = false;
+    }
+
+    fn openItem(output: *Output) std.Io.Writer.Error!void {
+        try output.endLine();
         if (output.list_depth == 0) return;
         const shown = @min(output.list_depth, list_depth_limit);
         output.lists[shown - 1].item_count +|= 1;
@@ -415,6 +432,7 @@ const Output = struct {
             const mark = output.marks_open[output.marks_open_count - 1];
             try output.closeMark(mark);
         }
+        std.debug.assert(output.marks_written.count() == 0);
     }
 
     /// `<br>`: ends a line with text, or turns an empty one into a blank line.
@@ -428,31 +446,32 @@ const Output = struct {
         output.space_pending = false;
     }
 
-    /// Writes what's owed before the next text: line breaks or a space, then pending openers.
-    fn flush(output: *Output) std.Io.Writer.Error!void {
+    /// Writes the line breaks or space owed before the next text, with each new line's prefix.
+    fn writeSpacing(output: *Output) std.Io.Writer.Error!void {
         std.debug.assert(output.breaks_pending <= 2);
+        defer output.space_pending = false;
         if (output.at_start) {
             output.at_start = false;
             output.breaks_pending = 0;
-            try output.writeLinePrefix();
-        } else {
-            if (output.breaks_pending > 0) {
-                try output.writer.writeByte('\n');
-                if (output.breaks_pending == 2) {
-                    try output.writeBlankLinePrefix();
-                    try output.writer.writeByte('\n');
-                }
-                output.breaks_pending = 0;
-                try output.writeLinePrefix();
-            } else {
-                if (output.space_pending) {
-                    // Spaces at a line's start are dropped.
-                    if (output.line_has_text) try output.writer.writeByte(' ');
-                }
-            }
+            return output.writeLinePrefix();
         }
-        output.space_pending = false;
+        if (output.breaks_pending > 0) {
+            try output.writer.writeByte('\n');
+            if (output.breaks_pending == 2) {
+                try output.writeBlankLinePrefix();
+                try output.writer.writeByte('\n');
+            }
+            output.breaks_pending = 0;
+            return output.writeLinePrefix();
+        }
+        if (!output.space_pending) return;
+        // Spaces at a line's start are dropped.
+        if (output.line_has_text) try output.writer.writeByte(' ');
+    }
 
+    /// Writes what's owed before the next text: line breaks or a space, then pending openers.
+    fn flush(output: *Output) std.Io.Writer.Error!void {
+        try output.writeSpacing();
         for (output.marks_open[0..output.marks_open_count]) |mark| {
             if (output.marks_written.contains(mark)) continue;
             try output.writer.writeAll(mark.marker());
