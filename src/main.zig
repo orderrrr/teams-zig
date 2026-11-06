@@ -54,14 +54,10 @@ const keychain_service = "teams-zig";
 const chat_count_max = 50;
 const message_count_max = 50;
 
-comptime {
-    std.debug.assert(chat_count_max > 0);
-    std.debug.assert(message_count_max > 0);
-}
-
 const Command = union(enum) {
     whoami,
     chats,
+    /// The conversation id. Borrows the argument slice, which lives as long as `main`.
     messages: []const u8,
 
     fn parse(arguments: []const []const u8) ?Command {
@@ -178,6 +174,11 @@ fn reportError(stderr: *Io.Writer, err: anyerror, response_status: ?std.http.Sta
         // Client refuses redirects, so std reports any redirect as too many.
         error.TooManyHttpRedirects => try stderr.writeAll(
             "teams-zig: the Chat Service redirected; not following it, to keep the token there\n",
+        ),
+        // Client returns WriteFailed when sending the request fails, such as on a dropped
+        // connection.
+        error.WriteFailed => try stderr.writeAll(
+            "teams-zig: couldn't send the request to the Chat Service; try again\n",
         ),
         error.ResponseTooLarge => try stderr.writeAll(
             "teams-zig: the Chat Service sent a response larger than teams-zig accepts\n",

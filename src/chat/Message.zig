@@ -66,30 +66,34 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
     if (std.mem.eql(u8, message.message_type, "Text")) return writer.writeAll(message.content);
 
     var rest = message.content;
-    next: while (rest.len > 0) {
+    while (rest.len > 0) {
         const rest_len_before = rest.len;
         defer std.debug.assert(rest.len < rest_len_before);
 
         if (rest[0] == '<') {
             // An unterminated tag runs to the end of the content, so all of it is dropped.
-            const end = std.mem.indexOfScalar(u8, rest, '>') orelse rest.len - 1;
-            rest = rest[end + 1 ..];
+            const close_index = std.mem.indexOfScalar(u8, rest, '>') orelse rest.len - 1;
+            rest = rest[close_index + 1 ..];
             continue;
         }
-        if (rest[0] == '&') {
-            for (entities) |entity| {
-                if (std.mem.startsWith(u8, rest, entity[0])) {
-                    // Advance before writing, so the progress check holds if the write fails.
-                    rest = rest[entity[0].len..];
-                    try writer.writeAll(entity[1]);
-                    continue :next;
-                }
-            }
+        if (entityAt(rest)) |entity| {
+            // Advance before writing, so the progress check holds if the write fails.
+            rest = rest[entity[0].len..];
+            try writer.writeAll(entity[1]);
+            continue;
         }
         const byte = rest[0];
         rest = rest[1..];
         try writer.writeByte(byte);
     }
+}
+
+/// The entity `rest` starts with, as its text and its replacement; null if none matches.
+fn entityAt(rest: []const u8) ?struct { []const u8, []const u8 } {
+    for (entities) |entity| {
+        if (std.mem.startsWith(u8, rest, entity[0])) return entity;
+    }
+    return null;
 }
 
 /// Parses one messages response. `arena` owns everything returned.
@@ -114,9 +118,7 @@ pub fn parsePage(arena: std.mem.Allocator, body: []const u8) json.ParseError!Pag
 /// `from` is a contact URL ending in the sender's MRI: `https://.../contacts/8:orgid:<uuid>`.
 fn senderOf(from: []const u8) []const u8 {
     const start = if (std.mem.lastIndexOfScalar(u8, from, '/')) |slash| slash + 1 else 0;
-    const sender = from[start..];
-    std.debug.assert(std.mem.indexOfScalar(u8, sender, '/') == null);
-    return sender;
+    return from[start..];
 }
 
 test "parsePage reads messages, the deleted marker and the backward link" {

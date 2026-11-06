@@ -144,6 +144,7 @@ const test_item: KeychainItem = .{ .service = "teams-zig-test", .account = "fake
 
 test "write then read returns the value, and a second write replaces it" {
     const gpa = std.testing.allocator;
+
     try test_item.write("fake-value-1");
     // A locked keychain can make cleanup fail; panic so the leftover item doesn't go unnoticed.
     defer test_item.delete() catch |err| {

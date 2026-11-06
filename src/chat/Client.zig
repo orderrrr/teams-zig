@@ -54,9 +54,10 @@ const page_item_count_max = 200;
 /// older ones, so the page count isn't tied to the message count.
 const page_count_max = 64;
 
+/// The most messages `messages` can ever collect.
+const message_count_limit = page_item_count_max * page_count_max;
+
 comptime {
-    std.debug.assert(page_item_count_max > 0);
-    std.debug.assert(page_count_max > 0);
     std.debug.assert(body_size_max >= std.json.default_max_value_len);
 }
 
@@ -81,8 +82,12 @@ pub fn init(
             .io = io,
             .tls_buffer_size = std.crypto.tls.Client.min_buffer_len,
             .ssl_key_log = null,
+            // std's defaults. The read buffer also bounds a response head, and Chat Service
+            // heads fit in 8 KiB.
             .read_buffer_size = 8192,
             .write_buffer_size = 1024,
+            // Null: std reads the clock and rescans root certificates on the first HTTPS request.
+            .now = null,
             .http_proxy = null,
             .https_proxy = null,
         },
@@ -93,7 +98,6 @@ pub fn init(
 }
 
 pub fn deinit(client: *Client) void {
-    std.debug.assert(client.authentication.len > 0);
     client.http.deinit();
     client.gpa.free(client.authentication);
     client.gpa.free(client.body_buffer);
@@ -114,7 +118,6 @@ pub fn get(client: *Client, path: []const u8) Error![]const u8 {
 /// GETs a full URL, such as a pagination link the service sent. It must be under the base URL.
 /// The body is borrowed: it's valid until the next request.
 pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
-    std.debug.assert(client.authentication.len > 0);
     const base = client.region.baseUrl();
     if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
@@ -150,8 +153,12 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         },
         .privileged_headers = &.{},
     }) catch |err| switch (err) {
-        // The fixed writer only fails when the body outgrows the buffer.
-        error.WriteFailed => return error.ResponseTooLarge,
+        // WriteFailed comes from sending the request too, and the request is sent before any
+        // body byte arrives: only a failure after body bytes means the body outgrew the buffer.
+        error.WriteFailed => {
+            if (body.end == 0) return error.WriteFailed;
+            return error.ResponseTooLarge;
+        },
         else => |other| return other,
     };
 
@@ -197,6 +204,8 @@ pub fn messages(
 ) (Error || json.ParseError)!Message.List {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(message_count_max > 0);
+    // page_count_max pages can't hold more, so a larger count would only reserve dead memory.
+    std.debug.assert(message_count_max <= message_count_limit);
     const page_item_count = @min(message_count_max, page_item_count_max);
 
     var list: Message.List = try .init(client.gpa);
@@ -220,6 +229,7 @@ fn collectMessages(
 ) (Error || json.ParseError)![]const Message {
     std.debug.assert(url_first.len > 0);
     std.debug.assert(message_count_max > 0);
+    std.debug.assert(message_count_max <= message_count_limit);
 
     var items: std.ArrayList(Message) = try .initCapacity(arena, message_count_max);
     var link: ?[]const u8 = url_first;
@@ -229,8 +239,8 @@ fn collectMessages(
         if (page_count == page_count_max) break;
 
         const page = try Message.parsePage(arena, try source.getUrl(page_url));
-        const room = message_count_max - items.items.len;
-        items.appendSliceAssumeCapacity(page.items[0..@min(page.items.len, room)]);
+        const room_count = message_count_max - items.items.len;
+        items.appendSliceAssumeCapacity(page.items[0..@min(page.items.len, room_count)]);
         link = page.backward_link;
     }
     std.debug.assert(items.items.len <= message_count_max);
