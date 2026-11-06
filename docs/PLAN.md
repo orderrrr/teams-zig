@@ -80,3 +80,11 @@ Sending, editing, deleting and reactions (M2). Naming the other person in 1:1 ch
 **Round 15:** all three reviews found nothing new. Gate passed.
 
 Decided along the way: STYLE 1.6 (camelCase, JSON and extern name exceptions), STYLE 4.5 (assertion density from real invariants only).
+
+**After the gate (owner decision):** normal runs read the keychain through `/usr/bin/security`, so rebuilds no longer prompt (`33a700c`). **Round 16** named `security`'s exit status, reused `KeychainReadError`, and corrected the watchdog comment and the locked-keychain hint (`730a860`). **Round 17:** no clear violations from any review. M1 resolved.
+
+Carried to M2 as optional polish: say why `security`'s "not found" exit status is 44 (the low byte of errSecItemNotFound); "no access prompt" wording next to the unlock-dialog comment; reflow the watchdog comment; drop or use `security.Status.duplicate_item`, which nothing references.
+
+## M2: not yet planned
+
+Writes (sending, editing, deleting, reactions) are blocked by the zero-writes rule in CLAUDE.md until the owner lifts it. Named so far: 1:1 chat names in `chats`.
