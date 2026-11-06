@@ -76,6 +76,15 @@ pub const TimeZone = opaque {
         return CFTimeZoneCopySystem();
     }
 
+    /// A zone always `seconds` ahead of GMT, with no daylight saving.
+    pub fn createFixed(seconds: i32) error{OutOfMemory}!*const TimeZone {
+        std.debug.assert(@abs(seconds) < std.time.s_per_day);
+        return CFTimeZoneCreateWithTimeIntervalFromGMT(
+            null, // the default allocator
+            @floatFromInt(seconds),
+        ) orelse error.OutOfMemory;
+    }
+
     /// The zone's offset from GMT at `unix_seconds`, daylight saving included.
     pub fn secondsFromGmt(zone: *const TimeZone, unix_seconds: i64) i32 {
         const absolute: f64 = @floatFromInt(unix_seconds - absolute_time_unix_seconds);
@@ -132,6 +141,10 @@ extern fn CFDataCreate(
 extern fn CFDataGetBytePtr(data: *const Data) ?[*]const u8;
 extern fn CFDataGetLength(data: *const Data) Index;
 extern fn CFTimeZoneCopySystem() *const TimeZone;
+extern fn CFTimeZoneCreateWithTimeIntervalFromGMT(
+    allocator: ?*const Allocator,
+    seconds: f64,
+) ?*const TimeZone;
 extern fn CFTimeZoneGetSecondsFromGMT(zone: *const TimeZone, at: f64) f64;
 extern fn CFDictionaryCreate(
     allocator: ?*const Allocator,
@@ -177,4 +190,11 @@ test "the system time zone has an offset from GMT" {
     // Any real zone is within 14 hours of GMT.
     const offset = zone.secondsFromGmt(1_700_000_000);
     try std.testing.expect(@abs(offset) <= 14 * std.time.s_per_hour);
+}
+
+test "a fixed zone keeps its offset" {
+    const zone = try TimeZone.createFixed(-5 * std.time.s_per_hour);
+    defer release(zone);
+
+    try std.testing.expectEqual(-5 * std.time.s_per_hour, zone.secondsFromGmt(1_700_000_000));
 }

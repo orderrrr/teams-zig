@@ -5,6 +5,7 @@ const chat = teams.chat;
 const writeVisible = chat.text.writeVisible;
 const Seen = @import("Seen.zig");
 const short_time = @import("short_time.zig");
+const core_foundation = teams.macos.core_foundation;
 
 pub fn main(init: std.process.Init) !u8 {
     var stderr_buffer: [1024]u8 = undefined;
@@ -41,8 +42,12 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
+    const zone = core_foundation.TimeZone.copySystem();
+    defer core_foundation.release(zone);
+
+    var clock: Clock = .{ .zone = zone, .now = Io.Clock.real.now(init.io).toSeconds() };
     requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
-    command.run(&client, init.io, stdout, stderr, &requests_started_at) catch |err| {
+    command.run(&client, init.io, &clock, stdout, stderr, &requests_started_at) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
         // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
         // would only hide that.
@@ -138,8 +143,28 @@ const requests_idle = std.math.maxInt(i64);
 /// network has stalled.
 const requests_seconds_max = 60;
 
-/// Pads the `chats` timestamp column to the width of the service's ISO timestamps.
-const timestamp_width = "2026-11-01T10:00:00.000Z".len;
+/// What times are shown relative to: your time zone, and now.
+const Clock = struct {
+    zone: *const core_foundation.TimeZone,
+    /// Seconds since 1970 GMT. `watch` moves it on with every poll.
+    now: i64,
+
+    /// A service timestamp in its short local form (see `short_time`), written into `buffer`;
+    /// null if `timestamp` isn't one.
+    fn shortTime(
+        clock: *const Clock,
+        buffer: *[short_time.width_max]u8,
+        timestamp: []const u8,
+    ) ?[]const u8 {
+        const at = short_time.parseIso(timestamp) orelse return null;
+        const at_local = at + clock.zone.secondsFromGmt(at);
+        const now_local = clock.now + clock.zone.secondsFromGmt(clock.now);
+        var writer: Io.Writer = .fixed(buffer);
+        // `width_max` is the widest form, so the buffer never fills.
+        short_time.write(&writer, at_local, now_local) catch unreachable;
+        return writer.buffered();
+    }
+};
 
 /// Failures reading the keychain or starting the client.
 const ConnectError = KeychainReadError || error{ UnknownRegion, InvalidToken };
@@ -231,12 +256,13 @@ const Command = union(enum) {
         command: *const Command,
         client: *chat.Client,
         io: Io,
+        clock: *Clock,
         stdout: *Io.Writer,
         stderr: *Io.Writer,
         started_at: *std.atomic.Value(i64),
     ) RunError!void {
         switch (command.*) {
-            .watch => try watch(client, io, stdout, stderr, started_at),
+            .watch => try watch(client, io, clock, stdout, stderr, started_at),
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
@@ -264,7 +290,8 @@ const Command = union(enum) {
                 started_at.store(requests_idle, .release);
 
                 for (list.items, names) |*conversation, name| {
-                    try printChat(stdout, conversation, name, conversation.isUnread(user.mri));
+                    const unread = conversation.isUnread(user.mri);
+                    try printChat(stdout, clock, conversation, name, unread);
                 }
             },
             .messages => |messages| {
@@ -278,6 +305,7 @@ const Command = union(enum) {
                         client,
                         id_arena.allocator(),
                         name,
+                        clock,
                         stdout,
                         started_at,
                     ),
@@ -291,7 +319,7 @@ const Command = union(enum) {
                 var index = list.items.len;
                 while (index > 0) {
                     index -= 1;
-                    try printMessage(stdout, &list.items[index]);
+                    try printMessage(stdout, clock, &list.items[index]);
                 }
             },
         }
@@ -452,6 +480,7 @@ fn nameSource(conversation: *const chat.Conversation, self_mri: []const u8) Name
 fn watch(
     client: *chat.Client,
     io: Io,
+    clock: *Clock,
     stdout: *Io.Writer,
     stderr: *Io.Writer,
     started_at: *std.atomic.Value(i64),
@@ -478,7 +507,8 @@ fn watch(
         };
 
         started_at.store(Io.Clock.awake.now(io).toSeconds(), .release);
-        if (pollChats(client, &seen, user.mri, stdout)) {
+        clock.now = Io.Clock.real.now(io).toSeconds();
+        if (pollChats(client, clock, &seen, user.mri, stdout)) {
             pause_seconds = watch_poll_seconds;
         } else |err| {
             if (!watchErrorRetries(err, client.response_status)) return err;
@@ -496,6 +526,7 @@ fn watch(
 /// `watch_read_count_limit` that changed; the rest wait for the next poll.
 fn pollChats(
     client: *chat.Client,
+    clock: *const Clock,
     seen: *Seen,
     self_mri: []const u8,
     stdout: *Io.Writer,
@@ -508,7 +539,7 @@ fn pollChats(
         if (!seen.changed(conversation)) continue;
         if (read_count_left == 0) break;
         read_count_left -= 1;
-        try printNewMessages(client, seen, conversation, self_mri, stdout);
+        try printNewMessages(client, clock, seen, conversation, self_mri, stdout);
     }
 }
 
@@ -516,6 +547,7 @@ fn pollChats(
 /// the mark to the chat's last message.
 fn printNewMessages(
     client: *chat.Client,
+    clock: *const Clock,
     seen: *Seen,
     conversation: *const chat.Conversation,
     self_mri: []const u8,
@@ -551,7 +583,7 @@ fn printNewMessages(
         try stdout.writeByte('[');
         try writeVisible(stdout, name);
         try stdout.writeAll("] ");
-        try printMessage(stdout, message);
+        try printMessage(stdout, clock, message);
     }
     try seen.record(conversation.id, last_message_id);
 }
@@ -577,6 +609,7 @@ fn findChat(
     client: *chat.Client,
     arena: std.mem.Allocator,
     name: []const u8,
+    clock: *const Clock,
     stdout: *Io.Writer,
     started_at: *std.atomic.Value(i64),
 ) RunError![]const u8 {
@@ -612,7 +645,7 @@ fn findChat(
                 const chat_name = chatName(conversation, other_name) orelse continue;
                 if (!std.ascii.eqlIgnoreCase(chat_name, name)) continue;
                 const unread = conversation.isUnread(user.mri);
-                try printChat(stdout, conversation, other_name, unread);
+                try printChat(stdout, clock, conversation, other_name, unread);
             }
             return error.ChatNameAmbiguous;
         },
@@ -622,14 +655,17 @@ fn findChat(
 /// One `chats` row: a `*` if unread, last message time, kind, name and id.
 fn printChat(
     stdout: *Io.Writer,
+    clock: *const Clock,
     conversation: *const chat.Conversation,
     other_name: ?[]const u8,
     unread: bool,
 ) Io.Writer.Error!void {
     try stdout.writeAll(if (unread) "* " else "  ");
     const last_message_at = conversation.last_message_at orelse "-";
-    try writeVisible(stdout, last_message_at);
-    try stdout.splatByteAll(' ', timestamp_width -| last_message_at.len);
+    var time_buffer: [short_time.width_max]u8 = undefined;
+    const time = clock.shortTime(&time_buffer, last_message_at) orelse last_message_at;
+    try writeVisible(stdout, time);
+    try stdout.splatByteAll(' ', short_time.width_max -| time.len);
     try stdout.print("  {t:<7}  ", .{conversation.kind});
     try writeVisible(stdout, chatName(conversation, other_name) orelse "(no topic)");
     try stdout.writeAll("  ");
@@ -750,9 +786,15 @@ fn parseCount(text: []const u8, count_max: u32) ?u32 {
 
 /// `time  sender: ` and the body as Markdown, which continues on the following lines when it
 /// has more than one.
-fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {
+fn printMessage(
+    stdout: *Io.Writer,
+    clock: *const Clock,
+    message: *const chat.Message,
+) Io.Writer.Error!void {
     const sender = message.sender_name orelse message.sender orelse "(unknown sender)";
-    try writeVisible(stdout, message.arrived_at);
+    var time_buffer: [short_time.width_max]u8 = undefined;
+    try writeVisible(stdout, clock.shortTime(&time_buffer, message.arrived_at) orelse
+        message.arrived_at);
     try stdout.writeAll("  ");
     try writeVisible(stdout, sender);
     try stdout.writeAll(": ");
@@ -917,6 +959,12 @@ test "printMessage starts each message on its time and sender line" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
+    const zone = try core_foundation.TimeZone.createFixed(std.time.s_per_hour);
+    defer core_foundation.release(zone);
+
+    // 2026-11-06T12:00:00Z, so the first message is today and the second three days back.
+    const clock: Clock = .{ .zone = zone, .now = 1_793_966_400 };
+
     var message: chat.Message = .{
         .id = "1",
         .message_type = "RichText/Html",
@@ -926,15 +974,19 @@ test "printMessage starts each message on its time and sender line" {
         .arrived_at = "2026-11-06T10:00:00.000Z",
         .deleted_at_ms = null,
     };
-    try printMessage(&out.writer, &message);
+    try printMessage(&out.writer, &clock, &message);
     message.sender_name = null;
     message.deleted_at_ms = 1;
-    try printMessage(&out.writer, &message);
+    message.arrived_at = "2026-11-03T22:30:00.000Z";
+    try printMessage(&out.writer, &clock, &message);
+    message.arrived_at = "fake time";
+    try printMessage(&out.writer, &clock, &message);
 
     try std.testing.expectEqualStrings(
-        \\2026-11-06T10:00:00.000Z  Fake Person: fake one
+        \\11:00  Fake Person: fake one
         \\fake **two**
-        \\2026-11-06T10:00:00.000Z  8:orgid:fake: (deleted)
+        \\Tue 23:30  8:orgid:fake: (deleted)
+        \\fake time  8:orgid:fake: (deleted)
         \\
     , out.written());
 }
