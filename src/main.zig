@@ -148,11 +148,14 @@ fn connect(
     environment: *const std.process.Environ.Map,
 ) ConnectError!void {
     // Test mode: less secure, since any child process can read the environment, but it never
-    // touches the keychain. An empty variable counts as unset.
-    const environment_token = environment.get(token_variable) orelse "";
-    if (environment_token.len > 0) {
-        const region_name = environment.get(region_variable) orelse "";
-        return client.init(gpa, io, try parseRegion(region_name), environment_token);
+    // touches the keychain. An empty token counts as unset.
+    if (environment.get(token_variable)) |environment_token| {
+        if (environment_token.len > 0) {
+            const region_name = environment.get(region_variable) orelse {
+                return error.UnknownRegion;
+            };
+            return client.init(gpa, io, try parseRegion(region_name), environment_token);
+        }
     }
 
     const token_item: KeychainItem = .{ .service = keychain_service, .account = "skype-token" };
