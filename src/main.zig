@@ -51,7 +51,7 @@ const usage =
 /// Shared with scripts/teams-token.fish, which writes these items.
 const keychain_service = "teams-zig";
 
-const chat_count_max = 50;
+const conversation_count_max = 50;
 const message_count_max = 50;
 
 const Command = union(enum) {
@@ -85,7 +85,7 @@ const Command = union(enum) {
                 try stdout.print("{s} <{s}>\n", .{ user.name, user.upn });
             },
             .chats => {
-                const list = try client.chats(chat_count_max);
+                const list = try client.conversations(conversation_count_max);
                 defer list.deinit();
 
                 for (list.items) |conversation| {

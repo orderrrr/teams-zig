@@ -179,7 +179,10 @@ pub fn whoami(client: *Client) (Error || json.ParseError)!User {
 
 /// Returns your most recent conversations, newest first, without system streams.
 /// The result is owned by the caller: free it with `List.deinit`.
-pub fn chats(client: *Client, page_item_count: u16) (Error || json.ParseError)!Conversation.List {
+pub fn conversations(
+    client: *Client,
+    page_item_count: u16,
+) (Error || json.ParseError)!Conversation.List {
     std.debug.assert(page_item_count > 0);
     std.debug.assert(page_item_count <= page_item_count_max);
 
