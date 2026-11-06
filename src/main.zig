@@ -129,8 +129,8 @@ const Command = union(enum) {
         switch (command.*) {
             .whoami => {
                 const user = try client.whoami();
-                requests_done.store(true, .release);
                 defer user.deinit();
+                requests_done.store(true, .release);
 
                 try writeVisible(stdout, user.name);
                 try stdout.writeAll(" <");
@@ -139,8 +139,8 @@ const Command = union(enum) {
             },
             .chats => {
                 const list = try client.conversations(conversation_count_max);
-                requests_done.store(true, .release);
                 defer list.deinit();
+                requests_done.store(true, .release);
 
                 for (list.items) |conversation| {
                     const last_message_at = conversation.last_message_at orelse "-";
@@ -155,8 +155,8 @@ const Command = union(enum) {
             },
             .messages => |conversation_id| {
                 const list = try client.messages(conversation_id, message_count_max);
-                requests_done.store(true, .release);
                 defer list.deinit();
+                requests_done.store(true, .release);
 
                 // The service returns newest first; print oldest first, like a chat window.
                 var index = list.items.len;
