@@ -1,13 +1,59 @@
 //! The slice of CoreFoundation the keychain needs, with Zig-shaped helpers on top.
-//! Every value a `create*` function returns is owned by the caller: pass it to `release`.
+//! Every value a `create` method returns is owned by the caller: pass it to `release`.
 
 const std = @import("std");
 
 pub const Index = isize;
 pub const Allocator = opaque {};
-pub const String = opaque {};
-pub const Data = opaque {};
-pub const Dictionary = opaque {};
+pub const String = opaque {
+    pub fn create(contents: []const u8) error{OutOfMemory}!*const String {
+        std.debug.assert(contents.len <= std.math.maxInt(Index));
+        const string = CFStringCreateWithBytes(
+            null,
+            contents.ptr,
+            @intCast(contents.len),
+            string_encoding_utf8,
+            0,
+        );
+        return string orelse error.OutOfMemory;
+    }
+};
+
+pub const Data = opaque {
+    pub fn create(contents: []const u8) error{OutOfMemory}!*const Data {
+        std.debug.assert(contents.len <= std.math.maxInt(Index));
+        return CFDataCreate(null, contents.ptr, @intCast(contents.len)) orelse error.OutOfMemory;
+    }
+
+    /// Borrows the bytes: they live as long as `data` does.
+    pub fn bytes(data: *const Data) []const u8 {
+        const length = CFDataGetLength(data);
+        std.debug.assert(length >= 0);
+        return CFDataGetBytePtr(data)[0..@intCast(length)];
+    }
+};
+
+pub const Dictionary = opaque {
+    /// Keys and values side by side. A struct, so the two lists can't be swapped at a call site.
+    pub const Entries = struct {
+        keys: []const *const anyopaque,
+        values: []const *const anyopaque,
+    };
+
+    /// Keys and values must be CoreFoundation objects; the dictionary retains them.
+    pub fn create(entries: Entries) error{OutOfMemory}!*const Dictionary {
+        std.debug.assert(entries.keys.len > 0);
+        std.debug.assert(entries.keys.len == entries.values.len);
+        return CFDictionaryCreate(
+            null,
+            entries.keys.ptr,
+            entries.values.ptr,
+            @intCast(entries.keys.len),
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        ) orelse error.OutOfMemory;
+    }
+};
 pub const Boolean = opaque {};
 
 pub const DictionaryKeyCallBacks = extern struct {
@@ -61,58 +107,23 @@ pub fn release(object: *const anyopaque) void {
     CFRelease(object);
 }
 
-pub fn createString(bytes: []const u8) error{OutOfMemory}!*const String {
-    std.debug.assert(bytes.len <= std.math.maxInt(Index));
-    const string = CFStringCreateWithBytes(
-        null,
-        bytes.ptr,
-        @intCast(bytes.len),
-        string_encoding_utf8,
-        0,
-    );
-    return string orelse error.OutOfMemory;
-}
-
-pub fn createData(bytes: []const u8) error{OutOfMemory}!*const Data {
-    std.debug.assert(bytes.len <= std.math.maxInt(Index));
-    return CFDataCreate(null, bytes.ptr, @intCast(bytes.len)) orelse error.OutOfMemory;
-}
-
-/// Borrows the bytes: they live as long as `data` does.
-pub fn dataBytes(data: *const Data) []const u8 {
-    const length = CFDataGetLength(data);
-    std.debug.assert(length >= 0);
-    return CFDataGetBytePtr(data)[0..@intCast(length)];
-}
-
-/// Keys and values must be CoreFoundation objects; the dictionary retains them.
-pub fn createDictionary(
-    keys: []const *const anyopaque,
-    values: []const *const anyopaque,
-) error{OutOfMemory}!*const Dictionary {
-    std.debug.assert(keys.len > 0);
-    std.debug.assert(keys.len == values.len);
-    return CFDictionaryCreate(
-        null,
-        keys.ptr,
-        values.ptr,
-        @intCast(keys.len),
-        &kCFTypeDictionaryKeyCallBacks,
-        &kCFTypeDictionaryValueCallBacks,
-    ) orelse error.OutOfMemory;
-}
-
 test "data round-trips its bytes" {
-    const data = try createData("fake-token-value");
+    const data = try Data.create("fake-token-value");
     defer release(data);
-    try std.testing.expectEqualStrings("fake-token-value", dataBytes(data));
+
+    try std.testing.expectEqualStrings("fake-token-value", data.bytes());
 }
 
 test "dictionary holds string keys and data values" {
-    const key = try createString("account");
+    const key = try String.create("account");
     defer release(key);
-    const value = try createData("fake");
+
+    const value = try Data.create("fake");
     defer release(value);
-    const dictionary = try createDictionary(&.{key}, &.{value});
+
+    const dictionary = try Dictionary.create(.{
+        .keys = &.{key},
+        .values = &.{value},
+    });
     release(dictionary);
 }

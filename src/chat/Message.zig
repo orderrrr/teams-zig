@@ -208,3 +208,11 @@ test "writeText drops an unterminated tag instead of failing" {
     try message.writeText(&out.writer);
     try std.testing.expectEqualStrings("fake 3 ", out.written());
 }
+
+test "parsePage fails on a message without an arrival time" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body = "{\"_metadata\":{},\"messages\":[{\"id\":\"1\",\"messagetype\":\"Text\"}]}";
+    try std.testing.expectError(error.MissingField, parsePage(arena.allocator(), body));
+}

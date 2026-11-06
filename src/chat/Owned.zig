@@ -3,16 +3,19 @@ const std = @import("std");
 /// Parsed values that own the arena holding them and every string they point into.
 pub fn Owned(comptime T: type) type {
     return struct {
-        const Self = @This();
-
         arena: *std.heap.ArenaAllocator,
         items: []const T,
+
+        const Self = @This();
 
         /// Starts empty: allocate the items in `arena`, then set `items`.
         pub fn init(gpa: std.mem.Allocator) error{OutOfMemory}!Self {
             const arena = try gpa.create(std.heap.ArenaAllocator);
             arena.* = .init(gpa);
-            return .{ .arena = arena, .items = &.{} };
+
+            const owned: Self = .{ .arena = arena, .items = &.{} };
+            std.debug.assert(owned.items.len == 0);
+            return owned;
         }
 
         pub fn deinit(owned: *const Self) void {

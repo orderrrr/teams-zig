@@ -44,7 +44,11 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
     var items: std.ArrayList(Conversation) = try .initCapacity(arena, response.conversations.len);
     for (response.conversations) |raw| {
         const thread: Response.ThreadProperties = raw.threadProperties orelse .{};
-        const kind = kindOf(thread.threadType orelse "") orelse continue;
+        // A conversation without a thread type isn't a system stream, so it's kept as `.other`.
+        const kind: Kind = if (thread.threadType) |thread_type|
+            kindOf(thread_type) orelse continue
+        else
+            .other;
         const properties: Response.Properties = raw.properties orelse .{};
         items.appendAssumeCapacity(.{
             .id = raw.id,
@@ -95,4 +99,20 @@ test "parseList keeps chats and the self-chat, and drops system streams" {
 test "kindOf maps unknown thread types to other" {
     try std.testing.expectEqual(Kind.other, kindOf("somethingnew").?);
     try std.testing.expectEqual(null, kindOf("streamofcalllogs"));
+}
+
+test "parseList keeps a conversation without a thread type as other" {
+    const body =
+        \\{"conversations":[{"id":"19:fake@thread.v2","threadProperties":{"topic":"Fake"}}]}
+    ;
+    const list = try parseList(std.testing.allocator, body);
+    defer list.deinit();
+
+    try std.testing.expectEqual(1, list.items.len);
+    try std.testing.expectEqual(Kind.other, list.items[0].kind);
+}
+
+test "parseList fails on a conversation without an id" {
+    const body = "{\"conversations\":[{\"threadProperties\":{\"threadType\":\"chat\"}}]}";
+    try std.testing.expectError(error.MissingField, parseList(std.testing.allocator, body));
 }

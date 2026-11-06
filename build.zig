@@ -7,9 +7,10 @@ pub fn build(b: *std.Build) void {
     const teams = b.addModule("teams", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
     });
-    teams.linkFramework("CoreFoundation", .{});
-    teams.linkFramework("Security", .{});
+    teams.linkFramework("CoreFoundation", .{ .needed = false, .weak = false });
+    teams.linkFramework("Security", .{ .needed = false, .weak = false });
 
     const exe = b.addExecutable(.{
         .name = "teams-zig",

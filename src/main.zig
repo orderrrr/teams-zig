@@ -13,20 +13,21 @@ pub fn main(init: std.process.Init) !u8 {
     var stderr_file_writer: Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
     const stderr = &stderr_file_writer.interface;
 
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const command = parseCommand(args) orelse {
+    const arguments = try init.minimal.args.toSlice(init.arena.allocator());
+    const command = parseCommand(arguments) orelse {
         try stderr.writeAll(usage);
         try stderr.flush();
         return 2;
     };
 
     var client: chat.Client = undefined;
+    // No request has been made yet, so there is no response status to report.
     connect(&client, init.gpa, init.io) catch |err| return reportError(stderr, err, null);
     defer client.deinit();
 
     run(&client, &command, stdout) catch |err| {
         try stdout.flush();
-        return reportError(stderr, err, client.last_status);
+        return reportError(stderr, err, client.response_status);
     };
     try stdout.flush();
     return 0;
@@ -61,17 +62,18 @@ const Command = union(enum) {
     messages: []const u8,
 };
 
-fn parseCommand(args: []const []const u8) ?Command {
-    switch (args.len) {
+fn parseCommand(arguments: []const []const u8) ?Command {
+    std.debug.assert(arguments.len >= 1);
+    switch (arguments.len) {
         2 => {
-            if (std.mem.eql(u8, args[1], "whoami")) return .whoami;
-            if (std.mem.eql(u8, args[1], "chats")) return .chats;
+            if (std.mem.eql(u8, arguments[1], "whoami")) return .whoami;
+            if (std.mem.eql(u8, arguments[1], "chats")) return .chats;
             return null;
         },
         3 => {
-            if (!std.mem.eql(u8, args[1], "messages")) return null;
-            if (args[2].len == 0) return null;
-            return .{ .messages = args[2] };
+            if (!std.mem.eql(u8, arguments[1], "messages")) return null;
+            if (arguments[2].len == 0) return null;
+            return .{ .messages = arguments[2] };
         },
         else => return null,
     }
@@ -80,18 +82,19 @@ fn parseCommand(args: []const []const u8) ?Command {
 /// Reads the token and region the token script stored, and starts a Chat Service client.
 fn connect(client: *chat.Client, gpa: std.mem.Allocator, io: Io) !void {
     const token_item: keychain.Item = .{ .service = keychain_service, .account = "skype-token" };
-    const token = try keychain.read(gpa, token_item);
+    const token = try token_item.read(gpa);
     defer gpa.free(token);
 
     // An empty item means the script never stored a real token.
     if (token.len == 0) return error.ItemNotFound;
 
     const region_item: keychain.Item = .{ .service = keychain_service, .account = "region" };
-    const region_name = try keychain.read(gpa, region_item);
+    const region_name = try region_item.read(gpa);
     defer gpa.free(region_name);
 
     const Region = chat.Client.Region;
     const region = std.meta.stringToEnum(Region, region_name) orelse return error.UnknownRegion;
+    std.debug.assert(token.len > 0);
     try client.init(gpa, io, region, token);
 }
 
@@ -145,7 +148,7 @@ fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Erro
 }
 
 /// Prints a one-line hint for errors you can act on. Anything else is a bug and propagates.
-fn reportError(stderr: *Io.Writer, err: anyerror, last_status: ?std.http.Status) !u8 {
+fn reportError(stderr: *Io.Writer, err: anyerror, response_status: ?std.http.Status) !u8 {
     const rerun_script = "run scripts/teams-token.fish";
     switch (err) {
         error.ItemNotFound => try stderr.writeAll(
@@ -160,10 +163,10 @@ fn reportError(stderr: *Io.Writer, err: anyerror, last_status: ?std.http.Status)
         error.NotFound => try stderr.writeAll(
             "teams-zig: no conversation with that id, or it isn't yours\n",
         ),
-        // Client sets last_status before it returns UnexpectedStatus.
+        // Client sets response_status before it returns UnexpectedStatus.
         error.UnexpectedStatus => try stderr.print(
             "teams-zig: the Chat Service answered HTTP {d}\n",
-            .{@backingInt(last_status.?)},
+            .{@backingInt(response_status.?)},
         ),
         error.ForeignLink => try stderr.writeAll(
             "teams-zig: the Chat Service linked to another host; not following it\n",

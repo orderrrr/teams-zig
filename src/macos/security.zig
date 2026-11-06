@@ -38,12 +38,12 @@ pub extern fn SecItemUpdate(
 pub extern fn SecItemDelete(query: *const core_foundation.Dictionary) Status;
 
 test "looking up a missing item reports item_not_found" {
-    const service = try core_foundation.createString("teams-zig-test-missing");
+    const service = try core_foundation.String.create("teams-zig-test-missing");
     defer core_foundation.release(service);
-    const query = try core_foundation.createDictionary(
-        &.{ kSecClass, kSecAttrService },
-        &.{ kSecClassGenericPassword, service },
-    );
+    const query = try core_foundation.Dictionary.create(.{
+        .keys = &.{ kSecClass, kSecAttrService },
+        .values = &.{ kSecClassGenericPassword, service },
+    });
     defer core_foundation.release(query);
 
     var result: ?*const anyopaque = null;
