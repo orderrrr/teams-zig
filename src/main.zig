@@ -17,6 +17,12 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     };
 
+    // Without a watchdog a stalled connect would hang forever; if the thread can't start, the
+    // command still runs, just unbounded.
+    if (std.Thread.spawn(.{}, watchdog, .{init.io})) |watchdog_thread| {
+        watchdog_thread.detach();
+    } else |_| {}
+
     var client: chat.Client = undefined;
     // No request has been made yet, so there is no response status to report.
     connect(&client, init.gpa, init.io, init.environ_map) catch |err| {
@@ -66,6 +72,9 @@ const region_variable = "TEAMS_ZIG_REGION";
 
 const conversation_count_max = 50;
 const message_count_max = 50;
+
+/// Every command normally finishes in a few seconds; past this, the network has stalled.
+const command_seconds_max = 60;
 
 /// Pads the `chats` timestamp column to the width of the service's ISO timestamps.
 const timestamp_width = "2026-11-01T10:00:00.000Z".len;
@@ -142,6 +151,17 @@ const Command = union(enum) {
     }
 };
 
+/// Ends the process if a command runs past `command_seconds_max`. std 0.17 has no read timeout
+/// and ignores its connect timeout, and a stalled connect has been seen to hang indefinitely.
+fn watchdog(io: Io) void {
+    io.sleep(.fromSeconds(command_seconds_max), .awake) catch return;
+    std.debug.print(
+        "teams-zig: no answer from the Chat Service in {d} seconds; check the network\n",
+        .{command_seconds_max},
+    );
+    std.process.exit(1);
+}
+
 /// Starts a Chat Service client with the token and region from the environment (test mode) or,
 /// normally, from the login keychain where the token script stored them.
 fn connect(
@@ -165,7 +185,8 @@ fn connect(
     const token_item: KeychainItem = .{ .service = keychain_service, .account = "skype-token" };
     const token = try token_item.read(gpa);
     defer {
-        // Zeroed so the freed memory doesn't keep a copy of the token.
+        // Zeroed so our copy doesn't outlive its use. std's connection buffers and the keychain's
+        // CFData still hold copies until the process exits.
         std.crypto.secureZero(u8, token);
         gpa.free(token);
     }
@@ -174,7 +195,11 @@ fn connect(
     if (token.len == 0) return error.ItemNotFound;
 
     const region_item: KeychainItem = .{ .service = keychain_service, .account = "region" };
-    const region_name = try region_item.read(gpa);
+    const region_name = region_item.read(gpa) catch |err| switch (err) {
+        // The token is there but the region isn't: say so, not "no token".
+        error.ItemNotFound => return error.UnknownRegion,
+        else => |other| return other,
+    };
     defer gpa.free(region_name);
 
     try checkToken(token);
@@ -220,7 +245,7 @@ fn reportError(
     const hint = switch (err) {
         error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
         error.InvalidToken => "the token contains a line break; " ++ rerun_script,
-        error.UnknownRegion => "the region (from TEAMS_ZIG_REGION or the keychain) isn't known",
+        error.UnknownRegion => "the region is missing or unknown; " ++ rerun_script,
         error.UserCanceled => "keychain access was cancelled",
         error.AuthFailed => "the keychain refused access; check its teams-zig items",
         error.InteractionNotAllowed => "the keychain is locked; unlock it and try again",

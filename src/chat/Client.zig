@@ -113,7 +113,7 @@ pub fn init(
 
 pub fn deinit(client: *Client) void {
     client.http.deinit();
-    // It holds the token: zero it so the freed memory doesn't keep a copy.
+    // It holds the token: zero our copy. std's connection buffers keep their own until exit.
     std.crypto.secureZero(u8, client.authentication);
     client.gpa.free(client.authentication);
     client.gpa.free(client.body_buffer);
