@@ -75,18 +75,16 @@ pub fn write(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     const hour = @divFloor(seconds_in_day, std.time.s_per_hour);
     const minute = @divFloor(@mod(seconds_in_day, std.time.s_per_hour), std.time.s_per_min);
 
-    if (day_at != day_now) {
-        // A negative count is a time in a later day; it gets the full date too.
-        const days_ago = day_now - day_at;
-        if (days_ago > 0) {
-            if (days_ago <= 6) {
-                try writeWeekday(writer, day_at);
-            } else {
-                try writeDate(writer, day_at);
-            }
-        } else {
-            try writeDate(writer, day_at);
-        }
+    const days_ago = day_now - day_at;
+    if (days_ago == 0) {
+        // Today: the time alone.
+    } else if (days_ago < 0) {
+        // A time in a later day than now: the full date.
+        try writeDate(writer, day_at);
+    } else if (days_ago <= 6) {
+        try writeWeekday(writer, day_at);
+    } else {
+        try writeDate(writer, day_at);
     }
     try writer.print("{d:0>2}:{d:0>2}", .{ hour, minute });
 }
