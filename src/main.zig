@@ -155,7 +155,11 @@ const Command = union(enum) {
 /// Ends the process if a command runs past `command_seconds_max`. std 0.17 has no read timeout
 /// and ignores its connect timeout, and a stalled connect has been seen to hang indefinitely.
 fn watchdog(io: Io) void {
-    io.sleep(.fromSeconds(command_seconds_max), .awake) catch return;
+    io.sleep(.fromSeconds(command_seconds_max), .awake) catch |err| switch (err) {
+        // Only cancellation ends the sleep early, and nothing cancels this detached thread; if
+        // something ever does, the watchdog's job is over.
+        error.Canceled => return,
+    };
     std.debug.print(
         "teams-zig: no answer from the Chat Service in {d} seconds; check the network\n",
         .{command_seconds_max},
