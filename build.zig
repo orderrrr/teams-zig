@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     teams.linkFramework("CoreFoundation", .{});
+    teams.linkFramework("Security", .{});
 
     const exe = b.addExecutable(.{
         .name = "teams-zig",
