@@ -2,7 +2,7 @@
 
 A Microsoft Teams client in Zig with no third-party dependencies: `std` only, no Node, no Java, no browser runtime.
 
-`inspo/` holds third-party reference projects (`teams-token`, `teams-api`). Read them for protocol facts only; never copy code from them or add their dependencies.
+`inspo/` holds a third-party reference project (`teams-api`). Read it for protocol facts only; never copy code from it or add its dependencies.
 
 ## Style
 
