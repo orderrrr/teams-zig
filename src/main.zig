@@ -4,6 +4,7 @@ const teams = @import("teams");
 const chat = teams.chat;
 const writeVisible = chat.text.writeVisible;
 const Seen = @import("Seen.zig");
+const short_time = @import("short_time.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     var stderr_buffer: [1024]u8 = undefined;
@@ -820,6 +821,7 @@ fn reportError(
 
 test {
     _ = Seen;
+    _ = short_time;
 }
 
 test "Command.parse accepts the three commands and rejects anything else" {
