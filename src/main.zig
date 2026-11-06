@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_file_writer.interface;
 
     requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
-    command.run(&client, stdout, &requests_started_at) catch |err| {
+    command.run(&client, init.io, stdout, stderr, &requests_started_at) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
         // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
         // would only hide that.
@@ -58,6 +58,8 @@ const usage =
     \\commands:
     \\  whoami                       show the signed-in user
     \\  chats [count]                list your chats (default 50, at most 100); * is unread
+    \\  watch                        print new messages from your 50 newest chats as they
+    \\                               arrive; Ctrl-C stops
     \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
     \\                               name as chats shows it (quote it if it has spaces) or its id
     \\
@@ -114,6 +116,15 @@ const message_count_recent = 20;
 /// none is waiting on the Chat Service. Static, so the detached watchdog can't outlive it.
 var requests_started_at: std.atomic.Value(i64) = .init(requests_idle);
 
+/// How often `watch` lists your chats when all is well.
+const watch_poll_seconds = 10;
+
+/// At most this many changed chats are read per `watch` poll, so a burst can't flood the service.
+const watch_read_count_limit = 10;
+
+/// The longest `watch` waits after throttling or a failure before trying again.
+const watch_backoff_seconds_max = 300;
+
 /// Far in the future, so an idle watchdog never fires.
 const requests_idle = std.math.maxInt(i64);
 
@@ -141,6 +152,7 @@ const CommandError = ConnectError || RunError;
 
 const Command = union(enum) {
     whoami,
+    watch,
     /// How many conversations to list.
     chats: u16,
     messages: Messages,
@@ -178,6 +190,10 @@ const Command = union(enum) {
             if (rest.len != 0) return null;
             return .whoami;
         }
+        if (std.mem.eql(u8, name, "watch")) {
+            if (rest.len != 0) return null;
+            return .watch;
+        }
         if (std.mem.eql(u8, name, "chats")) {
             if (rest.len > 1) return null;
             if (rest.len == 0) return .{ .chats = conversation_count_default };
@@ -198,13 +214,17 @@ const Command = union(enum) {
     }
 
     /// Sets `started_at` to idle once the Chat Service has answered, before any output is written.
+    /// `stderr` is for `watch`'s retry notes; errors that end the command are the caller's.
     fn run(
         command: *const Command,
         client: *chat.Client,
+        io: Io,
         stdout: *Io.Writer,
+        stderr: *Io.Writer,
         started_at: *std.atomic.Value(i64),
     ) RunError!void {
         switch (command.*) {
+            .watch => try watch(client, io, stdout, stderr, started_at),
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
@@ -411,6 +431,129 @@ fn nameSource(conversation: *const chat.Conversation, self_mri: []const u8) Name
     if (std.mem.eql(u8, last_sender, self_mri)) return .lookup;
     const name = conversation.last_sender_name orelse return .lookup;
     return .{ .known = name };
+}
+
+/// Polls your newest chats every `watch_poll_seconds` and prints each new message, oldest first,
+/// after its chat's name. The first poll only records where things stand. Throttling, server
+/// errors and network failures back off, doubling up to `watch_backoff_seconds_max`; anything
+/// else (an expired token, say) ends the command.
+fn watch(
+    client: *chat.Client,
+    io: Io,
+    stdout: *Io.Writer,
+    stderr: *Io.Writer,
+    started_at: *std.atomic.Value(i64),
+) RunError!void {
+    const user = try client.whoami();
+    defer user.deinit();
+
+    var seen: Seen = seen: {
+        const list = try client.conversations(conversation_count_default);
+        defer list.deinit();
+        break :seen try .init(client.gpa, list.items);
+    };
+    defer seen.deinit();
+
+    started_at.store(requests_idle, .release);
+    try stdout.writeAll("Watching your newest chats for new messages. Ctrl-C stops.\n");
+    try stdout.flush();
+
+    var pause_seconds: u32 = watch_poll_seconds;
+    while (true) {
+        io.sleep(.fromSeconds(pause_seconds), .awake) catch |err| switch (err) {
+            // Nothing cancels the main thread; if something ever does, watching is over.
+            error.Canceled => return,
+        };
+
+        started_at.store(Io.Clock.awake.now(io).toSeconds(), .release);
+        if (pollChats(client, &seen, user.mri, stdout)) {
+            pause_seconds = watch_poll_seconds;
+        } else |err| {
+            if (!watchErrorRetries(err, client.response_status)) return err;
+            pause_seconds = @min(pause_seconds * 2, watch_backoff_seconds_max);
+            _ = try reportError(stderr, err, client.response_status);
+            try stderr.print("teams-zig: trying again in {d} seconds\n", .{pause_seconds});
+            try stderr.flush();
+        }
+        started_at.store(requests_idle, .release);
+        try stdout.flush();
+    }
+}
+
+/// One `watch` poll: lists your newest chats and prints the new messages in up to
+/// `watch_read_count_limit` that changed; the rest wait for the next poll.
+fn pollChats(
+    client: *chat.Client,
+    seen: *Seen,
+    self_mri: []const u8,
+    stdout: *Io.Writer,
+) RunError!void {
+    const list = try client.conversations(conversation_count_default);
+    defer list.deinit();
+
+    var read_count_left: u32 = watch_read_count_limit;
+    for (list.items) |*conversation| {
+        if (!seen.changed(conversation)) continue;
+        if (read_count_left == 0) break;
+        read_count_left -= 1;
+        try printNewMessages(client, seen, conversation, self_mri, stdout);
+    }
+}
+
+/// Reads a changed chat's newest page and prints the messages newer than its mark, then moves
+/// the mark to the chat's last message.
+fn printNewMessages(
+    client: *chat.Client,
+    seen: *Seen,
+    conversation: *const chat.Conversation,
+    self_mri: []const u8,
+    stdout: *Io.Writer,
+) RunError!void {
+    // `changed` is only true for a conversation with a last message id.
+    const last_message_id = conversation.last_message_id.?;
+    const recent = client.recentMessages(conversation.id, message_count_recent) catch |err| {
+        if (!lookupErrorSkips(err, client.response_status)) return err;
+        // This one chat can't be read; move past it rather than retry it every poll.
+        return seen.record(conversation.id, last_message_id);
+    };
+    defer recent.deinit();
+
+    const known_name = switch (nameSource(conversation, self_mri)) {
+        .known => |known| known,
+        .none, .lookup => otherWriterName(recent.items, self_mri),
+    };
+    const name = chatName(conversation, known_name) orelse "(no topic)";
+    const mark = seen.mark(conversation.id);
+
+    // The service returns newest first; print oldest first, like a chat window.
+    var index = recent.items.len;
+    while (index > 0) {
+        index -= 1;
+        const message = &recent.items[index];
+        if (!message.isText()) continue;
+        const message_id = std.fmt.parseInt(u64, message.id, 10) catch continue;
+        if (message_id <= mark) continue;
+
+        try stdout.writeByte('[');
+        try writeVisible(stdout, name);
+        try stdout.writeAll("] ");
+        try printMessage(stdout, message);
+    }
+    try seen.record(conversation.id, last_message_id);
+}
+
+/// Whether `watch` should wait and try again after `err` rather than stop: throttling, server
+/// errors and network failures pass; anything else would fail the same way next time.
+/// `status` is the response's, set whenever the error is UnexpectedStatus.
+fn watchErrorRetries(err: RunError, status: ?std.http.Status) bool {
+    return switch (err) {
+        error.ConnectFailed, error.SendFailed, error.ConnectionDropped => true,
+        error.UnexpectedStatus => retries: {
+            if (status.? == .too_many_requests) break :retries true;
+            break :retries status.?.class() == .server_error;
+        },
+        else => false,
+    };
 }
 
 /// The id, owned by `arena`, of the one chat among your newest `conversation_count_limit` named
@@ -735,6 +878,16 @@ test "requestsStalled fires only after the limit, and never while idle" {
     try std.testing.expect(requestsStalled(1000 + requests_seconds_max, 1000));
     try std.testing.expect(!requestsStalled(1000, requests_idle));
     try std.testing.expect(!requestsStalled(std.math.maxInt(i64), requests_idle));
+}
+
+test "watchErrorRetries waits out throttling and network failures, and stops on the rest" {
+    try std.testing.expect(watchErrorRetries(error.UnexpectedStatus, .too_many_requests));
+    try std.testing.expect(watchErrorRetries(error.UnexpectedStatus, .service_unavailable));
+    try std.testing.expect(watchErrorRetries(error.ConnectFailed, null));
+    try std.testing.expect(watchErrorRetries(error.ConnectionDropped, null));
+    try std.testing.expect(!watchErrorRetries(error.UnexpectedStatus, .forbidden));
+    try std.testing.expect(!watchErrorRetries(error.TokenExpired, .unauthorized));
+    try std.testing.expect(!watchErrorRetries(error.WriteFailed, null));
 }
 
 test "checkToken rejects line breaks" {
