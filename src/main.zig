@@ -27,7 +27,12 @@ pub fn main(init: std.process.Init) !u8 {
     // Started after connect so a keychain prompt can take as long as it needs. Without a watchdog
     // a stalled request would hang forever; if the thread can't start, the command still runs,
     // just unbounded.
-    if (std.Thread.spawn(.{}, watchdog, .{init.io})) |watchdog_thread| {
+    const spawn_config: std.Thread.SpawnConfig = .{
+        .stack_size = std.Thread.SpawnConfig.default_stack_size,
+        .allocator = null,
+    };
+    const watchdog_arguments = .{ init.io, &chat_service_answered };
+    if (std.Thread.spawn(spawn_config, watchdog, watchdog_arguments)) |watchdog_thread| {
         watchdog_thread.detach();
     } else |_| {}
 
@@ -35,7 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    command.run(&client, stdout) catch |err| {
+    command.run(&client, stdout, &chat_service_answered) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
         // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
         // would only hide that.
@@ -74,6 +79,9 @@ const region_variable = "TEAMS_ZIG_REGION";
 const conversation_count_max = 50;
 const message_count_max = 50;
 
+/// Set once the Chat Service has answered. Static, so the detached watchdog can't outlive it.
+var chat_service_answered: std.atomic.Value(bool) = .init(false);
+
 /// Every command normally finishes in a few seconds; past this, the network has stalled.
 const command_seconds_max = 60;
 
@@ -111,10 +119,17 @@ const Command = union(enum) {
         }
     }
 
-    fn run(command: *const Command, client: *chat.Client, stdout: *Io.Writer) RunError!void {
+    /// Sets `requests_done` once the Chat Service has answered, before any output is written.
+    fn run(
+        command: *const Command,
+        client: *chat.Client,
+        stdout: *Io.Writer,
+        requests_done: *std.atomic.Value(bool),
+    ) RunError!void {
         switch (command.*) {
             .whoami => {
                 const user = try client.whoami();
+                requests_done.store(true, .release);
                 defer user.deinit();
 
                 try writeVisible(stdout, user.name);
@@ -124,6 +139,7 @@ const Command = union(enum) {
             },
             .chats => {
                 const list = try client.conversations(conversation_count_max);
+                requests_done.store(true, .release);
                 defer list.deinit();
 
                 for (list.items) |conversation| {
@@ -139,6 +155,7 @@ const Command = union(enum) {
             },
             .messages => |conversation_id| {
                 const list = try client.messages(conversation_id, message_count_max);
+                requests_done.store(true, .release);
                 defer list.deinit();
 
                 // The service returns newest first; print oldest first, like a chat window.
@@ -152,19 +169,23 @@ const Command = union(enum) {
     }
 };
 
-/// Ends the process if a command runs past `command_seconds_max`. std 0.17 has no read timeout
-/// and ignores its connect timeout, and a stalled connect has been seen to hang indefinitely.
-fn watchdog(io: Io) void {
+/// Ends the process if the Chat Service hasn't answered within `command_seconds_max`. std 0.17
+/// has no read timeout and ignores its connect timeout, and a stalled connect has been seen to
+/// hang indefinitely. Output time isn't counted: a slow pager reading the output is fine.
+fn watchdog(io: Io, requests_done: *const std.atomic.Value(bool)) void {
     io.sleep(.fromSeconds(command_seconds_max), .awake) catch |err| switch (err) {
         // Only cancellation ends the sleep early, and nothing cancels this detached thread; if
         // something ever does, the watchdog's job is over.
         error.Canceled => return,
     };
+    if (requests_done.load(.acquire)) return;
+
     std.debug.print(
         "teams-zig: no answer from the Chat Service in {d} seconds; check the network\n",
         .{command_seconds_max},
     );
-    std.process.exit(1);
+    // _exit, not exit: exit handlers mustn't run on this thread while main is still working.
+    std.c._exit(1);
 }
 
 /// Starts a Chat Service client with the token and region from the environment (test mode) or,
@@ -250,7 +271,8 @@ fn reportError(
     const hint = switch (err) {
         error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
         error.InvalidToken => "the token contains a line break; " ++ rerun_script,
-        error.UnknownRegion => "the region is missing or unknown; " ++ rerun_script,
+        error.UnknownRegion => "the region is missing or unknown; set TEAMS_ZIG_REGION or " ++
+            rerun_script,
         error.UserCanceled => "keychain access was cancelled",
         error.AuthFailed => "the keychain refused access; check its teams-zig items",
         error.InteractionNotAllowed => "the keychain is locked; unlock it and try again",

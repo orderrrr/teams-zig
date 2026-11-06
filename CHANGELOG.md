@@ -11,6 +11,8 @@ One entry per milestone. The version lives in `build.zig.zon`.
 - Read-only: nothing writes to Teams.
 - A command that gets no answer from the Chat Service within 60 seconds stops with a network hint, rather than hanging (Zig 0.17's HTTP client has no working timeout).
 
-Known issue: each new build of teams-zig gets a keychain "allow access?" prompt, because macOS's partition list trusts builds one at a time. Use test mode to avoid it.
+Known issues:
+- Each new build of teams-zig gets a keychain "allow access?" prompt, because macOS's partition list trusts builds one at a time. Use test mode to avoid it.
+- Roughly one run in three stalls while connecting, inside Zig 0.17's own connect and name lookup (curl to the same host never stalls). The 60-second limit ends such a run with a network hint; running it again usually works.
 
 Needs: macOS with the SDK (Command Line Tools), Zig 0.17, agent-browser and an org (work/school) Teams account.
