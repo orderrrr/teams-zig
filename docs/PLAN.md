@@ -102,3 +102,27 @@ Goal: `chats` names the other person in 1:1 chats, `chats` and `messages` can go
 ### Out of M2
 
 Anything that writes to Teams. Search (needs a second token). Profiles and files.
+
+## M2 gate
+
+**Round 1** (mr-review, STYLE.md and Tiger Style reviews of `fb6fc3f..799795d`):
+- The recent-message scan could name a bot or a system event's sender as the other person; only user-written messages count now, in the pure, tested `otherWriterName` (`ec6343b`).
+- A long chat list could outrun the 60-second watchdog; at most 40 name lookups per run, chats past that show `(no topic)` (`9ae2e2c`, CHANGELOG `679e9bc`).
+- One unreadable chat failed the whole list; a lookup that gets 404, another unexpected status or unexpected JSON now leaves that chat unnamed (`9ae2e2c`).
+- Style fixes: one owner for looked-up names, optionals instead of `''`, comptime asserts tying the counts to their types and the watchdog, edge tests for counts (`ec6343b`, `9ae2e2c`).
+
+**Round 2** (reviews of the round-1 fixes):
+- A lookup could follow several pages, so 40 lookups weren't 40 requests; lookups now read exactly one page through `Client.recentMessages` (`cd1cfe3`).
+- 429 and 5xx during a lookup stop the command instead of leaving every later chat unnamed (`cd1cfe3`).
+- A conversation's last sender counts only when the last message is user-written, the same rule as the scan (`cd1cfe3`).
+- Style fixes: the lookup budget lives in the caller's loop, `nameSource` is a pure tested decision, more invariant asserts and null-name tests (`cd1cfe3`).
+
+**Round 3:** the skip-or-stop rule became the pure, tested `lookupErrorSkips`; `LastMessage.messagetype` optional; page constants and parameters follow `_limit` for a fixed ceiling, `_max` for a per-call cap (`4251f61`).
+
+**Round 4:** a test for a last message with a null or missing message type (`b7aad5e`); `page_item_count_limit` follows the same naming (`df6a31a`).
+
+**Round 5:** `main.zig`'s fixed count ceilings renamed to `_limit` too; byte sizes and durations keep `_max` (`dbcb506`).
+
+**Round 6:** all three reviews found nothing new. Gate passed. M2 resolved.
+
+Live after each round (read-only, counts only): 41 of 41 1:1 chats named in 11–14 s; `chats 100` lists 94 in about 17 s; `messages 200` returns 200; `chats 0` prints usage.
