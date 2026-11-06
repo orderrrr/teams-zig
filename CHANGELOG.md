@@ -2,6 +2,14 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.3.0 (M3): names and watch
+
+- `teams-zig messages <chat>` takes a chat's exact name as `chats` shows it (case doesn't matter; quote names with spaces), or its id as before. If several chats share the name, it lists them with their ids and reads none.
+- `teams-zig chats` marks chats with unread messages with `*`: someone else wrote after the newest message you've read. Messages the service posts itself, such as call recordings, don't count.
+- `teams-zig watch` prints new messages from your 50 newest chats as they arrive, polling every 10 seconds. Throttling, server errors and network drops make it wait and retry, up to 5 minutes apart; an expired token stops it. Ctrl-C stops it.
+- The 60-second "no answer" limit now applies to each batch of requests (each `watch` poll), not the whole command.
+- Still read-only: every request is a GET, so `watch` reads by polling and never marks anything as read.
+
 ## 0.2.0 (M2): read-only improvements
 
 - `teams-zig chats` names the other person in 1:1 chats instead of `(no topic)`, using the last sender, or the chat's recent messages when you spoke last. At most 40 chats get that recent-messages lookup per run, to stay inside the 60-second limit; any past that still show `(no topic)`.
