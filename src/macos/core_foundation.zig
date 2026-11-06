@@ -6,10 +6,7 @@ const std = @import("std");
 /// CFIndex, a C `long`: platform-sized on purpose, to match the C ABI.
 pub const Index = isize;
 pub const Allocator = opaque {};
-
-pub fn release(object: *const anyopaque) void {
-    CFRelease(object);
-}
+pub const Boolean = opaque {};
 
 pub const String = opaque {
     pub fn create(contents: []const u8) error{OutOfMemory}!*const String {
@@ -72,7 +69,6 @@ pub const Dictionary = opaque {
         ) orelse error.OutOfMemory;
     }
 };
-pub const Boolean = opaque {};
 
 pub const DictionaryKeyCallBacks = extern struct {
     version: Index,
@@ -90,6 +86,10 @@ pub const DictionaryValueCallBacks = extern struct {
     copy_description: ?*const anyopaque,
     equal: ?*const anyopaque,
 };
+
+pub fn release(object: *const anyopaque) void {
+    CFRelease(object);
+}
 
 const string_encoding_utf8: u32 = 0x08000100;
 

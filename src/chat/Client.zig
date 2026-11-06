@@ -13,7 +13,7 @@ gpa: std.mem.Allocator,
 http: std.http.Client,
 region: Region,
 /// The `Authentication` header value, `skypetoken=<token>`. Owned.
-authentication: []const u8,
+authentication: []u8,
 /// Holds the latest response body. Allocated once, `body_size_max` long.
 body_buffer: []u8,
 /// The status of the latest response, for error messages.
@@ -82,7 +82,10 @@ pub fn init(
     std.debug.assert(std.mem.indexOfAny(u8, skype_token, "\r\n") == null);
 
     const authentication = try std.fmt.allocPrint(gpa, "skypetoken={s}", .{skype_token});
-    errdefer gpa.free(authentication);
+    errdefer {
+        std.crypto.secureZero(u8, authentication);
+        gpa.free(authentication);
+    }
 
     client.* = .{
         .gpa = gpa,
@@ -110,6 +113,8 @@ pub fn init(
 
 pub fn deinit(client: *Client) void {
     client.http.deinit();
+    // It holds the token: zero it so the freed memory doesn't keep a copy.
+    std.crypto.secureZero(u8, client.authentication);
     client.gpa.free(client.authentication);
     client.gpa.free(client.body_buffer);
     client.* = undefined;
@@ -135,6 +140,12 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
 
+    // std writes the path and query onto the request line as given, so a link carrying spaces,
+    // control bytes or non-ASCII could add headers or a second request.
+    for (url) |byte| {
+        if (byte <= ' ') return error.ForeignLink;
+        if (byte >= 0x7f) return error.ForeignLink;
+    }
     const uri = std.Uri.parse(url) catch return error.BadResponse;
     var request = client.http.request(.GET, uri, .{
         .version = .@"HTTP/1.1",
@@ -393,6 +404,9 @@ test "getUrl refuses links outside the Chat Service base URL" {
         "https://emea.ng.msg.teams.microsoft.com/v1.evil.com/x",
         "https://emea.ng.msg.teams.microsoft.com/v1",
         "https://amer.ng.msg.teams.microsoft.com/v1/users/ME",
+        "https://emea.ng.msg.teams.microsoft.com/v1/x\r\nX-Injected: 1",
+        "https://emea.ng.msg.teams.microsoft.com/v1/x HTTP/1.1",
+        "https://emea.ng.msg.teams.microsoft.com/v1/caf\xc3\xa9",
     };
     for (foreign_urls) |foreign_url| {
         try std.testing.expectError(error.ForeignLink, client.getUrl(foreign_url));
@@ -409,6 +423,7 @@ test "the Authentication header carries the skypetoken prefix" {
 
 /// Serves canned page bodies in order, repeating the last one, and counts the requests.
 const CannedPages = struct {
+    /// Borrowed: the canned bodies must outlive the source.
     bodies: []const []const u8,
     request_count: u32 = 0,
 

@@ -164,7 +164,11 @@ fn connect(
 
     const token_item: KeychainItem = .{ .service = keychain_service, .account = "skype-token" };
     const token = try token_item.read(gpa);
-    defer gpa.free(token);
+    defer {
+        // Zeroed so the freed memory doesn't keep a copy of the token.
+        std.crypto.secureZero(u8, token);
+        gpa.free(token);
+    }
 
     // An empty item means the script never stored a real token.
     if (token.len == 0) return error.ItemNotFound;
