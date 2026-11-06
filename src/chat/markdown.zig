@@ -155,10 +155,13 @@ const Output = struct {
             output.space_pending = true;
             return;
         }
-        // `&gt;` starting a line would read as a quote.
-        const escape = output.startsLine() and std.mem.eql(u8, replacement, ">");
+        // Asked before `flush`, which writes the line's prefix. `&gt;` starting a line would read
+        // as a quote.
+        const starts_line = output.startsLine();
         try output.flush();
-        if (escape) try output.writer.writeByte('\\');
+        if (starts_line) {
+            if (std.mem.eql(u8, replacement, ">")) try output.writer.writeByte('\\');
+        }
         try output.writer.writeAll(replacement);
         output.wroteText();
     }
@@ -166,7 +169,8 @@ const Output = struct {
     /// The next text starts its line, with only the line's prefix before it: no text and no
     /// marker that `flush` would write.
     fn startsLine(output: *const Output) bool {
-        return !output.line_has_text and output.marks_open_count == 0;
+        if (output.line_has_text) return false;
+        return output.marks_open_count == 0;
     }
 
     fn wroteText(output: *Output) void {

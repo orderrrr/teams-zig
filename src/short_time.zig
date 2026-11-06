@@ -52,8 +52,11 @@ pub fn parseIso(text: []const u8) ?i64 {
     if (second > 60) return null;
 
     const days = parseIsoDays(date);
-    return days * std.time.s_per_day + hour * std.time.s_per_hour + minute * std.time.s_per_min +
-        second;
+    const unix_seconds = days * std.time.s_per_day + hour * std.time.s_per_hour +
+        minute * std.time.s_per_min + second;
+    // A year from `year_min` on is far past the first day, so a local time stays positive.
+    std.debug.assert(unix_seconds >= std.time.s_per_day);
+    return unix_seconds;
 }
 
 /// Two local times, as seconds since 1970 in the reader's zone. A struct, so they can't be
@@ -68,25 +71,24 @@ pub const Times = struct {
 pub fn write(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     std.debug.assert(times.at_seconds >= 0);
     std.debug.assert(times.now_seconds >= 0);
-    const day_at = @divFloor(times.at_seconds, std.time.s_per_day);
-    const day_now = @divFloor(times.now_seconds, std.time.s_per_day);
     // Unsigned, so they print without a sign.
-    const seconds_in_day: u64 = @intCast(@mod(times.at_seconds, std.time.s_per_day));
-    const hour = @divFloor(seconds_in_day, std.time.s_per_hour);
-    const minute = @divFloor(@mod(seconds_in_day, std.time.s_per_hour), std.time.s_per_min);
-
-    const days_ago = day_now - day_at;
-    if (days_ago == 0) {
-        // Today: the time alone.
-    } else if (days_ago < 0) {
-        // A time in a later day than now: the full date.
-        try writeDate(writer, day_at);
-    } else if (days_ago <= 6) {
-        try writeWeekday(writer, day_at);
-    } else {
-        try writeDate(writer, day_at);
-    }
+    const at_day_seconds: u64 = @intCast(@mod(times.at_seconds, std.time.s_per_day));
+    const hour = @divFloor(at_day_seconds, std.time.s_per_hour);
+    const minute = @divFloor(@mod(at_day_seconds, std.time.s_per_hour), std.time.s_per_min);
+    try writeDay(writer, times);
     try writer.print("{d:0>2}:{d:0>2}", .{ hour, minute });
+}
+
+/// The day before the time: nothing for today, the weekday for the past six days, else the date.
+fn writeDay(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
+    const at_day = @divFloor(times.at_seconds, std.time.s_per_day);
+    const now_day = @divFloor(times.now_seconds, std.time.s_per_day);
+    const days_ago = now_day - at_day;
+    if (days_ago == 0) return;
+    // A time in a later day than now: the full date.
+    if (days_ago < 0) return writeDate(writer, at_day);
+    if (days_ago <= 6) return writeWeekday(writer, at_day);
+    return writeDate(writer, at_day);
 }
 
 fn writeWeekday(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
@@ -173,21 +175,42 @@ test "parseIso rejects anything else" {
 
 test "write shortens by how long ago" {
     // 2025-11-01 12:26:40 is a Saturday.
-    const at = 1_762_000_000;
-    const hour = std.time.s_per_hour;
-    const day = std.time.s_per_day;
-    try expectWrite("12:26", .{ .at_seconds = at, .now_seconds = at });
-    try expectWrite("12:26", .{ .at_seconds = at, .now_seconds = at + 11 * hour });
-    try expectWrite("Sat 12:26", .{ .at_seconds = at, .now_seconds = at + 12 * hour });
-    try expectWrite("Sat 12:26", .{ .at_seconds = at, .now_seconds = at + 6 * day });
-    try expectWrite("2025-11-01 12:26", .{ .at_seconds = at, .now_seconds = at + 7 * day });
-    try expectWrite("2025-11-01 12:26", .{ .at_seconds = at, .now_seconds = at - day });
+    const at_seconds = 1_762_000_000;
+    const hour_seconds = std.time.s_per_hour;
+    const day_seconds = std.time.s_per_day;
+    try expectWrite("12:26", .{ .at_seconds = at_seconds, .now_seconds = at_seconds });
+    try expectWrite("12:26", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds + 11 * hour_seconds,
+    });
+    try expectWrite("Sat 12:26", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds + 12 * hour_seconds,
+    });
+    try expectWrite("Sat 12:26", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds + 6 * day_seconds,
+    });
+    try expectWrite("2025-11-01 12:26", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds + 7 * day_seconds,
+    });
+    try expectWrite("2025-11-01 12:26", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds - day_seconds,
+    });
 }
 
 test "write handles midnight and leap days" {
     // 2024-02-29, a Thursday, at midnight.
-    const at = 1_709_164_800;
-    const day = std.time.s_per_day;
-    try expectWrite("2024-02-29 00:00", .{ .at_seconds = at, .now_seconds = at + 30 * day });
-    try expectWrite("Thu 00:00", .{ .at_seconds = at, .now_seconds = at + day });
+    const at_seconds = 1_709_164_800;
+    const day_seconds = std.time.s_per_day;
+    try expectWrite("2024-02-29 00:00", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds + 30 * day_seconds,
+    });
+    try expectWrite("Thu 00:00", .{
+        .at_seconds = at_seconds,
+        .now_seconds = at_seconds + day_seconds,
+    });
 }

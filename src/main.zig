@@ -277,7 +277,7 @@ const Command = union(enum) {
     ) RunError!void {
         switch (command.*) {
             .watch => try watch(client, io, clock, stdout, stderr, started_at),
-            .unread => try printUnread(client, clock, stdout, started_at),
+            .unread => try runUnread(client, clock, stdout, started_at),
             .whoami => {
                 const user = try client.whoami();
                 defer user.deinit();
@@ -290,7 +290,7 @@ const Command = union(enum) {
                 try stdout.writeAll(">\n");
             },
             .chats => |conversation_count| {
-                try printChats(client, clock, stdout, started_at, conversation_count);
+                try runChats(client, clock, stdout, started_at, conversation_count);
             },
             .messages => |messages| {
                 // Holds a looked-up chat's id; freed with the command.
@@ -325,7 +325,7 @@ const Command = union(enum) {
 };
 
 /// Lists your `conversation_count` newest chats, one `printChat` row each.
-fn printChats(
+fn runChats(
     client: *chat.Client,
     clock: *const Clock,
     stdout: *Io.Writer,
@@ -635,7 +635,7 @@ const UnreadChat = struct {
 /// Prints what's new since your read marker in up to `unread_read_count_limit` unread chats
 /// among your newest, the same way `watch` does. A chat that can't be read is counted with the
 /// ones not shown. Every request finishes before the first line is written.
-fn printUnread(
+fn runUnread(
     client: *chat.Client,
     clock: *const Clock,
     stdout: *Io.Writer,
