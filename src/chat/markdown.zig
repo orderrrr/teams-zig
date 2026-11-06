@@ -84,6 +84,8 @@ const Output = struct {
     list_depth: u8 = 0,
     /// The next line starts a list item, so it gets the item's marker.
     item_starting: bool = false,
+    /// The next line starts a heading of this level (1 to 3), or 0.
+    heading_starting: u2 = 0,
     /// Inside `<pre>`: text is written as it is, line by line, inside a fence.
     in_code_block: bool = false,
     /// The code block's current line holds nothing yet.
@@ -160,6 +162,12 @@ const Output = struct {
             return output.openMark(mark);
         }
         if (html_tag.is("br")) return output.lineBreak();
+        if (html_tag.is("img")) return output.image(html_tag);
+        if (headingLevel(html_tag)) |level| {
+            try output.endLine();
+            if (!html_tag.closing) output.heading_starting = level;
+            return;
+        }
         if (html_tag.is("blockquote")) return output.quoteTag(html_tag.closing);
         if (html_tag.is("ul")) return output.listTag(html_tag.closing, false);
         if (html_tag.is("ol")) return output.listTag(html_tag.closing, true);
@@ -235,6 +243,22 @@ const Output = struct {
             return;
         }
         output.quote_depth +|= 1;
+    }
+
+    /// An emoji is its `alt` text, which holds the emoji itself; any other image is `[image]`.
+    fn image(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+        const item_type = html_tag.attribute("itemtype") orelse "";
+        const emoji = std.mem.endsWith(u8, item_type, "/Emoji");
+        const alt = html_tag.attribute("alt") orelse "";
+        if (emoji and alt.len == 0) return;
+
+        try output.flush();
+        if (emoji) {
+            try html.writeDecoded(output.writer, alt);
+        } else {
+            try output.writer.writeAll("[image]");
+        }
+        output.wroteText();
     }
 
     /// A code block starts on its own line with a fence; its text follows on the next.
@@ -320,6 +344,15 @@ const Output = struct {
         }
         if (blank) return;
 
+        try output.writeListPrefix();
+        if (output.heading_starting > 0) {
+            try output.writer.splatByteAll('#', output.heading_starting);
+            try output.writer.writeByte(' ');
+            output.heading_starting = 0;
+        }
+    }
+
+    fn writeListPrefix(output: *Output) std.Io.Writer.Error!void {
         const list_depth = @min(output.list_depth, list_depth_limit);
         if (list_depth == 0) return;
         for (output.lists[0 .. list_depth - 1]) |*outer| {
@@ -378,6 +411,15 @@ const Output = struct {
         }
     }
 };
+
+/// The Markdown level of `h1`, `h2` or `h3`, or null for any other tag. Smaller headings are
+/// shown as plain lines.
+fn headingLevel(tag: *const html.Tag) ?u2 {
+    if (tag.is("h1")) return 1;
+    if (tag.is("h2")) return 2;
+    if (tag.is("h3")) return 3;
+    return null;
+}
 
 /// Deeper quotes are shown at this depth.
 const quote_depth_limit = 8;
@@ -553,4 +595,21 @@ test "writeHtml quotes a code block inside a quote" {
 test "writeHtml keeps control bytes escaped in code blocks and closes an unclosed one" {
     try expectMarkdown("<pre>\xc2\r\x9b[2J\x1b</pre>", "```\n\\xc2\x9b[2J\\x1b\n```");
     try expectMarkdown("<pre>fake", "```\nfake\n```");
+}
+
+test "writeHtml writes headings on their own lines" {
+    const headings = "fake<h2>Fake heading</h2><p>after</p><h3>Small</h3>";
+    try expectMarkdown(headings, "fake\n## Fake heading\nafter\n### Small");
+}
+
+test "writeHtml writes an emoji as its alt text and other images as [image]" {
+    const smile = "\u{1F604}";
+    const emoji = "<span title=\"Smile\" type=\"(smile)\"><img itemscope=\"\" " ++
+        "itemtype=\"http://schema.skype.com/Emoji\" itemid=\"smile\" src=\"https://x/s.png\" " ++
+        "title=\"Smile\" alt=\"" ++ smile ++ "\" style=\"width:20px\"></span>";
+    try expectMarkdown("fake " ++ emoji ++ " done", "fake " ++ smile ++ " done");
+
+    const pasted = "<p>see<img itemtype=\"http://schema.skype.com/AMSImage\" src=\"x\"></p>";
+    try expectMarkdown(pasted, "see[image]");
+    try expectMarkdown("<img itemtype=\"x/Emoji\" alt=\"\x1b[2J\">", "\\x1b[2J");
 }
