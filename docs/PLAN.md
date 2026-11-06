@@ -229,3 +229,24 @@ Owner decision: the call-history prefix is for helpers split out of a function; 
 Live after each round (read-only, counts only): about 505 messages across 11 chats (48:notes and the 10 newest) render with no `\x0d`, no raw control bytes and no leftover tags; code fences pair up.
 
 Decided along the way: compound conditions, aliases and flag parameters are refactored away rather than waived; the incremental compiler was tried at the owner's request and isn't usable on arm64 macOS with Zig 0.17 (it crashes, and the self-hosted backend emits a binary that won't run), so builds stay as they are (about 3.3 s per rebuild).
+
+## Polish: times, unread, escaping (0.5.0)
+
+Asked for by the owner on 2026-11-06 as a polish pass with a review before M5 (sending). It stays read-only. Plan decisions:
+
+- Times are shown in local time, with the time zone taken from CoreFoundation's system time zone and the offset found for each moment, so daylight saving is handled. A time from the same local day shows as `14:05`, one from the previous six days as `Mon 14:05`, and anything older as `2026-10-12 14:05`. A timestamp that doesn't parse is shown as it came.
+- `unread` reads your 50 newest chats. For each unread one (the same test as the `*` in `chats`), up to 10 chats, it reads that chat's 20 newest messages and prints the text messages newer than your read marker, in `watch`'s `[chat] time  sender: body` form. More than 10 unread chats ends with a line saying how many weren't shown, and none prints `No unread messages.` It never marks anything as read.
+- In HTML messages, typed text at the start of a line that would read as a Markdown block gets a `\` in front: `#`, `>`, `-`, `*` or `+` followed by a space, digits followed by `.` or `)` and a space, and `` ``` ``. Inline `*` and `_` stay as typed. Code block contents and plain `Text` messages are unchanged.
+
+### Chunks
+
+1. **P.1 time zone.** CoreFoundation's offset from GMT at a given moment, in `macos.core_foundation`.
+2. **P.2 short times.** Parsing the service's ISO timestamps and writing them in the short local form. Tests with fixed times and offsets.
+3. **P.3 times in output.** `chats`, `messages` and `watch` use the short form, and `chats` pads the column to its widest form.
+4. **P.4 unread.** The `unread` command, sharing `watch`'s message printing.
+5. **P.5 escaping.** Line-start escaping in the Markdown writer.
+6. **P.6 0.5.0 and gate.** A read-only live check (counts only), CHANGELOG, the version, and the three reviews, recorded below.
+
+### Out of the polish pass
+
+Anything that writes to Teams. `` ``` `` inside a code block still ends it early. Colours. `help`, which the usage text already covers.
