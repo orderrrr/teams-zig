@@ -127,6 +127,8 @@ pub fn get(client: *Client, path: []const u8) Error![]const u8 {
 /// GETs a full URL, such as a pagination link the service sent. It must be under the base URL.
 /// The body is borrowed: it's valid until the next request.
 pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
+    // Cleared first, so a status only ever describes this request.
+    client.response_status = null;
     const base = client.region.baseUrl();
     if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
     if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
@@ -146,7 +148,9 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
             .authorization = .default,
             .user_agent = .default,
             .connection = .default,
-            .accept_encoding = .default,
+            // Written out: with only identity enabled, std 0.17 writes the header as
+            // "accept-encodin" (it undoes two bytes of a list it never wrote), which gets a 400.
+            .accept_encoding = .{ .override = "identity" },
             .content_type = .default,
         },
         .extra_headers = &.{
@@ -156,6 +160,11 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         .privileged_headers = &.{},
     }) catch |err| return requestError(err);
     defer request.deinit();
+
+    // Uncompressed only: receiveHead refuses any encoding not listed here, so the body never
+    // needs a decompressor (std's zstd path would need a bigger buffer than fetch gives it).
+    request.accept_encoding = @splat(false);
+    request.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
 
     request.sendBodiless() catch return error.SendFailed;
     // Redirects are refused, so receiveHead never needs a redirect buffer.
@@ -169,26 +178,25 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         else => return error.UnexpectedStatus,
     }
 
-    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
-        .identity => &.{},
-        .zstd => try client.gpa.alloc(u8, std.compress.zstd.default_window_len),
-        .deflate, .gzip => try client.gpa.alloc(u8, std.compress.flate.max_window_len),
-        .compress => return error.BadResponse,
-    };
-    defer client.gpa.free(decompress_buffer);
+    std.debug.assert(response.head.content_encoding == .identity);
 
     var body: std.Io.Writer = .fixed(client.body_buffer);
     var transfer_buffer: [64]u8 = undefined;
-    var decompress: std.http.Decompress = undefined;
-    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    const reader = response.reader(&transfer_buffer);
     // Read here rather than through fetch: fetch unwraps bodyErr() on ReadFailed, which is null
     // when the connection drops mid-body, and crashes.
     _ = reader.streamRemaining(&body) catch |err| return bodyError(err, response.bodyErr());
 
+    // A clean close mid-body reads as the end of the stream, so check the length was met.
+    switch (request.reader.state) {
+        .body_remaining_content_length => return error.ConnectionDropped,
+        else => {},
+    }
     return body.buffered();
 }
 
-/// DNS, TCP and TLS failures all mean the Chat Service couldn't be reached.
+/// Name lookup, TCP and TLS failures, and failing to load the system's root certificates, all
+/// mean the Chat Service couldn't be reached.
 fn requestError(err: std.http.Client.RequestError) Error {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -209,11 +217,18 @@ fn receiveHeadError(err: std.http.Client.Request.ReceiveHeadError) Error {
 }
 
 /// The body writer is a fixed buffer, so its only failure is running out of room. A read failure
-/// is a broken chunk when std recorded a body error, and a dropped connection when it didn't.
+/// with no body error is a socket or TLS failure; a truncated chunk is a dropped connection too;
+/// other body errors mean the server broke HTTP.
 fn bodyError(err: std.Io.Reader.StreamRemainingError, body_err: ?std.http.Reader.BodyError) Error {
     return switch (err) {
         error.WriteFailed => error.ResponseTooLarge,
-        error.ReadFailed => if (body_err == null) error.ConnectionDropped else error.BadResponse,
+        error.ReadFailed => {
+            const reason = body_err orelse return error.ConnectionDropped;
+            return switch (reason) {
+                error.HttpChunkTruncated => error.ConnectionDropped,
+                error.HttpChunkInvalid, error.HttpHeadersOversize => error.BadResponse,
+            };
+        },
     };
 }
 
@@ -446,6 +461,8 @@ test "bodyError tells a dropped connection from a broken chunk and a full buffer
     const broken_chunk = bodyError(error.ReadFailed, error.HttpChunkInvalid);
     try std.testing.expectEqual(error.BadResponse, broken_chunk);
     try std.testing.expectEqual(error.ResponseTooLarge, bodyError(error.WriteFailed, null));
+    const truncated_chunk = bodyError(error.ReadFailed, error.HttpChunkTruncated);
+    try std.testing.expectEqual(error.ConnectionDropped, truncated_chunk);
 }
 
 test "request and head errors map to what the user can act on" {

@@ -85,9 +85,12 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
             try writer.writeAll(entity[1]);
             continue;
         }
-        const byte = rest[0];
-        rest = rest[1..];
-        try text.writeVisible(writer, &.{byte});
+        // Plain text runs to the next tag or entity; writing it whole keeps two-byte control
+        // characters together for writeVisible.
+        const run_len = std.mem.indexOfAny(u8, rest[1..], "<&") orelse rest.len - 1;
+        const run = rest[0 .. run_len + 1];
+        rest = rest[run.len..];
+        try text.writeVisible(writer, run);
     }
 }
 

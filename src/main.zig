@@ -65,10 +65,13 @@ const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
 const region_variable = "TEAMS_ZIG_REGION";
 
 const conversation_count_max = 50;
+
+/// Pads the `chats` timestamp column to the width of the service's ISO timestamps.
+const timestamp_width = "2026-11-01T10:00:00.000Z".len;
 const message_count_max = 50;
 
 /// Failures reading the keychain or starting the client.
-const ConnectError = KeychainItem.Error || error{UnknownRegion};
+const ConnectError = KeychainItem.Error || error{ UnknownRegion, InvalidToken };
 
 /// Failures running a command: the Chat Service's, or writing the output.
 const RunError = chat.Client.Error || Io.Writer.Error;
@@ -116,7 +119,7 @@ const Command = union(enum) {
                 for (list.items) |conversation| {
                     const last_message_at = conversation.last_message_at orelse "-";
                     try writeVisible(stdout, last_message_at);
-                    try stdout.splatByteAll(' ', 24 -| last_message_at.len);
+                    try stdout.splatByteAll(' ', timestamp_width -| last_message_at.len);
                     try stdout.print("  {t:<7}  ", .{conversation.kind});
                     try writeVisible(stdout, conversation.topic orelse "(no topic)");
                     try stdout.writeAll("  ");
@@ -154,6 +157,7 @@ fn connect(
             const region_name = environment.get(region_variable) orelse {
                 return error.UnknownRegion;
             };
+            try checkToken(environment_token);
             return client.init(gpa, io, try parseRegion(region_name), environment_token);
         }
     }
@@ -169,7 +173,13 @@ fn connect(
     const region_name = try region_item.read(gpa);
     defer gpa.free(region_name);
 
+    try checkToken(token);
     try client.init(gpa, io, try parseRegion(region_name), token);
+}
+
+/// The token goes into a request header, where a line break would end the header early.
+fn checkToken(token: []const u8) error{InvalidToken}!void {
+    if (std.mem.indexOfAny(u8, token, "\r\n") != null) return error.InvalidToken;
 }
 
 fn parseRegion(region_name: []const u8) error{UnknownRegion}!chat.Client.Region {
@@ -205,6 +215,7 @@ fn reportError(
     const rerun_script = "run scripts/teams-token.fish";
     const hint = switch (err) {
         error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
+        error.InvalidToken => "the token contains a line break; " ++ rerun_script,
         error.UnknownRegion => "the region (from TEAMS_ZIG_REGION or the keychain) isn't known",
         error.UserCanceled => "keychain access was cancelled",
         error.AuthFailed => "the keychain refused access; check its teams-zig items",
@@ -250,4 +261,10 @@ test "Command.parse accepts the three commands and rejects anything else" {
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send" }));
+}
+
+test "checkToken rejects line breaks" {
+    try checkToken("fake-token");
+    try std.testing.expectError(error.InvalidToken, checkToken("fake\r\nX-Injected: 1"));
+    try std.testing.expectError(error.InvalidToken, checkToken("fake\n"));
 }
