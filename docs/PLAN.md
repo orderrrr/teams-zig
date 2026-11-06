@@ -60,3 +60,23 @@ Sending, editing, deleting and reactions (M2). Naming the other person in 1:1 ch
 - `writeText` could still trip its deferred progress assert when a write failed, so `messages | head -1` panicked; fixed and tested (`a3f45ca`).
 - Style fixes: `KeychainItem.zig` as a flat type file, `Command.parse`/`run`, preallocated message list, more invariant asserts, explicit build options, invalid-input tests (`8914fe7`).
 - Decided: `extern` declarations keep C symbol names (STYLE 1.6); assertion density is met with real invariants, never padding (STYLE 4.5).
+
+**Round 4:** padding asserts removed under the amended STYLE 4.5, borrowed fields documented, NULL `CFDataGetBytePtr` handled for empty items, `ssl_key_log` explicit (`6af8720`, `e62afa7`).
+
+**Round 5:** a dropped connection was reported as an oversized response; fixed and named `SendFailed` (`a2e96ce`, `6cf6c2a`). `Client.chats` renamed `conversations` in code; the CLI command stays `chats` (`dd267d4`).
+
+**Round 6:** std's `fetch` crashes when a connection drops mid-body, so `getUrl` reads the body itself; terminal escapes in server text are shown as `\xNN`; every error gets a hint through an exhaustive switch (`7dbf12c`, `6891574`). Test mode added at the owner's request (`bec78b3`); zero writes to Teams made a standing rule (`b2112c4`).
+
+**Round 7:** short bodies, truncated chunks and compressed-body paths fixed by asking for identity encoding (with a workaround for std writing a broken `accept-encoding` header); UTF-8 C1 controls shown; tokens with CR/LF rejected (`0e79d77`, `c1941df`, `50bded4`).
+
+**Round 8:** a C1 control could be rebuilt across a dropped HTML tag; exhaustive end-of-body check (`5ea4621`).
+
+**Round 9:** server links could inject into the HTTP request line; refused. Token copies zeroed (`8044adb`).
+
+**Rounds 10–13:** missing-region hint, a 60-second watchdog for held connections that starts after `connect` and stands down once the service answers, region hint fit for both modes, small placement fixes (`d58164a` … `2b4b8fa`). The connect "stalls" turned out to be Little Snitch holding each new build (`da20ffa`).
+
+**Round 14:** `std.Uri.parse` can't fail after the link checks, so its catch is unreachable; `checkLink` extracted (`806542c`).
+
+**Round 15:** all three reviews found nothing new. Gate passed.
+
+Decided along the way: STYLE 1.6 (camelCase, JSON and extern name exceptions), STYLE 4.5 (assertion density from real invariants only).
