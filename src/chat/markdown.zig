@@ -44,7 +44,7 @@ const Mark = enum {
 
 /// The mark a tag opens or closes, or null for tags that aren't inline markup. Underline has
 /// no Markdown form, so it stays plain.
-fn markOf(tag: *const html.Tag) ?Mark {
+fn tagMark(tag: *const html.Tag) ?Mark {
     for (mark_tags) |mark_tag| {
         if (tag.is(mark_tag[0])) return mark_tag[1];
     }
@@ -122,7 +122,7 @@ const Output = struct {
     /// HTML text: runs of whitespace collapse to one space, and `\r` goes with them.
     fn text(output: *Output, run: []const u8) std.Io.Writer.Error!void {
         std.debug.assert(run.len > 0);
-        if (output.code_block != null) return output.codeText(run);
+        if (output.code_block != null) return output.textCode(run);
         if (std.mem.indexOfScalar(u8, html_whitespace, run[0]) != null) output.space_pending = true;
         var words = std.mem.tokenizeAny(u8, run, html_whitespace);
         while (words.next()) |word| {
@@ -165,30 +165,30 @@ const Output = struct {
             if (html_tag.is("br")) return output.codeNewline();
             return;
         }
-        if (markOf(html_tag)) |mark| {
+        if (tagMark(html_tag)) |mark| {
             if (html_tag.closing) return output.closeMark(mark);
             if (mark == .link) output.link_href = html_tag.attribute("href") orelse "";
-            return output.openMark(mark);
+            return output.tagMarkOpen(mark);
         }
         if (html_tag.closing) return output.tagClose(html_tag);
         return output.tagOpen(html_tag);
     }
 
     fn tagOpen(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
-        if (html_tag.is("pre")) return output.openCodeBlock();
-        if (html_tag.is("br")) return output.lineBreak();
-        if (html_tag.is("img")) return output.image(html_tag);
+        if (html_tag.is("pre")) return output.tagOpenCodeBlock();
+        if (html_tag.is("br")) return output.tagOpenLineBreak();
+        if (html_tag.is("img")) return output.tagOpenImage(html_tag);
         if (headingLevel(html_tag)) |level| {
             try output.endLine();
             output.heading_starting = level;
             return;
         }
-        if (html_tag.is("blockquote")) return output.openQuote();
-        if (html_tag.is("ul")) return output.openList(false);
-        if (html_tag.is("ol")) return output.openList(true);
-        if (html_tag.is("li")) return output.openItem();
-        if (html_tag.is("p")) return output.openBlock();
-        if (html_tag.is("div")) return output.openBlock();
+        if (html_tag.is("blockquote")) return output.tagOpenQuote();
+        if (html_tag.is("ul")) return output.tagOpenList(false);
+        if (html_tag.is("ol")) return output.tagOpenList(true);
+        if (html_tag.is("li")) return output.tagOpenItem();
+        if (html_tag.is("p")) return output.tagOpenBlock();
+        if (html_tag.is("div")) return output.tagOpenBlock();
     }
 
     fn tagClose(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
@@ -198,22 +198,22 @@ const Output = struct {
             output.heading_starting = null;
             return;
         }
-        if (html_tag.is("blockquote")) return output.closeQuote();
-        if (html_tag.is("ul")) return output.closeList();
-        if (html_tag.is("ol")) return output.closeList();
+        if (html_tag.is("blockquote")) return output.tagCloseQuote();
+        if (html_tag.is("ul")) return output.tagCloseList();
+        if (html_tag.is("ol")) return output.tagCloseList();
         if (html_tag.is("li")) return output.endLine();
-        if (html_tag.is("p")) return output.closeBlock();
-        if (html_tag.is("div")) return output.closeBlock();
+        if (html_tag.is("p")) return output.tagCloseBlock();
+        if (html_tag.is("div")) return output.tagCloseBlock();
     }
 
     /// `p` and `div` start a line.
-    fn openBlock(output: *Output) std.Io.Writer.Error!void {
+    fn tagOpenBlock(output: *Output) std.Io.Writer.Error!void {
         output.block_empty = true;
         try output.endLine();
     }
 
     /// A block that held no text, like `<p>&nbsp;</p>`, is a blank line.
-    fn closeBlock(output: *Output) std.Io.Writer.Error!void {
+    fn tagCloseBlock(output: *Output) std.Io.Writer.Error!void {
         if (output.block_empty) {
             output.block_empty = false;
             return output.blankLine();
@@ -221,7 +221,7 @@ const Output = struct {
         try output.endLine();
     }
 
-    fn openMark(output: *Output, mark: Mark) void {
+    fn tagMarkOpen(output: *Output, mark: Mark) void {
         if (output.markIndex(mark) != null) return;
         std.debug.assert(output.marks_open_count < mark_count);
         output.marks_open[output.marks_open_count] = mark;
@@ -240,7 +240,10 @@ const Output = struct {
 
         if (!output.marks_written.contains(mark)) return;
         output.marks_written.remove(mark);
-        try output.writeCloser(mark);
+        if (mark != .link) return output.writer.writeAll(mark.marker());
+        try output.writer.writeAll("](");
+        try html.writeDecoded(output.writer, output.link_href);
+        try output.writer.writeByte(')');
     }
 
     /// Where `mark` is in `marks_open`, or null if it isn't open.
@@ -248,13 +251,6 @@ const Output = struct {
         const open = output.marks_open[0..output.marks_open_count];
         const index = std.mem.indexOfScalar(Mark, open, mark) orelse return null;
         return @intCast(index);
-    }
-
-    fn writeCloser(output: *Output, mark: Mark) std.Io.Writer.Error!void {
-        if (mark != .link) return output.writer.writeAll(mark.marker());
-        try output.writer.writeAll("](");
-        try html.writeDecoded(output.writer, output.link_href);
-        try output.writer.writeByte(')');
     }
 
     /// Ends the current line if it holds text. Written marks close here, newest first, and
@@ -277,12 +273,12 @@ const Output = struct {
 
     /// Quotes start on their own line and end with a blank one, since Markdown would otherwise
     /// carry the quote on into the next line.
-    fn openQuote(output: *Output) std.Io.Writer.Error!void {
+    fn tagOpenQuote(output: *Output) std.Io.Writer.Error!void {
         try output.endLine();
         output.quote_depth +|= 1;
     }
 
-    fn closeQuote(output: *Output) std.Io.Writer.Error!void {
+    fn tagCloseQuote(output: *Output) std.Io.Writer.Error!void {
         try output.endLine();
         if (output.quote_depth == 0) return;
         output.quote_depth -= 1;
@@ -290,7 +286,7 @@ const Output = struct {
     }
 
     /// An emoji is its `alt` text, which holds the emoji itself; any other image is `[image]`.
-    fn image(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+    fn tagOpenImage(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
         const item_type = html_tag.attribute("itemtype") orelse "";
         if (std.mem.endsWith(u8, item_type, "/Emoji")) {
             const alt = html_tag.attribute("alt") orelse "";
@@ -305,7 +301,7 @@ const Output = struct {
     }
 
     /// A code block starts on its own line with a fence; its text follows on the next.
-    fn openCodeBlock(output: *Output) std.Io.Writer.Error!void {
+    fn tagOpenCodeBlock(output: *Output) std.Io.Writer.Error!void {
         try output.endLine();
         try output.flush();
         try output.writer.writeAll("```\n");
@@ -325,7 +321,7 @@ const Output = struct {
     }
 
     /// Code keeps its spaces and line breaks. `\r` is dropped, splitting the text there.
-    fn codeText(output: *Output, run: []const u8) std.Io.Writer.Error!void {
+    fn textCode(output: *Output, run: []const u8) std.Io.Writer.Error!void {
         var rest = run;
         while (rest.len > 0) {
             const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
@@ -356,7 +352,7 @@ const Output = struct {
 
     /// Lists start on their own line; the outermost ends with a blank line, since Markdown
     /// would otherwise carry its last item on into the next line.
-    fn openList(output: *Output, ordered: bool) std.Io.Writer.Error!void {
+    fn tagOpenList(output: *Output, ordered: bool) std.Io.Writer.Error!void {
         try output.endListLine();
         if (output.list_depth < list_depth_limit) {
             output.lists[output.list_depth] = .{ .ordered = ordered };
@@ -364,7 +360,7 @@ const Output = struct {
         output.list_depth +|= 1;
     }
 
-    fn closeList(output: *Output) std.Io.Writer.Error!void {
+    fn tagCloseList(output: *Output) std.Io.Writer.Error!void {
         try output.endListLine();
         if (output.list_depth == 0) return;
         output.list_depth -= 1;
@@ -378,7 +374,7 @@ const Output = struct {
         output.item_starting = false;
     }
 
-    fn openItem(output: *Output) std.Io.Writer.Error!void {
+    fn tagOpenItem(output: *Output) std.Io.Writer.Error!void {
         try output.endLine();
         if (output.list_depth == 0) return;
         const shown = @min(output.list_depth, list_depth_limit);
@@ -390,18 +386,13 @@ const Output = struct {
     /// item's marker on an item's first line, then a heading's `#` marks.
     fn writeLinePrefix(output: *Output) std.Io.Writer.Error!void {
         try output.writeQuotes("> ");
-        try output.writeListPrefix();
+        try output.writeLinePrefixList();
         if (output.heading_starting) |level| {
             std.debug.assert(level >= 1);
             try output.writer.splatByteAll('#', level);
             try output.writer.writeByte(' ');
             output.heading_starting = null;
         }
-    }
-
-    /// A blank line inside quotes holds only them, the last as a bare `>`.
-    fn writeBlankLinePrefix(output: *Output) std.Io.Writer.Error!void {
-        try output.writeQuotes(">");
     }
 
     /// Writes `> ` for each quote shown, with `last` for the innermost.
@@ -412,7 +403,7 @@ const Output = struct {
         try output.writer.writeAll(last);
     }
 
-    fn writeListPrefix(output: *Output) std.Io.Writer.Error!void {
+    fn writeLinePrefixList(output: *Output) std.Io.Writer.Error!void {
         const list_depth = @min(output.list_depth, list_depth_limit);
         if (list_depth == 0) return;
         for (output.lists[0 .. list_depth - 1]) |*outer| {
@@ -436,7 +427,7 @@ const Output = struct {
     }
 
     /// `<br>`: ends a line with text, or turns an empty one into a blank line.
-    fn lineBreak(output: *Output) std.Io.Writer.Error!void {
+    fn tagOpenLineBreak(output: *Output) std.Io.Writer.Error!void {
         if (output.line_has_text) return output.endLine();
         output.blankLine();
     }
@@ -458,7 +449,8 @@ const Output = struct {
         if (output.breaks_pending > 0) {
             try output.writer.writeByte('\n');
             if (output.breaks_pending == 2) {
-                try output.writeBlankLinePrefix();
+                // A blank line inside quotes holds only them, the last as a bare `>`.
+                try output.writeQuotes(">");
                 try output.writer.writeByte('\n');
             }
             output.breaks_pending = 0;
