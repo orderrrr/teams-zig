@@ -157,3 +157,25 @@ Decided by the owner on 2026-11-06, after `messages 48:notes` printed `\x0d` and
 - Literal `*` and `_` in typed text aren't escaped at first.
 - M3 stays as approved: `watch` prints through today's `writeText` until M4.
 - No JSON or HTML output; Markdown is the format.
+
+## M3 gate
+
+**Round 1** (mr-review, STYLE.md and Tiger Style reviews of `2818892..20fc333`):
+- A chat named with a leading time, like "9:30 Standup", was taken for an id and got a 404; ids never hold whitespace, so anything with a space is a name (`d3d85b9`).
+- `Seen` grew without bound over a long `watch`; it now has a fixed `chat_count_limit` (1024). Decided: when full, its marks fold into `mark_first`, so nothing shown comes back, at the cost of skipping an older unshown message in an unread chat after 1000+ distinct chats. Its tests caught two regressions on the way: a new chat could start below `mark_first`, and first-poll chats were raised to it (`0471cb9`).
+- Style fixes: fixed-size first-pass names, `errdefer` in `Seen.record`, `printNewMessages` asserts `seen.changed`, comptime asserts tying the backoff to the poll and a poll's reads to the watchdog; a comment that `watch` reads one page per changed chat (`48e4590`, `0471cb9`, `d3d85b9`).
+
+**Round 2:**
+- `findChat` asserted the service sent at most 100 chats, which the service decides; `Client.conversations` now keeps at most what it asked for (`8bd2326`).
+- `Seen` allocates nothing after `init`: ids are copied into storage reserved up front, and an over-long id is `ConversationIdTooLong` with a hint (`8bd2326`).
+- `mark_first`'s doc, a nested condition, a comptime assert tying `watch`'s poll to `Seen`, `known_names_buffer` (`4ef3201`, `8bd2326`).
+
+**Round 3:** `Seen`'s starting values at declaration (STYLE 3.6), a `u32` byte counter with its bound asserted, `fold`'s precondition asserted (`452ee01`).
+
+**Round 4:** a post-clear assert in `fold` removed as padding (STYLE 4.5 over Tiger) (`7d10199`).
+
+**Round 5:** all three reviews found nothing new. Gate passed. M3 resolved.
+
+Live after the rounds (read-only, counts only): `watch` printed real incoming messages; `chats 100` lists 94; chats open by exact name, upper-cased names match, and a missing name ends with the hint.
+
+Not done in M3: the self-chat row in `chats` stays as `notes (no topic) 48:notes`; the owner chose to keep it.
