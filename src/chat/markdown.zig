@@ -78,6 +78,25 @@ const Output = struct {
     link_href: []const u8 = "",
     /// How many quotes are open; lines show at most `quote_depth_limit` of them.
     quote_depth: u8 = 0,
+    /// The open lists, outermost first; only the first `list_depth_limit` are kept.
+    lists: [list_depth_limit]List = undefined,
+    /// How many lists are open, counting those deeper than `list_depth_limit`.
+    list_depth: u8 = 0,
+    /// The next line starts a list item, so it gets the item's marker.
+    item_starting: bool = false,
+
+    const List = struct {
+        ordered: bool,
+        item_count: u16 = 0,
+
+        /// How wide this list's marker is for its current item: `- ` or `12. `.
+        fn markerWidth(list: *const List) u8 {
+            if (!list.ordered) return 2;
+            // A u16 has at most 5 digits.
+            const digit_count: u8 = @intCast(std.fmt.count("{d}", .{list.item_count}));
+            return digit_count + 2;
+        }
+    };
 
     const mark_count = std.enums.values(Mark).len;
 
@@ -118,7 +137,10 @@ const Output = struct {
             return output.openMark(mark);
         }
         if (html_tag.is("br")) return output.lineBreak();
-        if (html_tag.is("blockquote")) return output.quote(html_tag.closing);
+        if (html_tag.is("blockquote")) return output.quoteTag(html_tag.closing);
+        if (html_tag.is("ul")) return output.listTag(html_tag.closing, false);
+        if (html_tag.is("ol")) return output.listTag(html_tag.closing, true);
+        if (html_tag.is("li")) return output.itemTag(html_tag.closing);
         if (html_tag.is("p") or html_tag.is("div")) {
             if (!html_tag.closing) {
                 output.block_empty = true;
@@ -181,7 +203,7 @@ const Output = struct {
 
     /// Quotes start on their own line and end with a blank one, since Markdown would otherwise
     /// carry the quote on into the next line.
-    fn quote(output: *Output, closing: bool) std.Io.Writer.Error!void {
+    fn quoteTag(output: *Output, closing: bool) std.Io.Writer.Error!void {
         try output.endLine();
         if (closing) {
             if (output.quote_depth == 0) return;
@@ -192,14 +214,51 @@ const Output = struct {
         output.quote_depth +|= 1;
     }
 
-    /// Writes the start of a line: `> ` for each quote shown. A blank line inside a quote is a
-    /// bare `>`.
+    /// Lists start on their own line; the outermost ends with a blank line, since Markdown
+    /// would otherwise carry its last item on into the next line.
+    fn listTag(output: *Output, closing: bool, ordered: bool) std.Io.Writer.Error!void {
+        try output.endLine();
+        if (closing) {
+            if (output.list_depth == 0) return;
+            output.list_depth -= 1;
+            if (output.list_depth == 0) output.blankLine();
+            return;
+        }
+        if (output.list_depth < list_depth_limit) {
+            output.lists[output.list_depth] = .{ .ordered = ordered };
+        }
+        output.list_depth +|= 1;
+    }
+
+    fn itemTag(output: *Output, closing: bool) std.Io.Writer.Error!void {
+        try output.endLine();
+        if (closing) return;
+        if (output.list_depth == 0) return;
+        const shown = @min(output.list_depth, list_depth_limit);
+        output.lists[shown - 1].item_count +|= 1;
+        output.item_starting = true;
+    }
+
+    /// Writes the start of a line: `> ` for each quote shown, then the list indent, with the
+    /// item's marker on an item's first line. A blank line gets only the quotes, as a bare `>`.
     fn writeLinePrefix(output: *Output, blank: bool) std.Io.Writer.Error!void {
-        const depth = @min(output.quote_depth, quote_depth_limit);
-        for (0..depth) |level| {
-            const last = level + 1 == depth;
+        const quote_depth = @min(output.quote_depth, quote_depth_limit);
+        for (0..quote_depth) |level| {
+            const last = level + 1 == quote_depth;
             try output.writer.writeAll(if (blank and last) ">" else "> ");
         }
+        if (blank) return;
+
+        const list_depth = @min(output.list_depth, list_depth_limit);
+        if (list_depth == 0) return;
+        for (output.lists[0 .. list_depth - 1]) |*outer| {
+            try output.writer.splatByteAll(' ', outer.markerWidth());
+        }
+        const inner = &output.lists[list_depth - 1];
+        if (!output.item_starting) return output.writer.splatByteAll(' ', inner.markerWidth());
+        output.item_starting = false;
+        if (inner.ordered) return output.writer.print("{d}. ", .{inner.item_count});
+        try output.writer.writeAll("- ");
     }
 
     /// Closes the marks the HTML left open, newest first.
@@ -250,6 +309,9 @@ const Output = struct {
 
 /// Deeper quotes are shown at this depth.
 const quote_depth_limit = 8;
+
+/// Deeper lists are shown at this depth.
+const list_depth_limit = 8;
 
 /// What HTML collapses as whitespace, with `\r` among it so carriage returns are dropped.
 const html_whitespace = " \t\n\r\x0c";
@@ -360,4 +422,41 @@ test "writeHtml nests quotes up to its limit and survives unbalanced ones" {
     try shown.writer.writeAll("fake");
     try expectMarkdown(deep.written(), shown.written());
     try expectMarkdown("</blockquote>fake</blockquote>", "fake");
+}
+
+test "writeHtml writes bulleted and numbered lists" {
+    try expectMarkdown("<p>fake</p><ul><li>one</li><li>two</li></ul><p>after</p>",
+        \\fake
+        \\- one
+        \\- two
+        \\
+        \\after
+    );
+    try expectMarkdown("<ol><li>one</li><li>two<br>more</li></ol>", "1. one\n2. two\n   more");
+}
+
+test "writeHtml indents nested lists by their parents' markers" {
+    try expectMarkdown("<ol><li>one<ul><li>inner</li></ul></li><li>two</li></ol>",
+        \\1. one
+        \\   - inner
+        \\2. two
+    );
+}
+
+test "writeHtml quotes a list inside a quote" {
+    const quoted = "<blockquote><ul><li>one</li><li>two</li></ul></blockquote>";
+    try expectMarkdown(quoted, "> - one\n> - two");
+}
+
+test "writeHtml shows lists deeper than its limit at the limit, and survives stray tags" {
+    var deep: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer deep.deinit();
+    for (0..list_depth_limit + 3) |_| try deep.writer.writeAll("<ul><li>");
+    try deep.writer.writeAll("fake");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeHtml(&out.writer, deep.written());
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "- fake"));
+
+    try expectMarkdown("</ul><li>fake</li></ol>", "fake");
 }
