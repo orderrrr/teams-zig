@@ -5,6 +5,7 @@ const Conversation = @This();
 const std = @import("std");
 const json = @import("json.zig");
 const mri = @import("mri.zig");
+const Message = @import("Message.zig");
 const Owned = @import("Owned.zig").Owned;
 
 // Every string borrows the arena of the `List` that parsed it.
@@ -14,9 +15,10 @@ kind: Kind,
 topic: ?[]const u8,
 /// ISO timestamp of the last message; null when the conversation has none.
 last_message_at: ?[]const u8,
-/// The MRI of whoever sent the last message; null when the service doesn't say.
+/// The MRI of whoever wrote the last message; null when the service doesn't say, or the last
+/// message was an event rather than user-written text.
 last_sender: ?[]const u8,
-/// The last sender's display name; null when the service doesn't send one.
+/// The last writer's display name; null in the same cases, or when the service sends none.
 last_sender_name: ?[]const u8,
 
 pub const Kind = enum { chat, meeting, space, topic, notes, other };
@@ -33,6 +35,7 @@ const Response = struct {
     },
 
     const LastMessage = struct {
+        messagetype: []const u8 = "",
         from: ?[]const u8 = null,
         imdisplayname: ?[]const u8 = null,
     };
@@ -67,7 +70,11 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
             kind = kindOf(thread_type) orelse continue;
         }
         const properties: Response.Properties = raw.properties orelse .{};
-        const last_message: Response.LastMessage = raw.lastMessage orelse .{};
+        // Only user-written text counts: an event's sender can be a bot or the service.
+        const last_message: Response.LastMessage = if (raw.lastMessage) |last| text: {
+            if (!Message.isTextType(last.messagetype)) break :text .{};
+            break :text last;
+        } else .{};
         items.appendAssumeCapacity(.{
             .id = raw.id,
             .kind = kind,
@@ -95,7 +102,7 @@ test "parseList keeps chats and the self-chat, and drops system streams" {
         \\{"_metadata":{},"conversations":[
         \\  {"id":"19:fake-a_fake-b@unq.gbl.spaces","threadProperties":{"threadType":"chat"},
         \\   "properties":{"lastimreceivedtime":"2026-11-01T10:00:00.000Z"},
-        \\   "lastMessage":{"imdisplayname":"Fake Person",
+        \\   "lastMessage":{"messagetype":"Text","imdisplayname":"Fake Person",
         \\    "from":"https://x/v1/users/ME/contacts/8:orgid:fake-b"}},
         \\  {"id":"19:fake-meeting@thread.v2",
         \\   "threadProperties":{"threadType":"meeting","topic":"Fake standup"},
@@ -154,4 +161,18 @@ test "isOneToOne tells 1:1 chats from group chats" {
 
     conversation.id = "19:fake-group@thread.v2";
     try std.testing.expect(!conversation.isOneToOne());
+}
+
+test "parseList ignores a last message that is an event" {
+    const body =
+        \\{"conversations":[{"id":"19:fake-a_fake-b@unq.gbl.spaces",
+        \\ "threadProperties":{"threadType":"chat"},
+        \\ "lastMessage":{"messagetype":"ThreadActivity/AddMember","imdisplayname":"Fake Bot",
+        \\  "from":"https://x/v1/users/ME/contacts/28:fake-bot"}}]}
+    ;
+    const list = try parseList(std.testing.allocator, body);
+    defer list.deinit();
+
+    try std.testing.expectEqual(null, list.items[0].last_sender);
+    try std.testing.expectEqual(null, list.items[0].last_sender_name);
 }

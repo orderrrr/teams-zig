@@ -98,7 +98,10 @@ const name_lookup_count_max = 40;
 comptime {
     std.debug.assert(conversation_count_max <= std.math.maxInt(u16));
     std.debug.assert(name_lookup_count_max < command_seconds_max);
+    std.debug.assert(conversation_count_default <= conversation_count_max);
+    std.debug.assert(message_count_default <= message_count_max);
 }
+
 const message_count_max = chat.Client.message_count_limit;
 
 /// How far back `chats` looks for the other person's name in a 1:1 chat where you spoke last.
@@ -191,21 +194,12 @@ const Command = union(enum) {
                 const list = try client.conversations(conversation_count);
                 defer list.deinit();
 
-                // Holds the names fetched for 1:1 chats; freed with the command.
+                // Holds the 1:1 chat names; freed with the command.
                 var names_arena: std.heap.ArenaAllocator = .init(client.gpa);
                 defer names_arena.deinit();
 
-                const names = try names_arena.allocator().alloc(?[]const u8, list.items.len);
-                var lookups_left: u32 = name_lookup_count_max;
-                for (list.items, names) |*conversation, *name| {
-                    name.* = try otherPersonName(
-                        client,
-                        names_arena.allocator(),
-                        conversation,
-                        user.mri,
-                        &lookups_left,
-                    );
-                }
+                const arena = names_arena.allocator();
+                const names = try otherPersonNames(client, arena, list.items, user.mri);
                 requests_done.store(true, .release);
 
                 for (list.items, names) |conversation, name| {
@@ -353,36 +347,72 @@ fn parseRegion(region_name: []const u8) error{UnknownRegion}!chat.Client.Region 
     return std.meta.stringToEnum(chat.Client.Region, region_name) orelse error.UnknownRegion;
 }
 
-/// The other person in a 1:1 chat: the last sender when that isn't you, which costs nothing, and
-/// otherwise the newest writer in its recent messages who isn't you. Null for chats that aren't
-/// 1:1, and when the other person hasn't written recently. The name is owned by `arena`.
-fn otherPersonName(
+/// Where a conversation's display name comes from when it has no topic.
+const NameSource = union(enum) {
+    /// Not a 1:1 chat, or it has a topic of its own.
+    none,
+    /// The other person wrote the last message; this is their name.
+    known: []const u8,
+    /// You wrote the last message (or it was an event), so their name needs a lookup.
+    lookup,
+};
+
+fn nameSource(conversation: *const chat.Conversation, self_mri: []const u8) NameSource {
+    std.debug.assert(self_mri.len > 0);
+    if (!conversation.isOneToOne()) return .none;
+    if (conversation.topic != null) return .none;
+
+    const last_sender = conversation.last_sender orelse return .lookup;
+    if (std.mem.eql(u8, last_sender, self_mri)) return .lookup;
+    const name = conversation.last_sender_name orelse return .lookup;
+    return .{ .known = name };
+}
+
+/// The other person's name for each 1:1 chat in `conversations`, owned by `arena`; null where
+/// there's none to show. At most `name_lookup_count_max` chats get a lookup, one request each.
+fn otherPersonNames(
     client: *chat.Client,
     arena: std.mem.Allocator,
-    conversation: *const chat.Conversation,
+    conversations: []const chat.Conversation,
     self_mri: []const u8,
-    lookups_left: *u32,
-) RunError!?[]const u8 {
-    std.debug.assert(self_mri.len > 0);
-    if (!conversation.isOneToOne()) return null;
-    if (conversation.topic != null) return null;
-
-    const self_sent_last = if (conversation.last_sender) |sender|
-        std.mem.eql(u8, sender, self_mri)
-    else
-        false;
-    if (!self_sent_last) {
-        if (conversation.last_sender_name) |name| return try arena.dupe(u8, name);
+) chat.Client.Error![]?[]const u8 {
+    const names = try arena.alloc(?[]const u8, conversations.len);
+    var name_lookup_count_left: u32 = name_lookup_count_max;
+    for (conversations, names) |*conversation, *name| {
+        name.* = switch (nameSource(conversation, self_mri)) {
+            .none => null,
+            .known => |known| try arena.dupe(u8, known),
+            .lookup => lookup: {
+                if (name_lookup_count_left == 0) break :lookup null;
+                name_lookup_count_left -= 1;
+                break :lookup try lookUpOtherName(client, arena, conversation.id, self_mri);
+            },
+        };
     }
+    return names;
+}
 
-    if (lookups_left.* == 0) return null;
-    lookups_left.* -= 1;
-
-    const recent = client.messages(conversation.id, message_count_recent) catch |err| switch (err) {
-        // One chat that can't be read shouldn't hide the rest of the list. Failures that would
-        // hit every chat (an expired token, no network) still stop the command.
-        error.NotFound, error.UnexpectedStatus, error.UnexpectedJson => return null,
-        else => |other| return other,
+/// Reads one page of a 1:1 chat's recent messages and returns the other writer's name, owned
+/// by `arena`, or null if they haven't written there recently.
+fn lookUpOtherName(
+    client: *chat.Client,
+    arena: std.mem.Allocator,
+    conversation_id: []const u8,
+    self_mri: []const u8,
+) chat.Client.Error!?[]const u8 {
+    const recent = client.recentMessages(conversation_id, message_count_recent) catch |err| {
+        switch (err) {
+            // One chat that can't be read shouldn't hide the rest of the list.
+            error.NotFound, error.UnexpectedJson => return null,
+            error.UnexpectedStatus => {
+                // Throttling and server errors would hit every chat, so they stop the command.
+                const status = client.response_status.?;
+                if (status == .too_many_requests) return err;
+                if (status.class() == .server_error) return err;
+                return null;
+            },
+            else => return err,
+        }
     };
     defer recent.deinit();
 
@@ -393,6 +423,7 @@ fn otherPersonName(
 /// The display name on the newest user-written message (`messages` is newest first) from someone
 /// other than `self_mri`. System events and their senders don't count. Borrows from `messages`.
 fn otherWriterName(messages: []const chat.Message, self_mri: []const u8) ?[]const u8 {
+    std.debug.assert(self_mri.len > 0);
     for (messages) |*message| {
         if (!message.isText()) continue;
         const sender = message.sender orelse continue;
@@ -536,4 +567,36 @@ test "otherWriterName takes the newest user-written message from someone else" {
 
     try std.testing.expectEqualStrings("Fake Other", otherWriterName(&messages, self_mri).?);
     try std.testing.expectEqual(null, otherWriterName(messages[0..2], self_mri));
+
+    // A message with no sender, or no name, is passed over for an older one.
+    messages[2].sender_name = null;
+    try std.testing.expectEqualStrings("Fake Older", otherWriterName(&messages, self_mri).?);
+    messages[2].sender = null;
+    try std.testing.expectEqualStrings("Fake Older", otherWriterName(&messages, self_mri).?);
+}
+
+test "nameSource uses the last writer when it isn't you, and asks for a lookup when it is" {
+    const self_mri = "8:orgid:fake-self";
+    var conversation: chat.Conversation = .{
+        .id = "19:fake-self_fake-other@unq.gbl.spaces",
+        .kind = .chat,
+        .topic = null,
+        .last_message_at = null,
+        .last_sender = "8:orgid:fake-other",
+        .last_sender_name = "Fake Other",
+    };
+    try std.testing.expectEqualStrings("Fake Other", nameSource(&conversation, self_mri).known);
+
+    conversation.last_sender = self_mri;
+    try std.testing.expectEqual(NameSource.lookup, nameSource(&conversation, self_mri));
+
+    conversation.last_sender = null;
+    try std.testing.expectEqual(NameSource.lookup, nameSource(&conversation, self_mri));
+
+    conversation.topic = "Fake topic";
+    try std.testing.expectEqual(NameSource.none, nameSource(&conversation, self_mri));
+
+    conversation.topic = null;
+    conversation.id = "19:fake-group@thread.v2";
+    try std.testing.expectEqual(NameSource.none, nameSource(&conversation, self_mri));
 }

@@ -57,8 +57,13 @@ const entities = [_]struct { []const u8, []const u8 }{
 };
 
 pub fn isText(message: *const Message) bool {
-    if (std.mem.eql(u8, message.message_type, "Text")) return true;
-    return std.mem.eql(u8, message.message_type, "RichText/Html");
+    return isTextType(message.message_type);
+}
+
+/// Whether a `messagetype` is user-written text rather than an event.
+pub fn isTextType(message_type: []const u8) bool {
+    if (std.mem.eql(u8, message_type, "Text")) return true;
+    return std.mem.eql(u8, message_type, "RichText/Html");
 }
 
 /// Writes `content` as plain text: tags dropped, the common entities decoded. Plain `Text`

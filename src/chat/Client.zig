@@ -304,6 +304,25 @@ pub fn messages(
     conversation_id: []const u8,
     message_count_max: u32,
 ) Error!Message.List {
+    return client.fetchMessages(conversation_id, message_count_max, page_count_max);
+}
+
+/// Like `messages`, but reads only the newest page, so it always costs exactly one request.
+pub fn recentMessages(
+    client: *Client,
+    conversation_id: []const u8,
+    message_count_max: u32,
+) Error!Message.List {
+    std.debug.assert(message_count_max <= page_item_count_max);
+    return client.fetchMessages(conversation_id, message_count_max, 1);
+}
+
+fn fetchMessages(
+    client: *Client,
+    conversation_id: []const u8,
+    message_count_max: u32,
+    page_count_limit: u32,
+) Error!Message.List {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(message_count_max > 0);
     // page_count_max pages can't hold more, so a larger count would only reserve dead memory.
@@ -316,7 +335,8 @@ pub fn messages(
     const url_first = try client.messagesUrl(conversation_id, page_item_count);
     defer client.gpa.free(url_first);
 
-    list.items = try collectMessages(list.arena.allocator(), client, url_first, message_count_max);
+    const arena = list.arena.allocator();
+    list.items = try collectMessages(arena, client, url_first, message_count_max, page_count_limit);
     return list;
 }
 
@@ -328,17 +348,20 @@ fn collectMessages(
     source: anytype,
     url_first: []const u8,
     message_count_max: u32,
+    page_count_limit: u32,
 ) Error![]const Message {
     std.debug.assert(url_first.len > 0);
     std.debug.assert(message_count_max > 0);
     std.debug.assert(message_count_max <= message_count_limit);
+    std.debug.assert(page_count_limit > 0);
+    std.debug.assert(page_count_limit <= page_count_max);
 
     var items: std.ArrayList(Message) = try .initCapacity(arena, message_count_max);
     var link: ?[]const u8 = url_first;
     var page_count: u32 = 0;
     while (link) |page_url| : (page_count += 1) {
         if (items.items.len == message_count_max) break;
-        if (page_count == page_count_max) break;
+        if (page_count == page_count_limit) break;
 
         const body = try source.getUrl(page_url);
         const page = Message.parsePage(arena, body) catch |err| return parseError(err);
@@ -347,7 +370,7 @@ fn collectMessages(
         link = page.backward_link;
     }
     std.debug.assert(items.items.len <= message_count_max);
-    std.debug.assert(page_count <= page_count_max);
+    std.debug.assert(page_count <= page_count_limit);
 
     return items.items;
 }
@@ -464,7 +487,7 @@ test "collectMessages keeps going past empty pages that link to older ones" {
     var pages: CannedPages = .{
         .bodies = &.{ canned_empty_with_link, canned_empty_with_link, canned_one_oldest },
     };
-    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50);
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50, page_count_max);
     try std.testing.expectEqual(1, items.len);
     try std.testing.expectEqualStrings("0", items[0].id);
     try std.testing.expectEqual(3, pages.request_count);
@@ -475,7 +498,7 @@ test "collectMessages stops at the message count without fetching further" {
     defer arena.deinit();
 
     var pages: CannedPages = .{ .bodies = &.{ canned_two_with_link, canned_two_with_link } };
-    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 3);
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 3, page_count_max);
     try std.testing.expectEqual(3, items.len);
     try std.testing.expectEqual(2, pages.request_count);
 }
@@ -485,7 +508,7 @@ test "collectMessages stops after page_count_max endless empty pages" {
     defer arena.deinit();
 
     var pages: CannedPages = .{ .bodies = &.{canned_empty_with_link} };
-    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50);
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50, page_count_max);
     try std.testing.expectEqual(0, items.len);
     try std.testing.expectEqual(page_count_max, pages.request_count);
 }
@@ -526,4 +549,14 @@ test "checkLink parses a link under the base URL" {
     try std.testing.expectEqualStrings("https", uri.scheme);
     const host = uri.host.?.percent_encoded;
     try std.testing.expectEqualStrings("emea.ng.msg.teams.microsoft.com", host);
+}
+
+test "collectMessages reads one page when limited to one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    var pages: CannedPages = .{ .bodies = &.{ canned_empty_with_link, canned_one_oldest } };
+    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50, 1);
+    try std.testing.expectEqual(0, items.len);
+    try std.testing.expectEqual(1, pages.request_count);
 }
