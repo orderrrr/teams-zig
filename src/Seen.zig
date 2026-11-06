@@ -8,21 +8,25 @@ const chat = @import("teams").chat;
 
 gpa: std.mem.Allocator,
 /// Conversation id to the newest message id seen there. The keys live in `id_bytes`.
-marks: std.StringHashMapUnmanaged(u64),
+marks: std.StringHashMapUnmanaged(u64) = .empty,
 /// Room for `chat_count_limit` ids of up to `id_size_max` bytes, reserved up front.
 id_bytes: []u8,
 /// How much of `id_bytes` the keys of `marks` use.
-id_bytes_used: usize,
+id_bytes_used: u32 = 0,
 /// The mark for a chat not in `marks`: the newest message id at the first poll, so a chat that
 /// appears later shows only what arrived after `watch` started, by the service's clock. Raised
 /// when `fold` empties `marks`.
-mark_first: u64,
+mark_first: u64 = 0,
 
 /// The most chats `marks` holds; space for them is reserved up front.
 pub const chat_count_limit = 1024;
 
 /// Far longer than any conversation id seen (about 90 bytes for a 1:1 chat).
 const id_size_max = 256;
+
+comptime {
+    std.debug.assert(chat_count_limit * id_size_max <= std.math.maxInt(u32));
+}
 
 pub const Error = error{ OutOfMemory, ConversationIdTooLong };
 
@@ -32,13 +36,7 @@ pub fn init(gpa: std.mem.Allocator, conversations: []const chat.Conversation) Er
     const id_bytes = try gpa.alloc(u8, chat_count_limit * id_size_max);
     errdefer gpa.free(id_bytes);
 
-    var seen: Seen = .{
-        .gpa = gpa,
-        .marks = .empty,
-        .id_bytes = id_bytes,
-        .id_bytes_used = 0,
-        .mark_first = 0,
-    };
+    var seen: Seen = .{ .gpa = gpa, .id_bytes = id_bytes };
     errdefer seen.marks.deinit(gpa);
     try seen.marks.ensureTotalCapacity(gpa, chat_count_limit);
 
@@ -94,16 +92,18 @@ pub fn record(
     std.debug.assert(seen.id_bytes_used + conversation_id.len <= seen.id_bytes.len);
     const key = seen.id_bytes[seen.id_bytes_used..][0..conversation_id.len];
     @memcpy(key, conversation_id);
-    seen.id_bytes_used += key.len;
+    seen.id_bytes_used += @intCast(key.len);
     // Its mark was `mark_first` until now.
     seen.marks.putAssumeCapacityNoClobber(key, @max(seen.mark_first, message_id));
 }
 
 /// Empties `marks`, raising `mark_first` to the newest mark so no chat goes back.
 fn fold(seen: *Seen) void {
+    std.debug.assert(seen.marks.count() == chat_count_limit);
     var marks = seen.marks.valueIterator();
     while (marks.next()) |chat_mark| seen.mark_first = @max(seen.mark_first, chat_mark.*);
     seen.marks.clearRetainingCapacity();
+    std.debug.assert(seen.marks.count() == 0);
     seen.id_bytes_used = 0;
 }
 
