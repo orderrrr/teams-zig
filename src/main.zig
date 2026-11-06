@@ -401,23 +401,27 @@ fn lookUpOtherName(
     self_mri: []const u8,
 ) chat.Client.Error!?[]const u8 {
     const recent = client.recentMessages(conversation_id, message_count_recent) catch |err| {
-        switch (err) {
-            // One chat that can't be read shouldn't hide the rest of the list.
-            error.NotFound, error.UnexpectedJson => return null,
-            error.UnexpectedStatus => {
-                // Throttling and server errors would hit every chat, so they stop the command.
-                const status = client.response_status.?;
-                if (status == .too_many_requests) return err;
-                if (status.class() == .server_error) return err;
-                return null;
-            },
-            else => return err,
-        }
+        if (lookupErrorSkips(err, client.response_status)) return null;
+        return err;
     };
     defer recent.deinit();
 
     const name = otherWriterName(recent.items, self_mri) orelse return null;
     return try arena.dupe(u8, name);
+}
+
+/// Whether a failed lookup should just leave that chat unnamed. Errors about one chat skip it;
+/// throttling, server errors, an expired token or no network would hit every chat, so they stop
+/// the command. `status` is the response's, set whenever the error is UnexpectedStatus.
+fn lookupErrorSkips(err: chat.Client.Error, status: ?std.http.Status) bool {
+    return switch (err) {
+        error.NotFound, error.UnexpectedJson => true,
+        error.UnexpectedStatus => skips: {
+            if (status.? == .too_many_requests) break :skips false;
+            break :skips status.?.class() != .server_error;
+        },
+        else => false,
+    };
 }
 
 /// The display name on the newest user-written message (`messages` is newest first) from someone
@@ -599,4 +603,14 @@ test "nameSource uses the last writer when it isn't you, and asks for a lookup w
     conversation.topic = null;
     conversation.id = "19:fake-group@thread.v2";
     try std.testing.expectEqual(NameSource.none, nameSource(&conversation, self_mri));
+}
+
+test "lookupErrorSkips skips errors about one chat and stops on ones that hit every chat" {
+    try std.testing.expect(lookupErrorSkips(error.NotFound, .not_found));
+    try std.testing.expect(lookupErrorSkips(error.UnexpectedJson, .ok));
+    try std.testing.expect(lookupErrorSkips(error.UnexpectedStatus, .forbidden));
+    try std.testing.expect(!lookupErrorSkips(error.UnexpectedStatus, .too_many_requests));
+    try std.testing.expect(!lookupErrorSkips(error.UnexpectedStatus, .service_unavailable));
+    try std.testing.expect(!lookupErrorSkips(error.TokenExpired, .unauthorized));
+    try std.testing.expect(!lookupErrorSkips(error.ConnectFailed, null));
 }

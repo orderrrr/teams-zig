@@ -35,7 +35,7 @@ const Response = struct {
     },
 
     const LastMessage = struct {
-        messagetype: []const u8 = "",
+        messagetype: ?[]const u8 = null,
         from: ?[]const u8 = null,
         imdisplayname: ?[]const u8 = null,
     };
@@ -72,7 +72,8 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
         const properties: Response.Properties = raw.properties orelse .{};
         // Only user-written text counts: an event's sender can be a bot or the service.
         const last_message: Response.LastMessage = if (raw.lastMessage) |last| text: {
-            if (!Message.isTextType(last.messagetype)) break :text .{};
+            const message_type = last.messagetype orelse break :text .{};
+            if (!Message.isTextType(message_type)) break :text .{};
             break :text last;
         } else .{};
         items.appendAssumeCapacity(.{

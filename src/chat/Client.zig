@@ -65,10 +65,10 @@ const page_item_count_max = 200;
 
 /// Bounds how many pages `messages` follows. The service can send empty pages that still link to
 /// older ones, so the page count isn't tied to the message count.
-const page_count_max = 64;
+const page_count_limit = 64;
 
 /// The most messages `messages` can ever collect.
-pub const message_count_limit = page_item_count_max * page_count_max;
+pub const message_count_limit = page_item_count_max * page_count_limit;
 
 pub fn init(
     client: *Client,
@@ -297,14 +297,14 @@ pub fn conversations(
 }
 
 /// Returns up to `message_count_max` of a conversation's messages, newest first, following older
-/// pages as needed. Stops early after `page_count_max` pages, returning what it has.
+/// pages as needed. Stops early after `page_count_limit` pages, returning what it has.
 /// The result is owned by the caller: free it with `List.deinit`.
 pub fn messages(
     client: *Client,
     conversation_id: []const u8,
     message_count_max: u32,
 ) Error!Message.List {
-    return client.fetchMessages(conversation_id, message_count_max, page_count_max);
+    return client.fetchMessages(conversation_id, message_count_max, page_count_limit);
 }
 
 /// Like `messages`, but reads only the newest page, so it always costs exactly one request.
@@ -321,11 +321,11 @@ fn fetchMessages(
     client: *Client,
     conversation_id: []const u8,
     message_count_max: u32,
-    page_count_limit: u32,
+    page_count_max: u32,
 ) Error!Message.List {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(message_count_max > 0);
-    // page_count_max pages can't hold more, so a larger count would only reserve dead memory.
+    // page_count_limit pages can't hold more, so a larger count would only reserve dead memory.
     std.debug.assert(message_count_max <= message_count_limit);
     const page_item_count = @min(message_count_max, page_item_count_max);
 
@@ -336,7 +336,7 @@ fn fetchMessages(
     defer client.gpa.free(url_first);
 
     const arena = list.arena.allocator();
-    list.items = try collectMessages(arena, client, url_first, message_count_max, page_count_limit);
+    list.items = try collectMessages(arena, client, url_first, message_count_max, page_count_max);
     return list;
 }
 
@@ -348,20 +348,20 @@ fn collectMessages(
     source: anytype,
     url_first: []const u8,
     message_count_max: u32,
-    page_count_limit: u32,
+    page_count_max: u32,
 ) Error![]const Message {
     std.debug.assert(url_first.len > 0);
     std.debug.assert(message_count_max > 0);
     std.debug.assert(message_count_max <= message_count_limit);
-    std.debug.assert(page_count_limit > 0);
-    std.debug.assert(page_count_limit <= page_count_max);
+    std.debug.assert(page_count_max > 0);
+    std.debug.assert(page_count_max <= page_count_limit);
 
     var items: std.ArrayList(Message) = try .initCapacity(arena, message_count_max);
     var link: ?[]const u8 = url_first;
     var page_count: u32 = 0;
     while (link) |page_url| : (page_count += 1) {
         if (items.items.len == message_count_max) break;
-        if (page_count == page_count_limit) break;
+        if (page_count == page_count_max) break;
 
         const body = try source.getUrl(page_url);
         const page = Message.parsePage(arena, body) catch |err| return parseError(err);
@@ -370,7 +370,7 @@ fn collectMessages(
         link = page.backward_link;
     }
     std.debug.assert(items.items.len <= message_count_max);
-    std.debug.assert(page_count <= page_count_limit);
+    std.debug.assert(page_count <= page_count_max);
 
     return items.items;
 }
@@ -487,7 +487,13 @@ test "collectMessages keeps going past empty pages that link to older ones" {
     var pages: CannedPages = .{
         .bodies = &.{ canned_empty_with_link, canned_empty_with_link, canned_one_oldest },
     };
-    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50, page_count_max);
+    const items = try collectMessages(
+        arena.allocator(),
+        &pages,
+        "https://x/first",
+        50,
+        page_count_limit,
+    );
     try std.testing.expectEqual(1, items.len);
     try std.testing.expectEqualStrings("0", items[0].id);
     try std.testing.expectEqual(3, pages.request_count);
@@ -498,19 +504,31 @@ test "collectMessages stops at the message count without fetching further" {
     defer arena.deinit();
 
     var pages: CannedPages = .{ .bodies = &.{ canned_two_with_link, canned_two_with_link } };
-    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 3, page_count_max);
+    const items = try collectMessages(
+        arena.allocator(),
+        &pages,
+        "https://x/first",
+        3,
+        page_count_limit,
+    );
     try std.testing.expectEqual(3, items.len);
     try std.testing.expectEqual(2, pages.request_count);
 }
 
-test "collectMessages stops after page_count_max endless empty pages" {
+test "collectMessages stops after page_count_limit endless empty pages" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
     var pages: CannedPages = .{ .bodies = &.{canned_empty_with_link} };
-    const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50, page_count_max);
+    const items = try collectMessages(
+        arena.allocator(),
+        &pages,
+        "https://x/first",
+        50,
+        page_count_limit,
+    );
     try std.testing.expectEqual(0, items.len);
-    try std.testing.expectEqual(page_count_max, pages.request_count);
+    try std.testing.expectEqual(page_count_limit, pages.request_count);
 }
 
 test "bodyError tells a dropped connection from a broken chunk and a full buffer" {
