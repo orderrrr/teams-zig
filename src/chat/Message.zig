@@ -131,7 +131,7 @@ test "parsePage reports no backward link on the oldest page" {
     try std.testing.expectEqual(null, page.backward_link);
 }
 
-test "writeText strips tags and decodes entities from HTML content" {
+test "writeText renders HTML content as Markdown with entities decoded" {
     const message: Message = .{
         .id = "1",
         .message_type = "RichText/Html",
@@ -145,7 +145,7 @@ test "writeText strips tags and decodes entities from HTML content" {
     defer out.deinit();
 
     try message.writeText(&out.writer);
-    try std.testing.expectEqualStrings("fake <hello> & bye 'now'", out.written());
+    try std.testing.expectEqualStrings("fake <hello> & **bye** 'now'", out.written());
 }
 
 test "writeText leaves plain Text content alone" {
@@ -251,7 +251,7 @@ test "writeText doesn't let a dropped tag join a C1 control back together" {
         .message_type = "RichText/Html",
         .sender = null,
         .sender_name = null,
-        .content = "<p>\xc2<b>\x9b[2J</p>",
+        .content = "<p>\xc2<span>\x9b[2J</p>",
         .arrived_at = "",
         .deleted_at_ms = null,
     };

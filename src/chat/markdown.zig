@@ -17,8 +17,42 @@ pub fn writeHtml(writer: *std.Io.Writer, content: []const u8) std.Io.Writer.Erro
     while (reader.next()) |token| switch (token) {
         .text => |run| try output.text(run),
         .entity => |replacement| try output.entity(replacement),
-        .tag => |tag| output.tag(&tag),
+        .tag => |tag| try output.tag(&tag),
     };
+    try output.finish();
+}
+
+/// Inline markup, as Markdown markers.
+const Mark = enum {
+    bold,
+    italic,
+    strike,
+    code,
+    link,
+
+    /// The opening marker; for all but links, the closing one too.
+    fn marker(mark: Mark) []const u8 {
+        return switch (mark) {
+            .bold => "**",
+            .italic => "_",
+            .strike => "~~",
+            .code => "`",
+            .link => "[",
+        };
+    }
+};
+
+const MarkState = enum { closed, pending, written };
+
+/// The mark a tag opens or closes, or null for tags that aren't inline markup. Underline has
+/// no Markdown form, so it stays plain.
+fn markOf(tag: *const html.Tag) ?Mark {
+    if (tag.is("b") or tag.is("strong")) return .bold;
+    if (tag.is("i") or tag.is("em")) return .italic;
+    if (tag.is("s") or tag.is("strike") or tag.is("del")) return .strike;
+    if (tag.is("code")) return .code;
+    if (tag.is("a")) return .link;
+    return null;
 }
 
 /// The output so far, as far as what comes next depends on it.
@@ -34,18 +68,27 @@ const Output = struct {
     space_pending: bool = false,
     /// The latest paragraph or div opened has held no text yet.
     block_empty: bool = false,
+    /// Each mark's state. A pending mark's opener waits for text, so markup around nothing
+    /// writes nothing and spaces at its edges stay outside it.
+    marks: std.EnumArray(Mark, MarkState) = .initFill(.closed),
+    /// The open marks, pending or written, in the order they opened; each appears once.
+    marks_open: [mark_count]Mark = undefined,
+    marks_open_count: u8 = 0,
+    /// The open link's target, still entity-encoded, borrowed from the content.
+    link_href: []const u8 = "",
+
+    const mark_count = std.enums.values(Mark).len;
 
     /// HTML text: runs of whitespace collapse to one space, and `\r` goes with them.
     fn text(output: *Output, run: []const u8) std.Io.Writer.Error!void {
+        std.debug.assert(run.len > 0);
+        if (std.mem.indexOfScalar(u8, html_whitespace, run[0]) != null) output.space_pending = true;
         var words = std.mem.tokenizeAny(u8, run, html_whitespace);
-        if (std.mem.indexOfAny(u8, run[0..1], html_whitespace) != null) output.space_pending = true;
         while (words.next()) |word| {
             try output.flush();
             try writeVisible(output.writer, word);
-            output.line_has_text = true;
-            output.block_empty = false;
-            // A word followed by whitespace owes a space, unless the run ends with it and the
-            // next run brings its own.
+            output.wroteText();
+            // A word followed by whitespace owes a space.
             output.space_pending = words.index < run.len;
         }
     }
@@ -58,11 +101,20 @@ const Output = struct {
         }
         try output.flush();
         try output.writer.writeAll(replacement);
+        output.wroteText();
+    }
+
+    fn wroteText(output: *Output) void {
         output.line_has_text = true;
         output.block_empty = false;
     }
 
-    fn tag(output: *Output, html_tag: *const html.Tag) void {
+    fn tag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+        if (markOf(html_tag)) |mark| {
+            if (html_tag.closing) return output.closeMark(mark);
+            if (mark == .link) output.link_href = html_tag.attribute("href") orelse "";
+            return output.openMark(mark);
+        }
         if (html_tag.is("br")) return output.lineBreak();
         if (html_tag.is("p") or html_tag.is("div")) {
             if (!html_tag.closing) {
@@ -78,16 +130,62 @@ const Output = struct {
         }
     }
 
-    /// Ends the current line if it holds text.
-    fn endLine(output: *Output) void {
+    fn openMark(output: *Output, mark: Mark) void {
+        if (output.marks.get(mark) != .closed) return;
+        output.marks.set(mark, .pending);
+        std.debug.assert(output.marks_open_count < mark_count);
+        output.marks_open[output.marks_open_count] = mark;
+        output.marks_open_count += 1;
+    }
+
+    fn closeMark(output: *Output, mark: Mark) std.Io.Writer.Error!void {
+        const state = output.marks.get(mark);
+        if (state == .closed) return;
+        output.marks.set(mark, .closed);
+
+        const open = output.marks_open[0..output.marks_open_count];
+        const index = std.mem.indexOfScalar(Mark, open, mark).?;
+        std.mem.copyForwards(Mark, open[index..], open[index + 1 ..]);
+        output.marks_open_count -= 1;
+
+        if (state == .written) try output.writeCloser(mark);
+    }
+
+    fn writeCloser(output: *Output, mark: Mark) std.Io.Writer.Error!void {
+        if (mark != .link) return output.writer.writeAll(mark.marker());
+        try output.writer.writeAll("](");
+        try html.writeDecoded(output.writer, output.link_href);
+        try output.writer.writeByte(')');
+    }
+
+    /// Ends the current line if it holds text. Written marks close here, newest first, and
+    /// reopen with the next text, since Markdown markup doesn't span lines. A link stays open.
+    fn endLine(output: *Output) std.Io.Writer.Error!void {
         if (!output.line_has_text) return;
+        var index = output.marks_open_count;
+        while (index > 0) {
+            index -= 1;
+            const mark = output.marks_open[index];
+            if (mark == .link) continue;
+            if (output.marks.get(mark) != .written) continue;
+            try output.writer.writeAll(mark.marker());
+            output.marks.set(mark, .pending);
+        }
         output.breaks_pending = @max(output.breaks_pending, 1);
         output.line_has_text = false;
         output.space_pending = false;
     }
 
+    /// Closes the marks the HTML left open, newest first.
+    fn finish(output: *Output) std.Io.Writer.Error!void {
+        while (output.marks_open_count > 0) {
+            const mark = output.marks_open[output.marks_open_count - 1];
+            try output.closeMark(mark);
+        }
+    }
+
     /// `<br>`: ends a line with text, or turns an empty one into a blank line.
-    fn lineBreak(output: *Output) void {
+    fn lineBreak(output: *Output) std.Io.Writer.Error!void {
         if (output.line_has_text) return output.endLine();
         output.blankLine();
     }
@@ -97,22 +195,24 @@ const Output = struct {
         output.space_pending = false;
     }
 
-    /// Writes the line breaks and space owed before the next text.
+    /// Writes what's owed before the next text: line breaks or a space, then pending openers.
     fn flush(output: *Output) std.Io.Writer.Error!void {
         if (output.at_start) {
             output.at_start = false;
             output.breaks_pending = 0;
-            output.space_pending = false;
-            return;
-        }
-        if (output.breaks_pending > 0) {
+        } else if (output.breaks_pending > 0) {
             try output.writer.splatByteAll('\n', output.breaks_pending);
             output.breaks_pending = 0;
-            output.space_pending = false;
-            return;
+        } else if (output.space_pending and output.line_has_text) {
+            try output.writer.writeByte(' ');
         }
-        if (output.space_pending and output.line_has_text) try output.writer.writeByte(' ');
         output.space_pending = false;
+
+        for (output.marks_open[0..output.marks_open_count]) |mark| {
+            if (output.marks.get(mark) != .pending) continue;
+            try output.writer.writeAll(mark.marker());
+            output.marks.set(mark, .written);
+        }
     }
 };
 
@@ -129,7 +229,7 @@ fn expectMarkdown(content: []const u8, expected: []const u8) !void {
 
 test "writeHtml collapses the HTML's whitespace and drops carriage returns" {
     try expectMarkdown("<p>fake   words\r\n  here\t&nbsp; too</p>", "fake words here too");
-    try expectMarkdown("fake<b>joined</b>  <i>spaced</i>", "fakejoined spaced");
+    try expectMarkdown("fake<b>joined</b>  <i>spaced</i>", "fake**joined** _spaced_");
 }
 
 test "writeHtml starts a line per paragraph, break and div" {
@@ -160,4 +260,29 @@ test "writeHtml keeps control bytes escaped where a byte was dropped" {
 
 test "writeHtml decodes entities and drops unknown tags" {
     try expectMarkdown("<span>fake &lt;b&gt; &amp; &#39;x&#39;</span><zz>", "fake <b> & 'x'");
+}
+
+test "writeHtml writes bold, italic, strike and code markers" {
+    const emphasis = "<b>fake</b> <strong>bold</strong> <i>it</i> <em>em</em>";
+    try expectMarkdown(emphasis, "**fake** **bold** _it_ _em_");
+    const other = "<s>gone</s> <del>gone</del> <code>x = 1</code> <u>plain</u>";
+    try expectMarkdown(other, "~~gone~~ ~~gone~~ `x = 1` plain");
+}
+
+test "writeHtml leaves out markup around nothing and keeps edge spaces outside markers" {
+    try expectMarkdown("fake<b></b> <i> </i>text", "fake text");
+    try expectMarkdown("fake<b> bold </b>text", "fake **bold** text");
+}
+
+test "writeHtml nests markers and closes them across a line break" {
+    try expectMarkdown("<i><b>fake</b></i>", "_**fake**_");
+    try expectMarkdown("<b>fake one<br>fake two</b>", "**fake one**\n**fake two**");
+    try expectMarkdown("<b>fake <i>never closed", "**fake _never closed_**");
+}
+
+test "writeHtml writes links with their target decoded and visible" {
+    const link = "see <a href=\"https://x/?a=1&amp;b=2\">fake</a>";
+    try expectMarkdown(link, "see [fake](https://x/?a=1&b=2)");
+    try expectMarkdown("<a href=\"https://x/\x1b[2J\">fake</a>", "[fake](https://x/\\x1b[2J)");
+    try expectMarkdown("<a href=\"https://x/\"></a>fake", "fake");
 }
