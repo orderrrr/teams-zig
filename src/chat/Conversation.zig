@@ -177,3 +177,23 @@ test "parseList ignores a last message that is an event" {
     try std.testing.expectEqual(null, list.items[0].last_sender);
     try std.testing.expectEqual(null, list.items[0].last_sender_name);
 }
+
+test "parseList ignores a last message without a message type" {
+    const body =
+        \\{"conversations":[
+        \\ {"id":"19:fake-a_fake-b@unq.gbl.spaces","threadProperties":{"threadType":"chat"},
+        \\  "lastMessage":{"messagetype":null,"imdisplayname":"Fake Bot",
+        \\   "from":"https://x/v1/users/ME/contacts/28:fake-bot"}},
+        \\ {"id":"19:fake-a_fake-c@unq.gbl.spaces","threadProperties":{"threadType":"chat"},
+        \\  "lastMessage":{"imdisplayname":"Fake Bot",
+        \\   "from":"https://x/v1/users/ME/contacts/28:fake-bot"}}]}
+    ;
+    const list = try parseList(std.testing.allocator, body);
+    defer list.deinit();
+
+    try std.testing.expectEqual(2, list.items.len);
+    for (list.items) |conversation| {
+        try std.testing.expectEqual(null, conversation.last_sender);
+        try std.testing.expectEqual(null, conversation.last_sender_name);
+    }
+}
