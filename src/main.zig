@@ -175,10 +175,12 @@ fn reportError(stderr: *Io.Writer, err: anyerror, response_status: ?std.http.Sta
         error.TooManyHttpRedirects => try stderr.writeAll(
             "teams-zig: the Chat Service redirected; not following it, to keep the token there\n",
         ),
-        // Client returns WriteFailed when sending the request fails, such as on a dropped
-        // connection.
-        error.WriteFailed => try stderr.writeAll(
+        error.SendFailed => try stderr.writeAll(
             "teams-zig: couldn't send the request to the Chat Service; try again\n",
+        ),
+        // Only writes to stdout return WriteFailed here, as when a pipe reader like `head` exits.
+        error.WriteFailed => try stderr.writeAll(
+            "teams-zig: couldn't write the output; was the pipe closed?\n",
         ),
         error.ResponseTooLarge => try stderr.writeAll(
             "teams-zig: the Chat Service sent a response larger than teams-zig accepts\n",

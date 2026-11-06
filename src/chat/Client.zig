@@ -42,6 +42,8 @@ pub const Error = error{
     /// stays with the Chat Service.
     ForeignLink,
     ResponseTooLarge,
+    /// Sending the request failed, such as on a dropped connection.
+    SendFailed,
 } || std.http.Client.FetchError || std.mem.Allocator.Error;
 
 /// Big enough for a full page of HTML-heavy messages; anything larger is refused, not truncated.
@@ -156,7 +158,7 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
         // WriteFailed comes from sending the request too, and the request is sent before any
         // body byte arrives: only a failure after body bytes means the body outgrew the buffer.
         error.WriteFailed => {
-            if (body.end == 0) return error.WriteFailed;
+            if (body.end == 0) return error.SendFailed;
             return error.ResponseTooLarge;
         },
         else => |other| return other,
