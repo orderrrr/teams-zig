@@ -109,7 +109,7 @@ not:   src/types/      src/helpers/          src/services/
 
 ### 1.6 — Function names are camelCase; acronyms are words
 
-Functions are `camelCase`, as in `std`: `parseList`, `writeText`. Acronyms are written as words, as `std.Uri` does: `getUrl`, not `getURL`. Variables and fields stay `snake_case`, except fields that mirror an external format's keys (a private struct `std.json` parses into must use the JSON key names), which convert to `snake_case` types at the boundary.
+Functions are `camelCase`, as in `std`: `parseList`, `writeText`. Acronyms are written as words, as `std.Uri` does: `getUrl`, not `getURL`. Variables and fields stay `snake_case`. Two exceptions keep an outside name: fields that mirror an external format's keys (a private struct `std.json` parses into must use the JSON key names), which convert to `snake_case` types at the boundary; and `extern` declarations, which keep the C symbol's name (`CFRelease`, `kSecClass`), as `std.c` does.
 
 > Overrides Tiger Style's `snake_case` rule for functions and its acronym capitalization rule. The trade: our code reads the same as the `std` calls it sits beside.
 
@@ -518,6 +518,10 @@ The `self.* = undefined` line is optional but useful — Zig's debug-mode safety
 ### 4.5 — Asserts for programmer errors; errors for environment failures
 
 A precondition violation that means "the code is wrong" is an `assert` (or `unreachable`). A failure that means "the environment is being uncooperative" (allocator OOM, file missing, parse failed, network down) is an `error`. Don't conflate them: returning an error for a logic bug encourages callers to recover from impossible states; asserting on real I/O makes prod crash on transient failure.
+
+Tiger Style's "two assertions per function" is a target met with real invariants, never with padding. Assert every precondition, postcondition and invariant the code controls; a function with none (a one-line wrapper, a parser of outside data whose failures are errors) gets none.
+
+> Overrides Tiger Style's assertion-density minimum. The trade: a lower count, but every assert that's there guards something.
 
 ```zig
 // Programmer error → assert

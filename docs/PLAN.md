@@ -25,7 +25,7 @@ The script and the client share one keychain service name, `teams-zig`, with two
 1. **M1.1 package skeleton.** `build.zig`, `build.zig.zon` with no dependencies, `src/root.zig`, `src/main.zig` printing usage, and a passing `zig build test`.
 2. **M1.2 CoreFoundation bindings.** `extern` declarations for the CFString, CFData, CFDictionary and CFRelease calls the keychain needs, and the framework links in `build.zig`. A test round-trips a CFData (nothing reads CFStrings back).
 3. **M1.3 Security bindings.** `extern` declarations for `SecItemCopyMatching`, `SecItemAdd`, `SecItemUpdate`, `SecItemDelete` and the `kSec*` constants they use.
-4. **M1.4 keychain wrapper.** `Item.read(gpa)` and `Item.write(value)` over the bindings, where `Item` names the service and account, with OSStatus mapped to a Zig error set. Tests use a throwaway service name and fake values, and delete what they write. The rebuild prompt question is settled in M1.7.
+4. **M1.4 keychain wrapper.** `KeychainItem.read(gpa)` and `KeychainItem.write(value)` over the bindings, where a `KeychainItem` names the service and account, with OSStatus mapped to a Zig error set. Tests use a throwaway service name and fake values, and delete what they write. The rebuild prompt question is settled in M1.7.
 5. **M1.5 token script: sign-in and token.** agent-browser opens Teams for interactive sign-in, then reads the skype token from the startup POST to `/v1/skypetokenauth` (form body), falling back to the `x-skypetoken` header, which only some loads send. Live probes found no `skypetoken_asm` cookie. *Needs your sign-off: new outside tool, and it runs a live sign-in.*
 6. **M1.6 token script: region.** Detect the region from the page's `chatsvc/{region}` or `{region}.ng.msg.teams.microsoft.com` requests. If agent-browser can't see network requests, park it and fall back to asking for the region once.
 7. **M1.7 token script: keychain write.** Store both values with `security add-generic-password -U -A` under the contract above. `-A` lets the client read them without a prompt after every rebuild. Items made by `security` are already readable by any process through `security` itself, so this barely widens exposure. A self-signed certificate with codesign is the tighter option for later.
@@ -55,3 +55,8 @@ Sending, editing, deleting and reactions (M2). Naming the other person in 1:1 ch
 - `writeText` crashed on an unterminated `<` through a deferred progress assert; fixed and tested (`e4187a8`).
 - Style fixes: CoreFoundation and keychain operations as methods, `Dictionary.Entries`, more asserts, remaining explicit options, invalid-data tests (`449ef41`).
 - Decided: JSON-mirror fields keep their key names (STYLE 1.6 carve-out); gate records live here.
+
+**Round 3** (reviews of the round-2 fixes):
+- `writeText` could still trip its deferred progress assert when a write failed, so `messages | head -1` panicked; fixed and tested (`a3f45ca`).
+- Style fixes: `KeychainItem.zig` as a flat type file, `Command.parse`/`run`, preallocated message list, more invariant asserts, explicit build options, invalid-input tests (`8914fe7`).
+- Decided: `extern` declarations keep C symbol names (STYLE 1.6); assertion density is met with real invariants, never padding (STYLE 4.5).
