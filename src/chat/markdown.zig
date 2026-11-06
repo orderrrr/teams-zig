@@ -754,5 +754,8 @@ test "writeHtml escapes after a line's prefix, and only at a line's start" {
     try expectMarkdown("<p>fake # - 1. &gt; ```</p>", "fake # - 1. > ```");
     try expectMarkdown("<p><b># fake</b></p>", "**# fake**");
     try expectMarkdown("<p>#fake -fake 1.5 1.fake</p>", "#fake -fake 1.5 1.fake");
+    // CommonMark reads at most nine digits as a list number.
+    try expectMarkdown("<p>123456789. fake</p>", "123456789\\. fake");
+    try expectMarkdown("<p>1234567890. fake</p>", "1234567890. fake");
     try expectMarkdown("<pre># fake</pre>", "```\n# fake\n```");
 }

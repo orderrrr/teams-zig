@@ -164,10 +164,9 @@ const Clock = struct {
         timestamp: []const u8,
     ) ?[]const u8 {
         const at_seconds = short_time.parseIso(timestamp) orelse return null;
-        const now_seconds = clock.now_seconds;
         const times: short_time.Times = .{
             .at_seconds = at_seconds + clock.zone.secondsFromGmt(at_seconds),
-            .now_seconds = now_seconds + clock.zone.secondsFromGmt(now_seconds),
+            .now_seconds = clock.now_seconds + clock.zone.secondsFromGmt(clock.now_seconds),
         };
         var writer: Io.Writer = .fixed(buffer);
         // `width_max` is the widest form, so the buffer never fills.

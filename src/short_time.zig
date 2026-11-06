@@ -70,7 +70,8 @@ pub fn write(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
     std.debug.assert(times.now_seconds >= 0);
     const day_at = @divFloor(times.at_seconds, std.time.s_per_day);
     const day_now = @divFloor(times.now_seconds, std.time.s_per_day);
-    const seconds_in_day = @mod(times.at_seconds, std.time.s_per_day);
+    // Unsigned, so they print without a sign.
+    const seconds_in_day: u64 = @intCast(@mod(times.at_seconds, std.time.s_per_day));
     const hour = @divFloor(seconds_in_day, std.time.s_per_hour);
     const minute = @divFloor(@mod(seconds_in_day, std.time.s_per_hour), std.time.s_per_min);
 
@@ -87,7 +88,7 @@ pub fn write(writer: *std.Io.Writer, times: Times) std.Io.Writer.Error!void {
             try writeDate(writer, day_at);
         }
     }
-    try writer.print("{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(hour)), @as(u64, @intCast(minute)) });
+    try writer.print("{d:0>2}:{d:0>2}", .{ hour, minute });
 }
 
 fn writeWeekday(writer: *std.Io.Writer, day: i64) std.Io.Writer.Error!void {
