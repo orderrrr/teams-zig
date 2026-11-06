@@ -578,7 +578,10 @@ fn findChat(
     const list = try client.conversations(conversation_count_limit);
     defer list.deinit();
 
-    var names = try arena.alloc(?[]const u8, list.items.len);
+    // conversations() returns at most the count it was asked for.
+    std.debug.assert(list.items.len <= conversation_count_limit);
+    var free_names: [conversation_count_limit]?[]const u8 = undefined;
+    var names: []?[]const u8 = free_names[0..list.items.len];
     for (list.items, names) |*conversation, *other_name| {
         other_name.* = switch (nameSource(conversation, user.mri)) {
             .known => |known| known,

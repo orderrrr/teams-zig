@@ -59,15 +59,13 @@ pub fn record(
 ) error{OutOfMemory}!void {
     std.debug.assert(conversation_id.len > 0);
     const entry = try seen.marks.getOrPut(seen.gpa, conversation_id);
-    if (!entry.found_existing) {
-        entry.key_ptr.* = seen.gpa.dupe(u8, conversation_id) catch |err| {
-            seen.marks.removeByPtr(entry.key_ptr);
-            return err;
-        };
-        entry.value_ptr.* = message_id;
+    if (entry.found_existing) {
+        entry.value_ptr.* = @max(entry.value_ptr.*, message_id);
         return;
     }
-    entry.value_ptr.* = @max(entry.value_ptr.*, message_id);
+    errdefer seen.marks.removeByPtr(entry.key_ptr);
+    entry.key_ptr.* = try seen.gpa.dupe(u8, conversation_id);
+    entry.value_ptr.* = message_id;
 }
 
 fn fakeConversation(id: []const u8, last_message_id: ?u64) chat.Conversation {
