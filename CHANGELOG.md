@@ -2,6 +2,12 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.2.0 (M2): read-only improvements
+
+- `teams-zig chats` names the other person in 1:1 chats instead of `(no topic)`, using the last sender, or the chat's recent messages when you spoke last.
+- `teams-zig chats [count]` (up to 100) and `teams-zig messages <id> [count]` choose how many to show; both default to 50.
+- Still read-only: nothing writes to Teams.
+
 ## 0.1.0 (M1): read-only Teams client
 
 - `teams-zig whoami`, `teams-zig chats` and `teams-zig messages <conversation-id>` against the Teams Chat Service, with a one-line hint for each error you can act on.
