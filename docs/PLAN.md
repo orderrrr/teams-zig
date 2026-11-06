@@ -154,6 +154,7 @@ Decided by the owner on 2026-11-06, after `messages 48:notes` printed `\x0d` and
 
 - `RichText/Html` content renders as Markdown instead of having its tags stripped. `<b>`/`<strong>` → `**`, `<i>`/`<em>` → `_`, `<s>` → `~~`, `<code>` → `` ` ``, `<pre>`/code blocks → fenced blocks, `<a href>` → `[text](url)`, lists → `- `/`1. `, `<blockquote>` → `> `, `<p>`/`<br>`/`<div>` → line breaks. The HTML's own whitespace collapses and `\r` is dropped. Underline becomes plain text and emoji images use their alt text.
 - Layout: a header line per message (time and sender), then the body, then a blank line between messages. Bodies aren't indented, since an indent means a code block in Markdown.
+- Changed by the owner on 2026-11-06 after seeing it: the compact layout stays. Each message starts on its `time  sender: ` line, a multi-line body continues on the lines below, and there's no blank line between messages.
 - Literal `*` and `_` in typed text aren't escaped at first.
 - M3 stays as approved: `watch` prints through today's `writeText` until M4.
 - No JSON or HTML output; Markdown is the format.

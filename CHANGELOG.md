@@ -8,8 +8,7 @@ One entry per milestone. The version lives in `build.zig.zon`.
 - Line breaks come through, and the stray `\x0d` at line ends is gone.
 - Still read-only: nothing writes to Teams.
 
-Changed:
-- `messages` and `watch` print a header line per message (`time  sender`, with `[chat] ` first in `watch`), then the message on its own lines, then a blank line. Before, each message was one line, `time  sender: text`. Anything that parsed the old one-line form needs updating.
+Each message still starts on its `time  sender: ` line; a message with several lines continues on the lines below it.
 
 Known limits: nothing is escaped, so a line someone typed starting with `#`, `>` or `- ` reads as Markdown, and a typed `` ``` `` inside a code block ends it early.
 

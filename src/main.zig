@@ -747,13 +747,14 @@ fn parseCount(text: []const u8, count_max: u32) ?u32 {
     return count;
 }
 
-/// A header line with the time and sender, the body as Markdown, then a blank line.
+/// `time  sender: ` and the body as Markdown, which continues on the following lines when it
+/// has more than one.
 fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {
     const sender = message.sender_name orelse message.sender orelse "(unknown sender)";
     try writeVisible(stdout, message.arrived_at);
     try stdout.writeAll("  ");
     try writeVisible(stdout, sender);
-    try stdout.writeByte('\n');
+    try stdout.writeAll(": ");
 
     if (message.deleted_at_ms != null) {
         try stdout.writeAll("(deleted)");
@@ -764,7 +765,7 @@ fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Erro
         try writeVisible(stdout, message.message_type);
         try stdout.writeByte(']');
     }
-    try stdout.writeAll("\n\n");
+    try stdout.writeByte('\n');
 }
 
 /// Prints a one-line hint for every way a command can fail. The switch is exhaustive, so a new
@@ -910,7 +911,7 @@ test "watchErrorRetries waits out throttling and network failures, and stops on 
     try std.testing.expect(!watchErrorRetries(error.WriteFailed, null));
 }
 
-test "printMessage writes a header line, the body and a blank line" {
+test "printMessage starts each message on its time and sender line" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
@@ -929,13 +930,9 @@ test "printMessage writes a header line, the body and a blank line" {
     try printMessage(&out.writer, &message);
 
     try std.testing.expectEqualStrings(
-        \\2026-11-06T10:00:00.000Z  Fake Person
-        \\fake one
+        \\2026-11-06T10:00:00.000Z  Fake Person: fake one
         \\fake **two**
-        \\
-        \\2026-11-06T10:00:00.000Z  8:orgid:fake
-        \\(deleted)
-        \\
+        \\2026-11-06T10:00:00.000Z  8:orgid:fake: (deleted)
         \\
     , out.written());
 }
