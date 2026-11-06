@@ -129,10 +129,13 @@ Live after each round (read-only, counts only): 41 of 41 1:1 chats named in 11â€
 
 ## M3: watch for new messages
 
-Goal: `teams-zig watch` prints new messages from all your chats as they arrive, and `chats` marks chats with unread messages. Still read-only: every request is a GET, so nothing registers an endpoint, opens a subscription or marks anything as read. The zero-writes rule in CLAUDE.md still holds.
+Goal: `teams-zig messages` takes a chat's name as well as its id, `teams-zig watch` prints new messages from all your chats as they arrive, and `chats` marks chats with unread messages. Still read-only: every request is a GET, so nothing registers an endpoint, opens a subscription or marks anything as read. The zero-writes rule in CLAUDE.md still holds.
+
+Added at the owner's request before watch: choose a chat by its exact name.
 
 ### Chunks
 
+0. **M3.0 `messages <name or id>`.** An argument that starts with digits and a colon (`19:â€¦`, `48:notes`) is an id, as today. Anything else is a chat name, matched exactly but ignoring ASCII case, against the names `chats` shows: the topic, or the other person in a 1:1 chat. It searches your 100 newest chats, using the free names first and making M2's per-chat lookups only if none of those match, so a match on a free name costs one GET and a miss can take as long as `chats 100`. One match reads that chat; none says so; two or more list them with their ids and exit without reading messages. Pure matching with tests; `chats` keeps printing ids.
 1. **M3.1 unread state, checked live.** See whether `/users/ME/conversations` carries a read marker (most likely `properties.consumptionhorizon`, holding the last-read message id and time) and its shape: keys and format only, never content. If it isn't there, unread marks are dropped from M3 and noted here.
 2. **M3.2 unread in `chats`.** Parse the read marker and compare it with the last message's time; `chats` shows a `*` on chats with unread messages. Pure comparison with tests.
 3. **M3.3 a watchdog per request.** Today the watchdog ends the whole command after 60 seconds, which a long-running `watch` can't live with. It becomes a per-request deadline: each request that gets no answer within 60 seconds still stops the command with the network hint.
