@@ -13,7 +13,7 @@ const writeVisible = @import("text.zig").writeVisible;
 /// final line break is written.
 pub fn writeHtml(writer: *std.Io.Writer, content: []const u8) std.Io.Writer.Error!void {
     var output: Output = .{ .writer = writer };
-    var reader: html.Reader = .init(content);
+    var reader: html.Reader = .{ .rest = content };
     while (reader.next()) |token| switch (token) {
         .text => |run| try output.text(run),
         .entity => |replacement| try output.entity(replacement),
@@ -42,8 +42,6 @@ const Mark = enum {
     }
 };
 
-const MarkState = enum { closed, pending, written };
-
 /// The mark a tag opens or closes, or null for tags that aren't inline markup. Underline has
 /// no Markdown form, so it stays plain.
 fn markOf(tag: *const html.Tag) ?Mark {
@@ -68,12 +66,12 @@ const Output = struct {
     space_pending: bool = false,
     /// The latest paragraph or div opened has held no text yet.
     block_empty: bool = false,
-    /// Each mark's state. A pending mark's opener waits for text, so markup around nothing
-    /// writes nothing and spaces at its edges stay outside it.
-    marks: std.EnumArray(Mark, MarkState) = .initFill(.closed),
-    /// The open marks, pending or written, in the order they opened; each appears once.
+    /// The open marks, in the order they opened; each appears once.
     marks_open: [mark_count]Mark = undefined,
     marks_open_count: u8 = 0,
+    /// The open marks whose opener is written. The others wait for text, so markup around
+    /// nothing writes nothing and spaces at its edges stay outside it.
+    marks_written: std.EnumSet(Mark) = .empty,
     /// The open link's target, still entity-encoded, borrowed from the content.
     link_href: []const u8 = "",
     /// How many quotes are open; lines show at most `quote_depth_limit` of them.
@@ -84,14 +82,17 @@ const Output = struct {
     list_depth: u8 = 0,
     /// The next line starts a list item, so it gets the item's marker.
     item_starting: bool = false,
-    /// The next line starts a heading of this level (1 to 3), or 0.
-    heading_starting: u2 = 0,
+    /// The next line starts a heading of this level (1 to 3).
+    heading_starting: ?u2 = null,
     /// Inside `<pre>`: text is written as it is, line by line, inside a fence.
-    in_code_block: bool = false,
-    /// The code block's current line holds nothing yet.
-    code_line_empty: bool = false,
-    /// No text yet in the code block, so a newline right after `<pre>` is dropped, as in HTML.
-    code_block_empty: bool = false,
+    code_block: ?CodeBlock = null,
+
+    const CodeBlock = struct {
+        /// The current line holds nothing yet.
+        line_empty: bool = true,
+        /// No text yet, so a newline right after `<pre>` is dropped, as in HTML.
+        empty: bool = true,
+    };
 
     const List = struct {
         ordered: bool,
@@ -111,7 +112,7 @@ const Output = struct {
     /// HTML text: runs of whitespace collapse to one space, and `\r` goes with them.
     fn text(output: *Output, run: []const u8) std.Io.Writer.Error!void {
         std.debug.assert(run.len > 0);
-        if (output.in_code_block) return output.codeText(run);
+        if (output.code_block) |*block| return output.codeText(block, run);
         if (std.mem.indexOfScalar(u8, html_whitespace, run[0]) != null) output.space_pending = true;
         var words = std.mem.tokenizeAny(u8, run, html_whitespace);
         while (words.next()) |word| {
@@ -125,10 +126,10 @@ const Output = struct {
 
     /// A decoded entity. `&nbsp;` counts as whitespace; the rest are text.
     fn entity(output: *Output, replacement: []const u8) std.Io.Writer.Error!void {
-        if (output.in_code_block) {
+        if (output.code_block) |*block| {
             try output.writer.writeAll(replacement);
-            output.code_line_empty = false;
-            output.code_block_empty = false;
+            block.line_empty = false;
+            block.empty = false;
             return;
         }
         if (std.mem.eql(u8, replacement, " ")) {
@@ -146,10 +147,10 @@ const Output = struct {
     }
 
     fn tag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
-        if (output.in_code_block) {
+        if (output.code_block) |*block| {
             // Inside a code block only its end and line breaks count; markup is dropped.
-            if (html_tag.is("pre") and html_tag.closing) return output.closeCodeBlock();
-            if (html_tag.is("br")) return output.codeNewline();
+            if (html_tag.is("pre") and html_tag.closing) return output.closeCodeBlock(block);
+            if (html_tag.is("br")) return output.codeNewline(block);
             return;
         }
         if (html_tag.is("pre")) {
@@ -166,7 +167,7 @@ const Output = struct {
         if (headingLevel(html_tag)) |level| {
             try output.endLine();
             // Closing clears it, so an empty heading marks nothing after it.
-            output.heading_starting = if (html_tag.closing) 0 else level;
+            output.heading_starting = if (html_tag.closing) null else level;
             return;
         }
         if (html_tag.is("blockquote")) return output.quoteTag(html_tag.closing);
@@ -188,24 +189,26 @@ const Output = struct {
     }
 
     fn openMark(output: *Output, mark: Mark) void {
-        if (output.marks.get(mark) != .closed) return;
-        output.marks.set(mark, .pending);
+        if (output.markIndex(mark) != null) return;
         std.debug.assert(output.marks_open_count < mark_count);
         output.marks_open[output.marks_open_count] = mark;
         output.marks_open_count += 1;
     }
 
     fn closeMark(output: *Output, mark: Mark) std.Io.Writer.Error!void {
-        const state = output.marks.get(mark);
-        if (state == .closed) return;
-        output.marks.set(mark, .closed);
-
+        const index = output.markIndex(mark) orelse return;
         const open = output.marks_open[0..output.marks_open_count];
-        const index = std.mem.indexOfScalar(Mark, open, mark).?;
         std.mem.copyForwards(Mark, open[index..], open[index + 1 ..]);
         output.marks_open_count -= 1;
 
-        if (state == .written) try output.writeCloser(mark);
+        if (!output.marks_written.contains(mark)) return;
+        output.marks_written.remove(mark);
+        try output.writeCloser(mark);
+    }
+
+    /// Where `mark` is in `marks_open`, or null if it isn't open.
+    fn markIndex(output: *const Output, mark: Mark) ?usize {
+        return std.mem.indexOfScalar(Mark, output.marks_open[0..output.marks_open_count], mark);
     }
 
     fn writeCloser(output: *Output, mark: Mark) std.Io.Writer.Error!void {
@@ -224,9 +227,9 @@ const Output = struct {
             index -= 1;
             const mark = output.marks_open[index];
             if (mark == .link) continue;
-            if (output.marks.get(mark) != .written) continue;
+            if (!output.marks_written.contains(mark)) continue;
             try output.writer.writeAll(mark.marker());
-            output.marks.set(mark, .pending);
+            output.marks_written.remove(mark);
         }
         output.breaks_pending = @max(output.breaks_pending, 1);
         output.line_has_text = false;
@@ -267,47 +270,45 @@ const Output = struct {
         try output.endLine();
         try output.flush();
         try output.writer.writeAll("```\n");
-        try output.writeLinePrefix(false);
-        output.in_code_block = true;
-        output.code_line_empty = true;
-        output.code_block_empty = true;
+        try output.writeLinePrefix();
+        output.code_block = .{};
     }
 
-    fn closeCodeBlock(output: *Output) std.Io.Writer.Error!void {
-        if (!output.code_line_empty) {
+    fn closeCodeBlock(output: *Output, block: *const CodeBlock) std.Io.Writer.Error!void {
+        if (!block.line_empty) {
             try output.writer.writeByte('\n');
-            try output.writeLinePrefix(false);
+            try output.writeLinePrefix();
         }
         try output.writer.writeAll("```");
-        output.in_code_block = false;
+        output.code_block = null;
         output.line_has_text = true;
         try output.endLine();
     }
 
     /// Code keeps its spaces and line breaks. `\r` is dropped, splitting the text there.
-    fn codeText(output: *Output, run: []const u8) std.Io.Writer.Error!void {
+    fn codeText(output: *Output, block: *CodeBlock, run: []const u8) std.Io.Writer.Error!void {
         var rest = run;
         while (rest.len > 0) {
             const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
             if (end > 0) {
                 try writeVisible(output.writer, rest[0..end]);
-                output.code_line_empty = false;
-                output.code_block_empty = false;
+                block.line_empty = false;
+                block.empty = false;
             }
             if (end == rest.len) return;
-            if (rest[end] == '\n') try output.codeNewline();
+            if (rest[end] == '\n') try output.codeNewline(block);
             rest = rest[end + 1 ..];
         }
     }
 
-    fn codeNewline(output: *Output) std.Io.Writer.Error!void {
-        if (output.code_block_empty) {
-            output.code_block_empty = false;
+    fn codeNewline(output: *Output, block: *CodeBlock) std.Io.Writer.Error!void {
+        if (block.empty) {
+            block.empty = false;
             return;
         }
         try output.writer.writeByte('\n');
-        try output.writeLinePrefix(false);
-        output.code_line_empty = true;
+        try output.writeLinePrefix();
+        block.line_empty = true;
     }
 
     /// Lists start on their own line; the outermost ends with a blank line, since Markdown
@@ -338,21 +339,28 @@ const Output = struct {
     }
 
     /// Writes the start of a line: `> ` for each quote shown, then the list indent, with the
-    /// item's marker on an item's first line. A blank line gets only the quotes, as a bare `>`.
-    fn writeLinePrefix(output: *Output, blank: bool) std.Io.Writer.Error!void {
-        const quote_depth = @min(output.quote_depth, quote_depth_limit);
-        for (0..quote_depth) |level| {
-            const last = level + 1 == quote_depth;
-            try output.writer.writeAll(if (blank and last) ">" else "> ");
-        }
-        if (blank) return;
-
+    /// item's marker on an item's first line, then a heading's `#` marks.
+    fn writeLinePrefix(output: *Output) std.Io.Writer.Error!void {
+        try output.writeQuotes("> ");
         try output.writeListPrefix();
-        if (output.heading_starting > 0) {
-            try output.writer.splatByteAll('#', output.heading_starting);
+        if (output.heading_starting) |level| {
+            try output.writer.splatByteAll('#', level);
             try output.writer.writeByte(' ');
-            output.heading_starting = 0;
+            output.heading_starting = null;
         }
+    }
+
+    /// A blank line inside quotes holds only them, the last as a bare `>`.
+    fn writeBlankLinePrefix(output: *Output) std.Io.Writer.Error!void {
+        try output.writeQuotes(">");
+    }
+
+    /// Writes `> ` for each quote shown, with `last` for the innermost.
+    fn writeQuotes(output: *Output, last: []const u8) std.Io.Writer.Error!void {
+        const quote_depth = @min(output.quote_depth, quote_depth_limit);
+        if (quote_depth == 0) return;
+        try output.writer.splatBytesAll("> ", quote_depth - 1);
+        try output.writer.writeAll(last);
     }
 
     fn writeListPrefix(output: *Output) std.Io.Writer.Error!void {
@@ -370,7 +378,7 @@ const Output = struct {
 
     /// Closes what the HTML left open: a code block, then marks, newest first.
     fn finish(output: *Output) std.Io.Writer.Error!void {
-        if (output.in_code_block) try output.closeCodeBlock();
+        if (output.code_block) |*block| try output.closeCodeBlock(block);
         while (output.marks_open_count > 0) {
             const mark = output.marks_open[output.marks_open_count - 1];
             try output.closeMark(mark);
@@ -393,24 +401,24 @@ const Output = struct {
         if (output.at_start) {
             output.at_start = false;
             output.breaks_pending = 0;
-            try output.writeLinePrefix(false);
+            try output.writeLinePrefix();
         } else if (output.breaks_pending > 0) {
             try output.writer.writeByte('\n');
             if (output.breaks_pending == 2) {
-                try output.writeLinePrefix(true);
+                try output.writeBlankLinePrefix();
                 try output.writer.writeByte('\n');
             }
             output.breaks_pending = 0;
-            try output.writeLinePrefix(false);
+            try output.writeLinePrefix();
         } else if (output.space_pending and output.line_has_text) {
             try output.writer.writeByte(' ');
         }
         output.space_pending = false;
 
         for (output.marks_open[0..output.marks_open_count]) |mark| {
-            if (output.marks.get(mark) != .pending) continue;
+            if (output.marks_written.contains(mark)) continue;
             try output.writer.writeAll(mark.marker());
-            output.marks.set(mark, .written);
+            output.marks_written.insert(mark);
         }
     }
 };

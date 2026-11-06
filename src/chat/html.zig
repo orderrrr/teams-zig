@@ -54,11 +54,8 @@ const entities = [_]struct { []const u8, []const u8 }{
 /// Splits HTML into tokens. Never fails: an unterminated tag is dropped, and an `&` that starts
 /// no known entity is text.
 pub const Reader = struct {
+    /// What's left to read.
     rest: []const u8,
-
-    pub fn init(html: []const u8) Reader {
-        return .{ .rest = html };
-    }
 
     pub fn next(reader: *Reader) ?Token {
         if (reader.rest.len == 0) return null;
@@ -88,7 +85,7 @@ pub const Reader = struct {
 
 /// Writes an attribute value with its entities decoded and its control bytes shown as `\xNN`.
 pub fn writeDecoded(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!void {
-    var reader: Reader = .init(raw);
+    var reader: Reader = .{ .rest = raw };
     while (reader.next()) |token| switch (token) {
         .text => |run| try writeVisible(writer, run),
         .entity => |replacement| try writer.writeAll(replacement),
@@ -132,7 +129,7 @@ fn entityAt(rest: []const u8) ?struct { []const u8, []const u8 } {
 }
 
 fn expectTokens(html: []const u8, expected: []const Token) !void {
-    var reader: Reader = .init(html);
+    var reader: Reader = .{ .rest = html };
     for (expected) |want| {
         const got = reader.next() orelse return error.TestExpectedMoreTokens;
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
@@ -178,9 +175,11 @@ test "Reader drops an unterminated tag and ends" {
 }
 
 test "Tag.attribute reads quoted and bare values, ignoring case and look-alike names" {
-    var reader: Reader = .init(
+    var reader: Reader = .{
+        .rest =
         \\<IMG data-alt="no" ALT="fake smile" itemtype='http://x/Emoji' width=20 src>
-    );
+        ,
+    };
     const tag = reader.next().?.tag;
     try std.testing.expect(tag.is("img"));
     try std.testing.expectEqualStrings("fake smile", tag.attribute("alt").?);
@@ -191,7 +190,7 @@ test "Tag.attribute reads quoted and bare values, ignoring case and look-alike n
 }
 
 test "a > inside a quoted value ends the tag early, harmlessly" {
-    var reader: Reader = .init("<a href=\"x>y\">fake</a>");
+    var reader: Reader = .{ .rest = "<a href=\"x>y\">fake</a>" };
     const tag = reader.next().?.tag;
     try std.testing.expect(tag.is("a"));
     try std.testing.expectEqualStrings("x", tag.attribute("href").?);
