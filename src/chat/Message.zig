@@ -58,6 +58,35 @@ pub fn isText(message: Message) bool {
         std.mem.eql(u8, message.message_type, "RichText/Html");
 }
 
+/// Writes `content` as plain text: tags dropped, the common entities decoded. Text messages pass through.
+pub fn writeText(message: Message, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (std.mem.eql(u8, message.message_type, "Text")) return writer.writeAll(message.content);
+
+    const entities = [_]struct { []const u8, []const u8 }{
+        .{ "&amp;", "&" },   .{ "&lt;", "<" },   .{ "&gt;", ">" },
+        .{ "&quot;", "\"" }, .{ "&#39;", "'" }, .{ "&nbsp;", " " },
+    };
+    var rest = message.content;
+    next: while (rest.len > 0) {
+        if (rest[0] == '<') {
+            const end = std.mem.indexOfScalar(u8, rest, '>') orelse return;
+            rest = rest[end + 1 ..];
+            continue;
+        }
+        if (rest[0] == '&') {
+            for (entities) |entity| {
+                if (std.mem.startsWith(u8, rest, entity[0])) {
+                    try writer.writeAll(entity[1]);
+                    rest = rest[entity[0].len..];
+                    continue :next;
+                }
+            }
+        }
+        try writer.writeByte(rest[0]);
+        rest = rest[1..];
+    }
+}
+
 /// Parses one messages response. `arena` owns everything returned.
 pub fn parsePage(arena: std.mem.Allocator, body: []const u8) ParseError!Page {
     const response = try std.json.parseFromSliceLeaky(Response, arena, body, .{
@@ -117,4 +146,36 @@ test "parsePage reports no backward link on the oldest page" {
     defer arena.deinit();
     const page = try parsePage(arena.allocator(), "{\"_metadata\":{\"backwardLink\":null},\"messages\":[]}");
     try std.testing.expectEqual(null, page.backward_link);
+}
+
+test "writeText strips tags and decodes entities from HTML content" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "RichText/Html",
+        .sender = "",
+        .sender_name = "",
+        .content = "<p>fake &lt;hello&gt; &amp; <b>bye</b>&nbsp;&#39;now&#39;</p>",
+        .arrived_at = "",
+        .deleted_at = null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try message.writeText(&out.writer);
+    try std.testing.expectEqualStrings("fake <hello> & bye 'now'", out.written());
+}
+
+test "writeText leaves plain Text content alone" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "Text",
+        .sender = "",
+        .sender_name = "",
+        .content = "fake <not a tag> &amp;",
+        .arrived_at = "",
+        .deleted_at = null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try message.writeText(&out.writer);
+    try std.testing.expectEqualStrings("fake <not a tag> &amp;", out.written());
 }
