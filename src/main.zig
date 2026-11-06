@@ -246,8 +246,8 @@ fn connect(
 }
 
 /// Reads one teams-zig keychain item through `/usr/bin/security`, which the token script also
-/// writes with. Items made by `security` trust it, so no build of teams-zig gets an access prompt, as
-/// it would be reading through Security.framework itself. Owned by the caller.
+/// writes with. Items made by `security` trust it, so no build of teams-zig gets an access
+/// prompt, as it would reading through Security.framework itself. Owned by the caller.
 fn readKeychain(
     gpa: std.mem.Allocator,
     io: Io,
