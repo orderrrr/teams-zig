@@ -2,6 +2,15 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.5.0: short times, unread, escaping
+
+- Times show in your local time and short: `14:05` for today, `Mon 14:05` for the past week, and `2026-10-12 14:05` before that. This applies to `chats`, `messages` and `watch`.
+- `teams-zig unread` shows what's new since you last read, in up to 10 unread chats among your 50 newest, the way `watch` prints it. It never marks anything as read.
+- A line someone typed that starts like Markdown (`#`, `>`, `- `, `1. `, `` ``` ``, `---`) gets a `\` in front, so it reads as typed rather than as a heading, quote or list.
+- Still read-only: nothing writes to Teams.
+
+Known limits: a typed `` ``` `` inside a code block still ends it early.
+
 ## 0.4.0 (M4): readable messages
 
 - Messages render as Markdown: bold, italic, strikethrough, inline code, links as `[text](url)`, quoted replies and other quotes as `> `, bulleted and numbered lists, fenced code blocks and headings. An emoji shows as itself; other images show as `[image]`.
