@@ -38,8 +38,8 @@ pub const Error = error{
     NotFound,
     /// Any other non-200 status; `response_status` has it.
     UnexpectedStatus,
-    /// A link from the service pointed outside the Chat Service. It isn't followed, so the token
-    /// stays with the Chat Service.
+    /// A link from the service pointed outside the Chat Service, or carried bytes that don't belong
+    /// on a request line. It isn't followed, so the token stays with the Chat Service.
     ForeignLink,
     ResponseTooLarge,
     /// Couldn't reach the Chat Service: the name lookup, the connection or TLS failed.

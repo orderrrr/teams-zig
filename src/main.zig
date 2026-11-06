@@ -238,7 +238,7 @@ fn reportError(
             try stderr.flush();
             return 1;
         },
-        error.ForeignLink => "the Chat Service linked to another host; not following it",
+        error.ForeignLink => "the Chat Service sent a link teams-zig won't follow",
         error.Redirected => "the Chat Service redirected; not following, so the token stays there",
         error.ConnectFailed => "couldn't reach the Chat Service; check the network",
         error.SendFailed => "couldn't send the request to the Chat Service; try again",
