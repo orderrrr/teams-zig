@@ -3,6 +3,7 @@ const Io = std.Io;
 const teams = @import("teams");
 const chat = teams.chat;
 const writeVisible = chat.text.writeVisible;
+const Seen = @import("Seen.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     var stderr_buffer: [1024]u8 = undefined;
@@ -652,6 +653,10 @@ fn reportError(
     try stderr.print("teams-zig: {s}\n", .{hint});
     try stderr.flush();
     return 1;
+}
+
+test {
+    _ = Seen;
 }
 
 test "Command.parse accepts the three commands and rejects anything else" {
