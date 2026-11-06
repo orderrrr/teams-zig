@@ -1,7 +1,8 @@
 #!/usr/bin/env fish
-# Signs in to Teams in a dedicated agent-browser profile and stores the skype token in the
-# login keychain for teams-zig. Token values are never printed.
+# Signs in to Teams in a dedicated agent-browser profile and stores the skype token and
+# Chat Service region in the login keychain for teams-zig. Token values are never printed.
 
+set -l service teams-zig
 set -l profile "$HOME/Library/Application Support/teams-zig/browser"
 set -l wait_seconds 300
 set -lx AGENT_BROWSER_SESSION teams-zig
@@ -50,4 +51,12 @@ or begin
     echo "teams-token: no known Chat Service region seen (got '$region')" >&2
     exit 1
 end
-echo "Found the skype token and region $region." >&2
+
+# -A lets teams-zig read the items without a prompt after every rebuild; see docs/PLAN.md M1.7.
+security add-generic-password -U -A -s $service -a skype-token -w $skype_token
+and security add-generic-password -U -A -s $service -a region -w $region
+or begin
+    echo "teams-token: couldn't write to the login keychain" >&2
+    exit 1
+end
+echo "Stored the skype token and region $region in the login keychain." >&2
