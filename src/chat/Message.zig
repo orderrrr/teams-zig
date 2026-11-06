@@ -59,11 +59,14 @@ pub fn isTextType(message_type: []const u8) bool {
 }
 
 /// Writes `content` for a terminal: HTML as Markdown (see `markdown.writeHtml`), plain `Text` as
-/// it is. Either way, control bytes are shown as `\xNN` (see `writeVisible`).
+/// it is but without `\r`. Either way, control bytes are shown as `\xNN` (see `writeVisible`).
 pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     std.debug.assert(message.isText());
     if (std.mem.eql(u8, message.message_type, "Text")) {
-        return text.writeVisible(writer, message.content);
+        // Drop `\r`, writing the pieces separately so no control character forms across it.
+        var pieces = std.mem.splitScalar(u8, message.content, '\r');
+        while (pieces.next()) |piece| try text.writeVisible(writer, piece);
+        return;
     }
 
     return markdown.writeHtml(writer, message.content);
@@ -261,4 +264,21 @@ test "writeText doesn't let a dropped tag join a C1 control back together" {
     try message.writeText(&out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\xc2\x9b") == null);
     try std.testing.expectEqualStrings("\\xc2\x9b[2J", out.written());
+}
+
+test "writeText drops carriage returns from plain Text without joining a C1 control" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "Text",
+        .sender = null,
+        .sender_name = null,
+        .content = "fake one\r\nfake two \xc2\r\x9b[2J",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try message.writeText(&out.writer);
+    try std.testing.expectEqualStrings("fake one\nfake two \\xc2\x9b[2J", out.written());
 }

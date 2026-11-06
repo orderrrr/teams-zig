@@ -747,12 +747,13 @@ fn parseCount(text: []const u8, count_max: u32) ?u32 {
     return count;
 }
 
+/// A header line with the time and sender, the body as Markdown, then a blank line.
 fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Error!void {
     const sender = message.sender_name orelse message.sender orelse "(unknown sender)";
     try writeVisible(stdout, message.arrived_at);
     try stdout.writeAll("  ");
     try writeVisible(stdout, sender);
-    try stdout.writeAll(": ");
+    try stdout.writeByte('\n');
 
     if (message.deleted_at_ms != null) {
         try stdout.writeAll("(deleted)");
@@ -763,7 +764,7 @@ fn printMessage(stdout: *Io.Writer, message: *const chat.Message) Io.Writer.Erro
         try writeVisible(stdout, message.message_type);
         try stdout.writeByte(']');
     }
-    try stdout.writeByte('\n');
+    try stdout.writeAll("\n\n");
 }
 
 /// Prints a one-line hint for every way a command can fail. The switch is exhaustive, so a new
@@ -907,6 +908,36 @@ test "watchErrorRetries waits out throttling and network failures, and stops on 
     try std.testing.expect(!watchErrorRetries(error.UnexpectedStatus, .forbidden));
     try std.testing.expect(!watchErrorRetries(error.TokenExpired, .unauthorized));
     try std.testing.expect(!watchErrorRetries(error.WriteFailed, null));
+}
+
+test "printMessage writes a header line, the body and a blank line" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    var message: chat.Message = .{
+        .id = "1",
+        .message_type = "RichText/Html",
+        .sender = "8:orgid:fake",
+        .sender_name = "Fake Person",
+        .content = "<p>fake one</p><p>fake <b>two</b></p>",
+        .arrived_at = "2026-11-06T10:00:00.000Z",
+        .deleted_at_ms = null,
+    };
+    try printMessage(&out.writer, &message);
+    message.sender_name = null;
+    message.deleted_at_ms = 1;
+    try printMessage(&out.writer, &message);
+
+    try std.testing.expectEqualStrings(
+        \\2026-11-06T10:00:00.000Z  Fake Person
+        \\fake one
+        \\fake **two**
+        \\
+        \\2026-11-06T10:00:00.000Z  8:orgid:fake
+        \\(deleted)
+        \\
+        \\
+    , out.written());
 }
 
 test "checkToken rejects line breaks" {
