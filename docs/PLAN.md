@@ -250,3 +250,12 @@ Asked for by the owner on 2026-11-06 as a polish pass with a review before M5 (s
 ### Out of the polish pass
 
 Anything that writes to Teams. `` ``` `` inside a code block still ends it early. Colours. `help`, which the usage text already covers.
+
+## Polish gate
+
+All six chunks done; live check (read-only, counts only) over 11 chats: every header in a short form, no ISO timestamps left, no `\x0d`, no leftover tags, fences paired; 28 typed line starts escaped (16 `* ` bullets, 12 numbered lines); `unread` agreed with the `*` count in `chats`.
+
+- **Round 1.** mr-review: the changelog claimed escaping for every message (plain `Text` and inline `*`/`_` aren't; now listed as known limits); `printMessagesAfter` had no test (added). STYLE 1.6: `parseIso`'s helpers carry its name. Tiger Style: `Command.run` went past 70 lines (the chats arm moved out), options structs for `short_time.write` (`Times`) and the date maths (`Date`), units last (`now_seconds`), compound conditions split, `@divFloor`/`@mod` and `s_per_min`, `textEscapeIndex` returns `?u32` with CommonMark's 9-digit cap, added asserts (whole-second zone offsets, date ranges, `unread`'s counts), an alias removed.
+- **Round 2.** mr-review: a test for the 9-digit cap, another alias, unsigned time parts. STYLE 5.4 over Tiger's else-if rule: the day prefix moved to `writeDay` with guard clauses, which satisfies both. Tiger Style: compound conditions in the escaping, qualifiers last (`at_day`), `parseIso` asserts its result, helpers split from `run` carry its name (`runChats`, `runUnread`), test constants in seconds.
+- **Round 3.** mr-review: `writeDay`'s comment read as "yesterday". STYLE 1.6: `writeDay`'s helpers carry its name. Tiger Style: the time is computed after the day is written, close to its use.
+- **Round 4:** all three reviews found nothing new. Gate passed. Polish pass resolved at 0.5.0.
