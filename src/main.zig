@@ -89,20 +89,20 @@ const message_count_default = 50;
 
 /// `chats` names 1:1 chats with up to one request each, all inside the watchdog's limit, so the
 /// list stays at one page of modest size.
-const conversation_count_max = 100;
+const conversation_count_limit = 100;
 
 /// At most this many 1:1 chats get a recent-messages lookup per run; at about a second each on a
 /// slow link, they stay inside the watchdog's 60 seconds. Chats past it show "(no topic)".
-const name_lookup_count_max = 40;
+const name_lookup_count_limit = 40;
 
 comptime {
-    std.debug.assert(conversation_count_max <= std.math.maxInt(u16));
-    std.debug.assert(name_lookup_count_max < command_seconds_max);
-    std.debug.assert(conversation_count_default <= conversation_count_max);
-    std.debug.assert(message_count_default <= message_count_max);
+    std.debug.assert(conversation_count_limit <= std.math.maxInt(u16));
+    std.debug.assert(name_lookup_count_limit < command_seconds_max);
+    std.debug.assert(conversation_count_default <= conversation_count_limit);
+    std.debug.assert(message_count_default <= message_count_limit);
 }
 
-const message_count_max = chat.Client.message_count_limit;
+const message_count_limit = chat.Client.message_count_limit;
 
 /// How far back `chats` looks for the other person's name in a 1:1 chat where you spoke last.
 const message_count_recent = 20;
@@ -152,7 +152,7 @@ const Command = union(enum) {
         if (std.mem.eql(u8, name, "chats")) {
             if (rest.len > 1) return null;
             if (rest.len == 0) return .{ .chats = conversation_count_default };
-            const count = parseCount(rest[0], conversation_count_max) orelse return null;
+            const count = parseCount(rest[0], conversation_count_limit) orelse return null;
             return .{ .chats = @intCast(count) };
         }
         if (std.mem.eql(u8, name, "messages")) {
@@ -160,7 +160,7 @@ const Command = union(enum) {
             if (rest.len > 2) return null;
             if (rest[0].len == 0) return null;
             const count = if (rest.len == 2)
-                parseCount(rest[1], message_count_max) orelse return null
+                parseCount(rest[1], message_count_limit) orelse return null
             else
                 message_count_default;
             return .{ .messages = .{ .conversation_id = rest[0], .count = count } };
@@ -369,7 +369,7 @@ fn nameSource(conversation: *const chat.Conversation, self_mri: []const u8) Name
 }
 
 /// The other person's name for each 1:1 chat in `conversations`, owned by `arena`; null where
-/// there's none to show. At most `name_lookup_count_max` chats get a lookup, one request each.
+/// there's none to show. At most `name_lookup_count_limit` chats get a lookup, one request each.
 fn otherPersonNames(
     client: *chat.Client,
     arena: std.mem.Allocator,
@@ -377,7 +377,7 @@ fn otherPersonNames(
     self_mri: []const u8,
 ) chat.Client.Error![]?[]const u8 {
     const names = try arena.alloc(?[]const u8, conversations.len);
-    var name_lookup_count_left: u32 = name_lookup_count_max;
+    var name_lookup_count_left: u32 = name_lookup_count_limit;
     for (conversations, names) |*conversation, *name| {
         name.* = switch (nameSource(conversation, self_mri)) {
             .none => null,
@@ -517,7 +517,7 @@ test "Command.parse accepts the three commands and rejects anything else" {
     const chats_ten = Command.parse(&.{ "teams-zig", "chats", "10" }).?;
     try std.testing.expectEqual(10, chats_ten.chats);
     const chats_max = Command.parse(&.{ "teams-zig", "chats", "100" }).?;
-    try std.testing.expectEqual(conversation_count_max, chats_max.chats);
+    try std.testing.expectEqual(conversation_count_limit, chats_max.chats);
 
     const messages = Command.parse(&.{ "teams-zig", "messages", "19:fake" }).?;
     try std.testing.expectEqualStrings("19:fake", messages.messages.conversation_id);
@@ -527,7 +527,7 @@ test "Command.parse accepts the three commands and rejects anything else" {
     const messages_one = Command.parse(&.{ "teams-zig", "messages", "19:fake", "1" }).?;
     try std.testing.expectEqual(1, messages_one.messages.count);
     const messages_max = Command.parse(&.{ "teams-zig", "messages", "19:fake", "12800" }).?;
-    try std.testing.expectEqual(message_count_max, messages_max.messages.count);
+    try std.testing.expectEqual(message_count_limit, messages_max.messages.count);
     const too_many = Command.parse(&.{ "teams-zig", "messages", "19:x", "12801" });
     try std.testing.expectEqual(null, too_many);
 
