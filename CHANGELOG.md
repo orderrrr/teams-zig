@@ -4,7 +4,7 @@ One entry per milestone. The version lives in `build.zig.zon`.
 
 ## 0.2.0 (M2): read-only improvements
 
-- `teams-zig chats` names the other person in 1:1 chats instead of `(no topic)`, using the last sender, or the chat's recent messages when you spoke last.
+- `teams-zig chats` names the other person in 1:1 chats instead of `(no topic)`, using the last sender, or the chat's recent messages when you spoke last. At most 40 chats get that recent-messages lookup per run, to stay inside the 60-second limit; any past that still show `(no topic)`.
 - `teams-zig chats [count]` (up to 100) and `teams-zig messages <id> [count]` choose how many to show; both default to 50.
 - Still read-only: nothing writes to Teams.
 
