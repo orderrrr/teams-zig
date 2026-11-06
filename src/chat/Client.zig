@@ -287,7 +287,7 @@ pub fn conversations(
 
     const path_prefix = "/users/ME/conversations?view=mychats&pageSize=";
     // Sized for the largest count the assert above allows, so the formatted path always fits.
-    const path_size_max = path_prefix.len + std.fmt.count("{d}", .{page_item_count_limit});
+    const path_size_max = comptime path_prefix.len + std.fmt.count("{d}", .{page_item_count_limit});
     var path_buffer: [path_size_max]u8 = undefined;
     const path_format = path_prefix ++ "{d}";
     const path = std.fmt.bufPrint(&path_buffer, path_format, .{conversation_count_max}) catch
