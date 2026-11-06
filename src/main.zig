@@ -173,8 +173,9 @@ const Command = union(enum) {
 };
 
 /// Ends the process if the Chat Service hasn't answered within `command_seconds_max`. std 0.17
-/// has no read timeout and ignores its connect timeout, and a stalled connect has been seen to
-/// hang indefinitely. Output time isn't counted: a slow pager reading the output is fine.
+/// has no read timeout and ignores its connect timeout, so a held connection (say, one a
+/// per-app firewall is waiting to approve) would hang indefinitely. Output time isn't counted: a
+/// slow pager reading the output is fine.
 fn watchdog(io: Io, requests_done: *const std.atomic.Value(bool)) void {
     io.sleep(.fromSeconds(command_seconds_max), .awake) catch |err| switch (err) {
         // Only cancellation ends the sleep early, and nothing cancels this detached thread; if
