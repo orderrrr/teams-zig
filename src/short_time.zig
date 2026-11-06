@@ -31,18 +31,18 @@ pub fn parseIso(text: []const u8) ?i64 {
     }
 
     // Every field is digits by now, so only the ranges can be wrong.
-    const year = number(text[0..4]);
-    const month = number(text[5..7]);
-    const day = number(text[8..10]);
-    const hour = number(text[11..13]);
-    const minute = number(text[14..16]);
-    const second = number(text[17..19]);
+    const year = parseIsoNumber(text[0..4]);
+    const month = parseIsoNumber(text[5..7]);
+    const day = parseIsoNumber(text[8..10]);
+    const hour = parseIsoNumber(text[11..13]);
+    const minute = parseIsoNumber(text[14..16]);
+    const second = parseIsoNumber(text[17..19]);
     if (year < year_min) return null;
     if (month < 1 or month > 12) return null;
     if (day < 1 or day > 31) return null;
     if (hour > 23 or minute > 59 or second > 60) return null;
 
-    const days = daysFromCivil(year, month, day);
+    const days = parseIsoDaysFromCivil(year, month, day);
     return days * std.time.s_per_day + hour * std.time.s_per_hour + minute * 60 + second;
 }
 
@@ -78,14 +78,14 @@ pub fn write(writer: *std.Io.Writer, at: i64, now: i64) std.Io.Writer.Error!void
 }
 
 /// Digits already checked: no sign, no overflow.
-fn number(digits: []const u8) i64 {
+fn parseIsoNumber(digits: []const u8) i64 {
     std.debug.assert(digits.len <= 4);
     return std.fmt.parseUnsigned(i64, digits, 10) catch unreachable;
 }
 
 /// Days from 1970-01-01 to a date in the proleptic Gregorian calendar (Howard Hinnant's
 /// `days_from_civil`). A day past the month's end, such as Feb 31, runs into the next month.
-fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
+fn parseIsoDaysFromCivil(year: i64, month: i64, day: i64) i64 {
     std.debug.assert(year >= year_min);
     // Years start in March, so the leap day falls at the end of one.
     const march_year = if (month <= 2) year - 1 else year;
