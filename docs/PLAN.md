@@ -222,6 +222,10 @@ Not done in M3: the self-chat row in `chats` stays as `notes (no topic) 48:notes
 
 **Round 5:** mr-review and STYLE.md found nothing. Tiger raised whether the call-history naming rule reaches a type's own methods (`Output.text`, `entity`, `tag`, `finish`, called only by `writeHtml`; `List.markerWidth`). Parked for the owner: the literal reading renames the type's whole interface.
 
+Owner decision: the call-history prefix is for helpers split out of a function; a type's methods driven from outside are its interface (STYLE 1.6, `a6702e6`).
+
+**Round 6:** all three reviews found nothing new under the amended rule. Gate passed. M4 resolved.
+
 Live after each round (read-only, counts only): about 505 messages across 11 chats (48:notes and the 10 newest) render with no `\x0d`, no raw control bytes and no leftover tags; code fences pair up.
 
 Decided along the way: compound conditions, aliases and flag parameters are refactored away rather than waived; the incremental compiler was tried at the owner's request and isn't usable on arm64 macOS with Zig 0.17 (it crashes, and the self-hosted backend emits a binary that won't run), so builds stay as they are (about 3.3 s per rebuild).
