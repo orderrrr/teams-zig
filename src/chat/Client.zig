@@ -136,17 +136,7 @@ pub fn get(client: *Client, path: []const u8) Error![]const u8 {
 pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     // Cleared first, so a status only ever describes this request.
     client.response_status = null;
-    const base = client.region.baseUrl();
-    if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
-    if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
-
-    // std writes the path and query onto the request line as given, so a link carrying spaces,
-    // control bytes or non-ASCII could add headers or a second request.
-    for (url) |byte| {
-        if (byte <= ' ') return error.ForeignLink;
-        if (byte >= 0x7f) return error.ForeignLink;
-    }
-    const uri = std.Uri.parse(url) catch return error.ForeignLink;
+    const uri = try checkLink(client.region, url);
     var request = client.http.request(.GET, uri, .{
         .version = .@"HTTP/1.1",
         .handle_continue = true,
@@ -202,6 +192,24 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
 
     try bodyEndCheck(request.reader.state);
     return body.buffered();
+}
+
+/// Parses `url` if it's safe to send the token to: under the region's base URL, and free of
+/// bytes that don't belong on a request line.
+fn checkLink(region: Region, url: []const u8) error{ForeignLink}!std.Uri {
+    const base = region.baseUrl();
+    if (!std.mem.startsWith(u8, url, base)) return error.ForeignLink;
+    if (!std.mem.startsWith(u8, url[base.len..], "/")) return error.ForeignLink;
+
+    // std writes the path and query onto the request line as given, so a link carrying spaces,
+    // control bytes or non-ASCII could add headers or a second request.
+    for (url) |byte| {
+        if (byte <= ' ') return error.ForeignLink;
+        if (byte >= 0x7f) return error.ForeignLink;
+    }
+    // The checks above pin the scheme and authority to the base URL's, and std.Uri.parse only
+    // fails on those two parts, so it can't fail here.
+    return std.Uri.parse(url) catch unreachable;
 }
 
 /// After a clean read, says whether the whole body arrived. A clean close mid-body reads as the
@@ -510,4 +518,12 @@ test "bodyEndCheck catches a body short of its content length" {
     try bodyEndCheck(.body_none);
     const short = bodyEndCheck(.{ .body_remaining_content_length = 10 });
     try std.testing.expectError(error.ConnectionDropped, short);
+}
+
+test "checkLink parses a link under the base URL" {
+    const link = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/messages?startTime=1";
+    const uri = try checkLink(.emea, link);
+    try std.testing.expectEqualStrings("https", uri.scheme);
+    const host = uri.host.?.percent_encoded;
+    try std.testing.expectEqualStrings("emea.ng.msg.teams.microsoft.com", host);
 }
