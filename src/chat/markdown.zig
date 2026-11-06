@@ -496,7 +496,7 @@ const Output = struct {
 /// headings, bullets, rules and underlines (a word of one repeated `#`, `-`, `*`, `+`, `_` or
 /// `=`), and numbered items (`1.`, `2)`). Over-escaping is harmless: `\` before punctuation
 /// reads as the punctuation.
-fn textEscapeIndex(word: []const u8) ?usize {
+fn textEscapeIndex(word: []const u8) ?u32 {
     std.debug.assert(word.len > 0);
     if (word[0] == '>') return 0;
     if (std.mem.startsWith(u8, word, "```")) return 0;
@@ -508,8 +508,12 @@ fn textEscapeIndex(word: []const u8) ?usize {
     const digit_count = std.mem.indexOfNone(u8, word, "0123456789") orelse return null;
     if (digit_count == 0) return null;
     if (digit_count + 1 != word.len) return null;
-    if (word[digit_count] != '.' and word[digit_count] != ')') return null;
-    return digit_count;
+    // A number marker is short; anything this long is just text.
+    if (digit_count > 9) return null;
+    const marker = word[digit_count];
+    if (marker == '.') return @intCast(digit_count);
+    if (marker == ')') return @intCast(digit_count);
+    return null;
 }
 
 /// The Markdown level of `h1`, `h2` or `h3`, or null for any other tag. Smaller headings are

@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
     const zone = core_foundation.TimeZone.copySystem();
     defer core_foundation.release(zone);
 
-    var clock: Clock = .{ .zone = zone, .now = Io.Clock.real.now(init.io).toSeconds() };
+    var clock: Clock = .{ .zone = zone, .now_seconds = Io.Clock.real.now(init.io).toSeconds() };
     requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
     command.run(&client, init.io, &clock, stdout, stderr, &requests_started_at) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
@@ -153,8 +153,8 @@ const requests_seconds_max = 60;
 /// What times are shown relative to: your time zone, and now.
 const Clock = struct {
     zone: *const core_foundation.TimeZone,
-    /// Seconds since 1970 GMT. `watch` moves it on with every poll.
-    now: i64,
+    /// Since 1970 GMT. `watch` moves it on with every poll.
+    now_seconds: i64,
 
     /// A service timestamp in its short local form (see `short_time`), written into `buffer`;
     /// null if `timestamp` isn't one.
@@ -163,12 +163,15 @@ const Clock = struct {
         buffer: *[short_time.width_max]u8,
         timestamp: []const u8,
     ) ?[]const u8 {
-        const at = short_time.parseIso(timestamp) orelse return null;
-        const at_local = at + clock.zone.secondsFromGmt(at);
-        const now_local = clock.now + clock.zone.secondsFromGmt(clock.now);
+        const at_seconds = short_time.parseIso(timestamp) orelse return null;
+        const now_seconds = clock.now_seconds;
+        const times: short_time.Times = .{
+            .at_seconds = at_seconds + clock.zone.secondsFromGmt(at_seconds),
+            .now_seconds = now_seconds + clock.zone.secondsFromGmt(now_seconds),
+        };
         var writer: Io.Writer = .fixed(buffer);
         // `width_max` is the widest form, so the buffer never fills.
-        short_time.write(&writer, at_local, now_local) catch unreachable;
+        short_time.write(&writer, times) catch unreachable;
         return writer.buffered();
     }
 };
@@ -288,24 +291,7 @@ const Command = union(enum) {
                 try stdout.writeAll(">\n");
             },
             .chats => |conversation_count| {
-                const user = try client.whoami();
-                defer user.deinit();
-
-                const list = try client.conversations(conversation_count);
-                defer list.deinit();
-
-                // Holds the 1:1 chat names; freed with the command.
-                var names_arena: std.heap.ArenaAllocator = .init(client.gpa);
-                defer names_arena.deinit();
-
-                const arena = names_arena.allocator();
-                const names = try otherPersonNames(client, arena, list.items, user.mri);
-                started_at.store(requests_idle, .release);
-
-                for (list.items, names) |*conversation, name| {
-                    const unread = conversation.isUnread(user.mri);
-                    try printChat(stdout, clock, conversation, name, unread);
-                }
+                try printChats(client, clock, stdout, started_at, conversation_count);
             },
             .messages => |messages| {
                 // Holds a looked-up chat's id; freed with the command.
@@ -338,6 +324,34 @@ const Command = union(enum) {
         }
     }
 };
+
+/// Lists your `conversation_count` newest chats, one `printChat` row each.
+fn printChats(
+    client: *chat.Client,
+    clock: *const Clock,
+    stdout: *Io.Writer,
+    started_at: *std.atomic.Value(i64),
+    conversation_count: u16,
+) RunError!void {
+    const user = try client.whoami();
+    defer user.deinit();
+
+    const list = try client.conversations(conversation_count);
+    defer list.deinit();
+
+    // Holds the 1:1 chat names; freed with the command.
+    var names_arena: std.heap.ArenaAllocator = .init(client.gpa);
+    defer names_arena.deinit();
+
+    const arena = names_arena.allocator();
+    const names = try otherPersonNames(client, arena, list.items, user.mri);
+    started_at.store(requests_idle, .release);
+
+    for (list.items, names) |*conversation, name| {
+        const unread = conversation.isUnread(user.mri);
+        try printChat(stdout, clock, conversation, name, unread);
+    }
+}
 
 /// Ends the process if a batch of requests hasn't been answered within `requests_seconds_max`.
 /// std 0.17 has no read timeout and ignores its connect timeout, so a held connection (say, one
@@ -520,7 +534,7 @@ fn watch(
         };
 
         started_at.store(Io.Clock.awake.now(io).toSeconds(), .release);
-        clock.now = Io.Clock.real.now(io).toSeconds();
+        clock.now_seconds = Io.Clock.real.now(io).toSeconds();
         if (pollChats(client, clock, &seen, user.mri, stdout)) {
             pause_seconds = watch_poll_seconds;
         } else |err| {
@@ -652,13 +666,21 @@ fn printUnread(
         reads_count += 1;
     }
     started_at.store(requests_idle, .release);
+    std.debug.assert(reads_count <= unread_count);
+    std.debug.assert(reads_count <= unread_read_count_limit);
 
     if (unread_count == 0) return stdout.writeAll("No unread messages.\n");
     for (reads_buffer[0..reads_count]) |*read| {
         // isUnread holds only with a read marker.
         const mark = read.conversation.read_up_to_id.?;
-        const items = read.recent.items;
-        try printMessagesAfter(stdout, clock, read.conversation, user.mri, items, mark);
+        try printMessagesAfter(
+            stdout,
+            clock,
+            read.conversation,
+            user.mri,
+            read.recent.items,
+            mark,
+        );
     }
     if (unread_count > reads_count) {
         try stdout.print("{d} more unread chats not shown.\n", .{unread_count - reads_count});
@@ -1042,7 +1064,7 @@ test "printMessage starts each message on its time and sender line" {
     defer core_foundation.release(zone);
 
     // 2026-11-06T12:00:00Z, so the first message is today and the second three days back.
-    const clock: Clock = .{ .zone = zone, .now = 1_793_966_400 };
+    const clock: Clock = .{ .zone = zone, .now_seconds = 1_793_966_400 };
 
     var message: chat.Message = .{
         .id = "1",
@@ -1077,7 +1099,7 @@ test "printMessagesAfter prints text messages past the mark, oldest first, after
     const zone = try core_foundation.TimeZone.createFixed(0);
     defer core_foundation.release(zone);
 
-    const clock: Clock = .{ .zone = zone, .now = 1_793_966_400 };
+    const clock: Clock = .{ .zone = zone, .now_seconds = 1_793_966_400 };
     const self_mri = "8:orgid:fake-self";
     const conversation: chat.Conversation = .{
         .id = "19:fake-group@thread.v2",

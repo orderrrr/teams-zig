@@ -91,6 +91,7 @@ pub const TimeZone = opaque {
         const offset = CFTimeZoneGetSecondsFromGMT(zone, absolute);
         // Real zones are within a day of GMT, in whole seconds.
         std.debug.assert(@abs(offset) < std.time.s_per_day);
+        std.debug.assert(@floor(offset) == offset);
         return @intFromFloat(offset);
     }
 };
