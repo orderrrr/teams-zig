@@ -20,6 +20,12 @@ last_message_at: ?[]const u8,
 last_sender: ?[]const u8,
 /// The last writer's display name; null in the same cases, or when the service sends none.
 last_sender_name: ?[]const u8,
+/// The last user-written message's id, which grows with time; null in the same cases as
+/// `last_sender`, or when it isn't a number.
+last_message_id: ?u64,
+/// The id of the newest message you've read here (from `consumptionhorizon`); null when the
+/// service doesn't say.
+read_up_to_id: ?u64,
 
 pub const Kind = enum { chat, meeting, space, topic, notes, other };
 
@@ -35,12 +41,17 @@ const Response = struct {
     },
 
     const LastMessage = struct {
+        id: ?[]const u8 = null,
         messagetype: ?[]const u8 = null,
         from: ?[]const u8 = null,
         imdisplayname: ?[]const u8 = null,
     };
 
-    const Properties = struct { lastimreceivedtime: ?[]const u8 = null };
+    const Properties = struct {
+        lastimreceivedtime: ?[]const u8 = null,
+        /// `<last read message id>;<time in ms>;<client message id>`.
+        consumptionhorizon: ?[]const u8 = null,
+    };
 
     const ThreadProperties = struct {
         threadType: ?[]const u8 = null,
@@ -51,6 +62,18 @@ const Response = struct {
 /// 1:1 chats have ids of the form `19:<uuid>_<uuid>@unq.gbl.spaces`; group chats don't.
 pub fn isOneToOne(conversation: *const Conversation) bool {
     return std.mem.endsWith(u8, conversation.id, "@unq.gbl.spaces");
+}
+
+/// Whether someone else wrote here after the newest message you've read. Your own messages
+/// don't move your read marker, so a chat where you wrote last isn't unread. Unknown counts as
+/// read.
+pub fn isUnread(conversation: *const Conversation, self_mri: []const u8) bool {
+    std.debug.assert(self_mri.len > 0);
+    const last_sender = conversation.last_sender orelse return false;
+    if (std.mem.eql(u8, last_sender, self_mri)) return false;
+    const last_message_id = conversation.last_message_id orelse return false;
+    const read_up_to_id = conversation.read_up_to_id orelse return false;
+    return last_message_id > read_up_to_id;
 }
 
 /// Parses a conversations response, leaving out system streams (notifications, mentions, ...).
@@ -83,11 +106,24 @@ pub fn parseList(gpa: std.mem.Allocator, body: []const u8) json.ParseError!List 
             .last_message_at = properties.lastimreceivedtime,
             .last_sender = if (last_message.from) |from| mri.fromContactUrl(from) else null,
             .last_sender_name = last_message.imdisplayname,
+            .last_message_id = if (last_message.id) |id| idNumber(id) else null,
+            .read_up_to_id = if (properties.consumptionhorizon) |line| horizonId(line) else null,
         });
     }
 
     list.items = items.items;
     return list;
+}
+
+/// A message id as a number, or null if it isn't one.
+fn idNumber(id: []const u8) ?u64 {
+    return std.fmt.parseInt(u64, id, 10) catch null;
+}
+
+/// The last-read message id at the start of a `consumptionhorizon`, or null.
+fn horizonId(horizon: []const u8) ?u64 {
+    const end = std.mem.indexOfScalar(u8, horizon, ';') orelse return null;
+    return idNumber(horizon[0..end]);
 }
 
 /// Null for system streams, which every `streamof*` type except the self-chat is.
@@ -157,6 +193,8 @@ test "isOneToOne tells 1:1 chats from group chats" {
         .last_message_at = null,
         .last_sender = null,
         .last_sender_name = null,
+        .last_message_id = null,
+        .read_up_to_id = null,
     };
     try std.testing.expect(conversation.isOneToOne());
 
@@ -196,4 +234,54 @@ test "parseList ignores a last message without a message type" {
         try std.testing.expectEqual(null, conversation.last_sender);
         try std.testing.expectEqual(null, conversation.last_sender_name);
     }
+}
+
+test "parseList reads the last message id and the read marker" {
+    const body =
+        \\{"conversations":[
+        \\ {"id":"19:fake-a_fake-b@unq.gbl.spaces","threadProperties":{"threadType":"chat"},
+        \\  "properties":{"consumptionhorizon":"1000;1000;42"},
+        \\  "lastMessage":{"id":"2000","messagetype":"Text",
+        \\   "from":"https://x/v1/users/ME/contacts/8:orgid:fake-b"}},
+        \\ {"id":"19:fake-a_fake-c@unq.gbl.spaces","threadProperties":{"threadType":"chat"},
+        \\  "properties":{"consumptionhorizon":"fake"},
+        \\  "lastMessage":{"id":"fake","messagetype":"Text"}}]}
+    ;
+    const list = try parseList(std.testing.allocator, body);
+    defer list.deinit();
+
+    try std.testing.expectEqual(2000, list.items[0].last_message_id.?);
+    try std.testing.expectEqual(1000, list.items[0].read_up_to_id.?);
+    try std.testing.expectEqual(null, list.items[1].last_message_id);
+    try std.testing.expectEqual(null, list.items[1].read_up_to_id);
+}
+
+test "isUnread needs someone else's message past the read marker" {
+    const self_mri = "8:orgid:fake-self";
+    var conversation: Conversation = .{
+        .id = "19:fake-self_fake-other@unq.gbl.spaces",
+        .kind = .chat,
+        .topic = null,
+        .last_message_at = null,
+        .last_sender = "8:orgid:fake-other",
+        .last_sender_name = null,
+        .last_message_id = 2000,
+        .read_up_to_id = 1000,
+    };
+    try std.testing.expect(conversation.isUnread(self_mri));
+
+    conversation.read_up_to_id = 2000;
+    try std.testing.expect(!conversation.isUnread(self_mri));
+
+    conversation.read_up_to_id = 1000;
+    conversation.last_sender = self_mri;
+    try std.testing.expect(!conversation.isUnread(self_mri));
+
+    conversation.last_sender = "8:orgid:fake-other";
+    conversation.read_up_to_id = null;
+    try std.testing.expect(!conversation.isUnread(self_mri));
+
+    conversation.read_up_to_id = 1000;
+    conversation.last_message_id = null;
+    try std.testing.expect(!conversation.isUnread(self_mri));
 }

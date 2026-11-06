@@ -687,6 +687,8 @@ test "matchChat matches whole names ignoring case, and reports several" {
         .last_message_at = null,
         .last_sender = null,
         .last_sender_name = null,
+        .last_message_id = null,
+        .read_up_to_id = null,
     };
     var conversations: [3]chat.Conversation = @splat(template);
     conversations[1].topic = "Fake Standup";
@@ -750,6 +752,8 @@ test "nameSource uses the last writer when it isn't you, and asks for a lookup w
         .last_message_at = null,
         .last_sender = "8:orgid:fake-other",
         .last_sender_name = "Fake Other",
+        .last_message_id = null,
+        .read_up_to_id = null,
     };
     try std.testing.expectEqualStrings("Fake Other", nameSource(&conversation, self_mri).known);
 
