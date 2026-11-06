@@ -76,14 +76,16 @@ pub fn writeText(message: *const Message, writer: *std.Io.Writer) std.Io.Writer.
         if (rest[0] == '&') {
             for (entities) |entity| {
                 if (std.mem.startsWith(u8, rest, entity[0])) {
-                    try writer.writeAll(entity[1]);
+                    // Advance before writing, so the progress check holds if the write fails.
                     rest = rest[entity[0].len..];
+                    try writer.writeAll(entity[1]);
                     continue :next;
                 }
             }
         }
-        try writer.writeByte(rest[0]);
+        const byte = rest[0];
         rest = rest[1..];
+        try writer.writeByte(byte);
     }
 }
 
@@ -215,4 +217,19 @@ test "parsePage fails on a message without an arrival time" {
 
     const body = "{\"_metadata\":{},\"messages\":[{\"id\":\"1\",\"messagetype\":\"Text\"}]}";
     try std.testing.expectError(error.MissingField, parsePage(arena.allocator(), body));
+}
+
+test "writeText reports a failing writer instead of tripping its progress check" {
+    const message: Message = .{
+        .id = "1",
+        .message_type = "RichText/Html",
+        .sender = null,
+        .sender_name = null,
+        .content = "<p>fake &amp; more text than fits</p>",
+        .arrived_at = "",
+        .deleted_at_ms = null,
+    };
+    var buffer: [4]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try std.testing.expectError(error.WriteFailed, message.writeText(&writer));
 }
