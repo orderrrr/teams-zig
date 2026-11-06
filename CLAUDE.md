@@ -28,7 +28,7 @@ Tokens, cookies and refresh tokens never go in the repo, in test fixtures, in lo
 
 ## Milestone gate
 
-A milestone (M1, M2, …) isn't resolved until it has passed this gate. Run it after the last chunk, before resolving the ticket.
+A milestone (M1, M2, …) isn't resolved until it has passed this gate. Run it after the last chunk, before resolving the milestone.
 
 1. Run three reviews of all the milestone's code, the two style passes in separate subagents:
    - the `mr-review` skill, invoked each round (not run from memory) with its full checklist;
@@ -36,5 +36,5 @@ A milestone (M1, M2, …) isn't resolved until it has passed this gate. Run it a
    - a pass against `docs/TIGER_STYLE.md` only (following `STYLE.md` where it explicitly overrides Tiger Style).
 2. Every finding that a rule written in `STYLE.md` or `TIGER_STYLE.md` covers is approved in advance: apply it without asking. Don't waive a written rule because it seems not to fit. If it doesn't make sense in context, treat that as a sign the code is wrong somewhere else, and refactor until the rule fits.
 3. Everything else (design decisions, `mr-review` findings no guide rule covers, anything that changes behaviour or the plan) goes to me one finding at a time in the milestone report.
-4. Apply the fixes in chunks, committed like any other chunk, then report what was done. Record the gate's findings and fixes on the milestone's ticket.
+4. Apply the fixes in chunks, committed like any other chunk, then report what was done. Record the gate's findings and fixes in a `## M<n> gate` section of `docs/PLAN.md`.
 5. The gate's own fixes are code changes too: run all three reviews again on them, and repeat until a round finds nothing new. Only then resolve the milestone.

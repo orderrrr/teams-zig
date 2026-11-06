@@ -109,7 +109,7 @@ not:   src/types/      src/helpers/          src/services/
 
 ### 1.6 — Function names are camelCase; acronyms are words
 
-Functions are `camelCase`, as in `std`: `parseList`, `writeText`. Acronyms are written as words, as `std.Uri` does: `getUrl`, not `getURL`. Variables and fields stay `snake_case`.
+Functions are `camelCase`, as in `std`: `parseList`, `writeText`. Acronyms are written as words, as `std.Uri` does: `getUrl`, not `getURL`. Variables and fields stay `snake_case`, except fields that mirror an external format's keys (a private struct `std.json` parses into must use the JSON key names), which convert to `snake_case` types at the boundary.
 
 > Overrides Tiger Style's `snake_case` rule for functions and its acronym capitalization rule. The trade: our code reads the same as the `std` calls it sits beside.
 
