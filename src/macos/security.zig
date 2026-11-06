@@ -8,7 +8,6 @@ pub const Status = enum(i32) {
     success = 0,
     user_canceled = -128,
     auth_failed = -25293,
-    duplicate_item = -25299,
     item_not_found = -25300,
     interaction_not_allowed = -25308,
     _,

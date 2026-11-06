@@ -24,9 +24,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer client.deinit();
 
     // Started after connect so a keychain unlock dialog (security shows one when the keychain is
-    // locked) can take as long as it needs. Without a watchdog
-    // a stalled request would hang forever; if the thread can't start, the command still runs,
-    // just unbounded.
+    // locked) can take as long as it needs. Without a watchdog a stalled request would hang
+    // forever; if the thread can't start, the command still runs, just unbounded.
     const spawn_config: std.Thread.SpawnConfig = .{
         .stack_size = std.Thread.SpawnConfig.default_stack_size,
         .allocator = null,
@@ -72,10 +71,10 @@ const usage =
 /// Shared with scripts/teams-token.fish, which writes these items.
 const keychain_service = "teams-zig";
 
-/// Apple's keychain tool, which reads the items without a prompt (see `readKeychain`).
+/// Apple's keychain tool, which reads the items without an access prompt (see `readKeychain`).
 const security_path = "/usr/bin/security";
 
-/// security's exit status for errSecItemNotFound.
+/// security exits with the low byte of the OSStatus: errSecItemNotFound (-25300) becomes 44.
 const security_exit_item_not_found = 44;
 
 /// Far larger than any token; a bigger value means something else is stored there.
@@ -247,7 +246,7 @@ fn connect(
 }
 
 /// Reads one teams-zig keychain item through `/usr/bin/security`, which the token script also
-/// writes with. Items made by `security` trust it, so no build of teams-zig is ever prompted, as
+/// writes with. Items made by `security` trust it, so no build of teams-zig gets an access prompt, as
 /// it would be reading through Security.framework itself. Owned by the caller.
 fn readKeychain(
     gpa: std.mem.Allocator,
