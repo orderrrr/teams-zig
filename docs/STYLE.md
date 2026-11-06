@@ -113,6 +113,10 @@ Functions are `camelCase`, as in `std`: `parseList`, `writeText`. Acronyms are w
 
 > Overrides Tiger Style's `snake_case` rule for functions and its acronym capitalization rule. The trade: our code reads the same as the `std` calls it sits beside.
 
+Tiger Style's call-history prefix (a helper called from one function carries that function's name, as in `flushSpacing` under `flush`) applies to helpers split out of a function. A type's methods are its interface, named for what they do, even when only one driver calls them: `Output.text`, not `Output.writeHtmlText`.
+
+> Narrows Tiger Style's helper-naming rule. The trade: names stay short and say what a method does, while a helper still shows the function it came from.
+
 ---
 
 ## Section 2 — Structs & Responsibility
