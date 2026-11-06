@@ -23,7 +23,8 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer client.deinit();
 
-    // Started after connect so a keychain prompt can take as long as it needs. Without a watchdog
+    // Started after connect so a keychain unlock dialog (security shows one when the keychain is
+    // locked) can take as long as it needs. Without a watchdog
     // a stalled request would hang forever; if the thread can't start, the command still runs,
     // just unbounded.
     const spawn_config: std.Thread.SpawnConfig = .{
@@ -74,6 +75,9 @@ const keychain_service = "teams-zig";
 /// Apple's keychain tool, which reads the items without a prompt (see `readKeychain`).
 const security_path = "/usr/bin/security";
 
+/// security's exit status for errSecItemNotFound.
+const security_exit_item_not_found = 44;
+
 /// Far larger than any token; a bigger value means something else is stored there.
 const keychain_value_size_max = 64 * 1024;
 
@@ -94,13 +98,10 @@ const command_seconds_max = 60;
 const timestamp_width = "2026-11-01T10:00:00.000Z".len;
 
 /// Failures reading the keychain or starting the client.
-const ConnectError = error{
-    ItemNotFound,
-    KeychainReadFailed,
-    OutOfMemory,
-    UnknownRegion,
-    InvalidToken,
-};
+const ConnectError = KeychainReadError || error{ UnknownRegion, InvalidToken };
+
+/// Failures reading a keychain item through `security`.
+const KeychainReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory };
 
 /// Failures running a command: the Chat Service's, or writing the output.
 const RunError = chat.Client.Error || Io.Writer.Error;
@@ -252,7 +253,7 @@ fn readKeychain(
     gpa: std.mem.Allocator,
     io: Io,
     account: []const u8,
-) error{ ItemNotFound, KeychainReadFailed, OutOfMemory }![]u8 {
+) KeychainReadError![]u8 {
     std.debug.assert(account.len > 0);
     const result = std.process.run(gpa, io, .{
         .exe = .detect,
@@ -281,8 +282,7 @@ fn readKeychain(
     switch (result.term) {
         .exited => |code| switch (code) {
             0 => {},
-            // security's exit status for errSecItemNotFound.
-            44 => return error.ItemNotFound,
+            security_exit_item_not_found => return error.ItemNotFound,
             else => return error.KeychainReadFailed,
         },
         else => return error.KeychainReadFailed,
@@ -333,7 +333,8 @@ fn reportError(
         error.InvalidToken => "the token contains a line break; " ++ rerun_script,
         error.UnknownRegion => "the region is missing or unknown; " ++ rerun_script ++
             " (in test mode, set " ++ region_variable ++ ")",
-        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++ security_path,
+        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++ security_path ++
+            "; is the keychain locked?",
         error.OutOfMemory => "out of memory",
         error.TokenExpired => "the skype token has expired; " ++ rerun_script,
         error.NotFound => "no conversation with that id, or it isn't yours",
