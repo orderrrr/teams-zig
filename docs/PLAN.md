@@ -147,3 +147,13 @@ Added at the owner's request before watch: choose a chat by its exact name.
 ### Out of M3
 
 Sending or any other write. Push notifications through an endpoint subscription (registering one is a write). Search. Desktop notifications.
+
+## M4: readable messages (decided, not yet planned)
+
+Decided by the owner on 2026-11-06, after `messages 48:notes` printed `\x0d` and lost its line breaks. The detailed chunk plan comes after M3 and needs approval.
+
+- `RichText/Html` content renders as Markdown instead of having its tags stripped. `<b>`/`<strong>` → `**`, `<i>`/`<em>` → `_`, `<s>` → `~~`, `<code>` → `` ` ``, `<pre>`/code blocks → fenced blocks, `<a href>` → `[text](url)`, lists → `- `/`1. `, `<blockquote>` → `> `, `<p>`/`<br>`/`<div>` → line breaks. The HTML's own whitespace collapses and `\r` is dropped. Underline becomes plain text and emoji images use their alt text.
+- Layout: a header line per message (time and sender), then the body, then a blank line between messages. Bodies aren't indented, since an indent means a code block in Markdown.
+- Literal `*` and `_` in typed text aren't escaped at first.
+- M3 stays as approved: `watch` prints through today's `writeText` until M4.
+- No JSON or HTML output; Markdown is the format.
