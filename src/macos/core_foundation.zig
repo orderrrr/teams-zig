@@ -1,5 +1,5 @@
-//! The slice of CoreFoundation the keychain needs, with Zig-shaped helpers on top.
-//! Every value a `create` method returns is owned by the caller: pass it to `release`.
+//! The slice of CoreFoundation the keychain and local times need, with Zig-shaped helpers on top.
+//! Every value a `create` or `copy` method returns is owned by the caller: pass it to `release`.
 
 const std = @import("std");
 
@@ -70,6 +70,22 @@ pub const Dictionary = opaque {
     }
 };
 
+pub const TimeZone = opaque {
+    /// The time zone set in System Settings, as it was when first asked for in this process.
+    pub fn copySystem() *const TimeZone {
+        return CFTimeZoneCopySystem();
+    }
+
+    /// The zone's offset from GMT at `unix_seconds`, daylight saving included.
+    pub fn secondsFromGmt(zone: *const TimeZone, unix_seconds: i64) i32 {
+        const absolute: f64 = @floatFromInt(unix_seconds - absolute_time_unix_seconds);
+        const offset = CFTimeZoneGetSecondsFromGMT(zone, absolute);
+        // Real zones are within a day of GMT, in whole seconds.
+        std.debug.assert(@abs(offset) < std.time.s_per_day);
+        return @intFromFloat(offset);
+    }
+};
+
 pub const DictionaryKeyCallBacks = extern struct {
     version: Index,
     retain: ?*const anyopaque,
@@ -93,6 +109,9 @@ pub fn release(object: *const anyopaque) void {
 
 const string_encoding_utf8: u32 = 0x08000100;
 
+/// CoreFoundation counts time from 2001-01-01 GMT.
+const absolute_time_unix_seconds = 978307200;
+
 pub extern const kCFBooleanTrue: *const Boolean;
 pub extern const kCFTypeDictionaryKeyCallBacks: DictionaryKeyCallBacks;
 pub extern const kCFTypeDictionaryValueCallBacks: DictionaryValueCallBacks;
@@ -112,6 +131,8 @@ extern fn CFDataCreate(
 ) ?*const Data;
 extern fn CFDataGetBytePtr(data: *const Data) ?[*]const u8;
 extern fn CFDataGetLength(data: *const Data) Index;
+extern fn CFTimeZoneCopySystem() *const TimeZone;
+extern fn CFTimeZoneGetSecondsFromGMT(zone: *const TimeZone, at: f64) f64;
 extern fn CFDictionaryCreate(
     allocator: ?*const Allocator,
     keys: [*]const *const anyopaque,
@@ -147,4 +168,13 @@ test "empty data has no bytes" {
     defer release(data);
 
     try std.testing.expectEqual(0, data.bytes().len);
+}
+
+test "the system time zone has an offset from GMT" {
+    const zone = TimeZone.copySystem();
+    defer release(zone);
+
+    // Any real zone is within 14 hours of GMT.
+    const offset = zone.secondsFromGmt(1_700_000_000);
+    try std.testing.expect(@abs(offset) <= 14 * std.time.s_per_hour);
 }
