@@ -3,6 +3,7 @@
 const Client = @This();
 
 const std = @import("std");
+const Conversation = @import("Conversation.zig");
 const User = @import("User.zig");
 
 allocator: std.mem.Allocator,
@@ -62,6 +63,17 @@ pub fn whoami(client: *Client) (Error || User.ParseError)!User {
     const body = try client.get("/users/ME/properties");
     defer client.allocator.free(body);
     return User.parse(client.allocator, body);
+}
+
+/// Returns your most recent conversations, newest first, without system streams.
+pub fn chats(client: *Client, page_size: u16) (Error || Conversation.ParseError)!Conversation.List {
+    std.debug.assert(page_size > 0);
+    var path_buffer: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "/users/ME/conversations?view=mychats&pageSize={d}", .{page_size}) catch
+        unreachable;
+    const body = try client.get(path);
+    defer client.allocator.free(body);
+    return Conversation.parseList(client.allocator, body);
 }
 
 fn url(client: *const Client, path: []const u8) error{OutOfMemory}![]u8 {
