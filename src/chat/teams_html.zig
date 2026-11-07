@@ -271,10 +271,12 @@ const Inline = struct {
             state.index += run_len;
             return true;
         };
+        std.debug.assert(close_start > run_len);
+        std.debug.assert(close_start + run_len <= text.len);
         try state.writer.writeAll("<code>");
         try writeEscaped(state.writer, nextCodeTrim(text[run_len..close_start]));
         try state.writer.writeAll("</code>");
-        state.index += @intCast(close_start + run_len);
+        state.index += close_start + run_len;
         return true;
     }
 
@@ -288,10 +290,16 @@ const Inline = struct {
         std.debug.assert(std.mem.indexOfNone(u8, text[0..run_len], "`") == null);
         if (run_len < text.len) std.debug.assert(text[run_len] != '`');
         var search_start: u32 = run_len;
-        while (std.mem.indexOfScalarPos(u8, text, search_start, '`')) |candidate| {
-            const candidate_end = std.mem.indexOfNonePos(u8, text, candidate, "`") orelse text.len;
-            if (candidate_end - candidate == run_len) return @intCast(candidate);
-            search_start = @intCast(candidate_end);
+        while (std.mem.indexOfScalarPos(u8, text, search_start, '`')) |candidate_index| {
+            const candidate: u32 = @intCast(candidate_index);
+            const candidate_end: u32 = @intCast(
+                std.mem.indexOfNonePos(u8, text, candidate, "`") orelse text.len,
+            );
+            // Each pass moves past a whole run, so the loop ends within `text`.
+            std.debug.assert(candidate_end > candidate);
+            std.debug.assert(candidate > run_len);
+            if (candidate_end - candidate == run_len) return candidate;
+            search_start = candidate_end;
         }
         return null;
     }
@@ -521,6 +529,11 @@ test "writeInline leaves markers without a partner as text" {
 test "writeInline closes code only at a backtick run of the same length" {
     try expectInline("```a `b` c```", "<code>a `b` c</code>");
     try expectInline("`` `fake` ``", "<code>`fake`</code>");
+    // One space is dropped from each end only when both ends have one and it isn't all spaces.
+    try expectInline("`  `", "<code>  </code>");
+    try expectInline("` `", "<code> </code>");
+    try expectInline("`` `a``", "<code> `a</code>");
+    try expectInline("`a`", "<code>a</code>");
     try expectInline("`a\\`b`", "<code>a\\</code>b`");
     // A fenced snippet typed on one line, backslashes and all, stays one code span.
     const snippet = "just: ```send \"Fake\" \"**hi** \\`test\\`\"``` in markdown";
