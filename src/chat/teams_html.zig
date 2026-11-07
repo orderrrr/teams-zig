@@ -54,10 +54,13 @@ const Output = struct {
         var rest = text;
         // Each pass ends the line or consumes a fence and its partner, so it stops within it.
         while (true) {
+            const rest_len_before = rest.len;
             if (output.block == .code) {
                 rest = try output.lineCode(rest) orelse return;
             }
             const fence = lineFence(rest) orelse return output.lineText(rest);
+            std.debug.assert(fence.len >= 3);
+            std.debug.assert(fence.start + fence.len <= rest.len);
             const before = std.mem.trim(u8, rest[0..fence.start], " \t");
             if (before.len > 0) try output.lineText(before);
             try output.startBlock(.{ .code = 0 });
@@ -66,10 +69,12 @@ const Output = struct {
             const after = rest[fence.start + fence.len ..];
             const close_start = backtickRunFind(after, 0, fence.len) orelse
                 return output.lineFenceOpen(after);
+            std.debug.assert(close_start + fence.len <= after.len);
             try writeEscaped(output.writer, std.mem.trim(u8, after[0..close_start], " \t"));
             try output.closeBlock();
             rest = std.mem.trim(u8, after[close_start + fence.len ..], " \t");
             if (rest.len == 0) return;
+            std.debug.assert(rest.len < rest_len_before);
         }
     }
 
@@ -78,34 +83,35 @@ const Output = struct {
     fn lineFenceOpen(output: *Output, after: []const u8) std.Io.Writer.Error!void {
         std.debug.assert(output.block == .code);
         const rest = std.mem.trim(u8, after, " \t");
-        if (rest.len == 0) return;
+        // No space inside: empty, or one word naming the language.
         if (std.mem.indexOfAny(u8, rest, " \t") == null) return;
         try output.lineCodeWrite(rest);
     }
 
     /// A line with no code fence: a blank line, a heading, a quote, a list item or text.
     fn lineText(output: *Output, text: []const u8) std.Io.Writer.Error!void {
+        std.debug.assert(lineFence(text) == null);
         if (std.mem.trim(u8, text, " \t").len == 0) {
             try output.closeBlock();
             if (output.before == .content) output.before = .blank;
             return;
         }
-        if (lineHeadingLevel(text)) |level| {
+        if (lineTextHeadingLevel(text)) |level| {
             try output.startBlock(.none);
             try output.writer.print("<h{d}>", .{level});
             try writeInline(output.writer, text[level + 1 ..]);
             try output.writer.print("</h{d}>", .{level});
             return;
         }
-        if (lineQuoteStart(text)) |start| {
+        if (lineTextQuoteStart(text)) |start| {
             try output.continueBlock(.quote, "<blockquote>");
             try output.writer.writeAll("<p>");
             try writeInline(output.writer, text[start..]);
             try output.writer.writeAll("</p>");
             return;
         }
-        if (lineBulletStart(text)) |start| return output.lineItem(.list_bulleted, text[start..]);
-        if (lineNumberStart(text)) |start| return output.lineItem(.list_numbered, text[start..]);
+        if (lineTextBulletStart(text)) |start| return output.lineTextItem(.list_bulleted, text[start..]);
+        if (lineTextNumberStart(text)) |start| return output.lineTextItem(.list_numbered, text[start..]);
         if (output.block == .paragraph) {
             try output.writer.writeAll("<br>");
         } else {
@@ -115,7 +121,7 @@ const Output = struct {
         try writeInline(output.writer, text);
     }
 
-    fn lineItem(output: *Output, list: Block, item: []const u8) std.Io.Writer.Error!void {
+    fn lineTextItem(output: *Output, list: Block, item: []const u8) std.Io.Writer.Error!void {
         const open_tag = switch (list) {
             .list_bulleted => "<ul>",
             .list_numbered => "<ol>",
@@ -194,6 +200,7 @@ fn lineFence(text: []const u8) ?Fence {
         );
         // Each pass moves past a whole run, so the loop ends within `text`.
         std.debug.assert(run_end > run_start);
+        std.debug.assert(run_end <= text.len);
         if (run_end - run_start >= 3) return .{ .start = run_start, .len = run_end - run_start };
         search_start = run_end;
     }
@@ -221,7 +228,7 @@ fn backtickRunFind(text: []const u8, search_start: u32, run_len: u32) ?u32 {
 }
 
 /// The level of a `# `, `## ` or `### ` heading line, or null.
-fn lineHeadingLevel(text: []const u8) ?u8 {
+fn lineTextHeadingLevel(text: []const u8) ?u8 {
     std.debug.assert(text.len > 0);
     const level = std.mem.indexOfNone(u8, text, "#") orelse return null;
     if (level == 0) return null;
@@ -231,7 +238,7 @@ fn lineHeadingLevel(text: []const u8) ?u8 {
 }
 
 /// Where a quote line's text starts, after `>` and one optional space; null if it isn't one.
-fn lineQuoteStart(text: []const u8) ?u32 {
+fn lineTextQuoteStart(text: []const u8) ?u32 {
     std.debug.assert(text.len > 0);
     if (text[0] != '>') return null;
     if (std.mem.startsWith(u8, text, "> ")) return 2;
@@ -239,7 +246,7 @@ fn lineQuoteStart(text: []const u8) ?u32 {
 }
 
 /// Where a bullet item's text starts, after `- `, `* ` or `+ `; null if it isn't one.
-fn lineBulletStart(text: []const u8) ?u32 {
+fn lineTextBulletStart(text: []const u8) ?u32 {
     if (text.len < 2) return null;
     if (std.mem.indexOfScalar(u8, "-*+", text[0]) == null) return null;
     if (text[1] != ' ') return null;
@@ -248,7 +255,7 @@ fn lineBulletStart(text: []const u8) ?u32 {
 
 /// Where a numbered item's text starts, after up to nine digits, `.` or `)`, and a space; null
 /// if it isn't one.
-fn lineNumberStart(text: []const u8) ?u32 {
+fn lineTextNumberStart(text: []const u8) ?u32 {
     const digit_count = std.mem.indexOfNone(u8, text, "0123456789") orelse return null;
     if (digit_count == 0) return null;
     if (digit_count > 9) return null;
@@ -350,7 +357,7 @@ const Inline = struct {
         if (text[0] != '`') return false;
         const run_len: u32 = @intCast(std.mem.indexOfNone(u8, text, "`") orelse text.len);
         // `text` opens with exactly `run_len` backticks, so the partner is the next such run.
-        std.debug.assert(run_len == text.len or text[run_len] != '`');
+        if (run_len < text.len) std.debug.assert(text[run_len] != '`');
         const close_start = backtickRunFind(text, run_len, run_len) orelse {
             try state.writer.writeAll(text[0..run_len]);
             state.index += run_len;
@@ -693,6 +700,11 @@ test "writeMarkdown makes a code block from ``` anywhere on a line, as Teams doe
     // After an unpaired fence one word is the language; more words are code, never dropped.
     try expectMarkdown("fake ```zig\none\n```", "<p>fake</p><pre>one</pre>");
     try expectMarkdown("wrap it in ``` for a block", "<p>wrap it in</p><pre>for a block</pre>");
+    // A run of another length doesn't close the block.
+    try expectMarkdown("```a```` b", "<pre>a```` b</pre>");
+    try expectMarkdown("```a``` mid ```b```", "<pre>a</pre><p>mid</p><pre>b</pre>");
+    try expectMarkdown("```\na``` ```b```", "<pre>a</pre><pre>b</pre>");
+    try expectMarkdown("``` ```", "<pre></pre>");
     // The owner's message, its lines joined by the shell: the snippet becomes a code block.
     const joined = "So cool: ```send \"Fake\" \"**hi** \\`test\\`\"```in markdown " ++
         "[link](https://example.invalid)";
