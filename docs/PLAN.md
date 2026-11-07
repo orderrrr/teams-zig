@@ -288,3 +288,7 @@ Plan decisions:
 ### Out of M5
 
 Sending anywhere but `48:notes`. Editing, deleting, reacting, replies, mentions, files and images. Marking as read. Nested lists.
+
+### M5 live send
+
+On 2026-11-07, with the owner's go-ahead at that moment: one `send` to `48:notes` holding every supported form. Read back with `messages 48:notes 1`, each form came back as typed; the only differences are the blank lines `messages` always puts after lists and around quotes. Nothing was retried. Reads checked live first, after the GET path's refactor in M5.3.

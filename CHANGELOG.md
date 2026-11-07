@@ -2,6 +2,15 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.6.0 (M5): send messages in Markdown
+
+- `teams-zig send <chat> <text>` sends one message. The text is Markdown, sent as Teams' own formatting: `**bold**`, `_italic_` or `*italic*`, `~~strike~~`, `` `code` ``, `[text](https://…)` links, `#` to `###` headings, `- ` and `1. ` lists, `> ` quotes and `` ``` `` code blocks. Everything typed is escaped, so it can't become hidden markup; a `\` before punctuation keeps it literal.
+- For now it sends only to your notes (`48:notes`); any other chat is refused before anything is sent. Text over 16 KiB is refused too.
+- A send is never retried. If the connection drops after sending, the message may still have arrived, so the error says to check the chat before sending again.
+- Writes to Teams: sending is the only write, and only to `48:notes`.
+
+Known limits: one level of lists; no mentions, replies, files or images; links only to `http` and `https`.
+
 ## 0.5.0: short times, unread, escaping
 
 - Times show in your local time and short: `14:05` for today, `Mon 14:05` for the past week, and `2026-10-12 14:05` before that. This applies to `chats`, `messages` and `watch`.
