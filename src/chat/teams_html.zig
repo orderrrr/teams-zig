@@ -414,6 +414,7 @@ fn nextLinkAllowed(url: []const u8) bool {
 
 /// Writes text with `&`, `<`, `>` and `"` as entities.
 fn writeEscaped(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    std.debug.assert(text.len <= std.math.maxInt(u32));
     var run_start: u32 = 0;
     for (text, 0..) |byte, index| {
         const entity = switch (byte) {

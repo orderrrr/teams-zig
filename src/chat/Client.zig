@@ -70,6 +70,27 @@ const page_count_limit = 64;
 /// The most messages `messages` can ever collect.
 pub const message_count_limit = page_item_count_limit * page_count_limit;
 
+/// Teams refuses messages much past 28 KB of HTML; callers check before sending.
+pub const content_size_max = 28 * 1024;
+
+/// The newest message id `send` accepts: the last millisecond of 9999, since the time shown
+/// for it has room for a four-digit year.
+const message_id_max = 253_402_300_799_999;
+
+/// A message to send. A struct, so the two strings can't be swapped at a call site.
+pub const NewMessage = struct {
+    /// The message's HTML (see `teams_html`), at most `content_size_max` bytes.
+    content: []const u8,
+    /// Your name, shown as the sender.
+    display_name: []const u8,
+};
+
+/// What a request carries: nothing, for a GET, or JSON, for a POST.
+const Payload = union(enum) {
+    none,
+    json: []u8,
+};
+
 pub fn init(
     client: *Client,
     gpa: std.mem.Allocator,
@@ -137,13 +158,13 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     // Cleared first, so a status only ever describes this request.
     client.response_status = null;
     const uri = try checkLink(client.region, url);
-    return client.fetch(uri, .none);
+    return client.fetch(uri, &.none);
 }
 
 /// POSTs `payload`, JSON, to `path` (starting with `/`) under the base URL. Never retried: after a
 /// lost answer the service may already have acted, and a second try could act twice.
 /// The body is borrowed: it's valid until the next request.
-fn sendPost(client: *Client, path: []const u8, payload: []u8) Error![]const u8 {
+fn post(client: *Client, path: []const u8, payload: []u8) Error![]const u8 {
     std.debug.assert(std.mem.startsWith(u8, path, "/"));
     std.debug.assert(payload.len > 0);
     client.response_status = null;
@@ -152,21 +173,15 @@ fn sendPost(client: *Client, path: []const u8, payload: []u8) Error![]const u8 {
     defer client.gpa.free(url);
 
     const uri = try checkLink(client.region, url);
-    return client.fetch(uri, .{ .json = payload });
+    return client.fetch(uri, &.{ .json = payload });
 }
-
-/// What a request carries: nothing, for a GET, or JSON, for a POST.
-const Payload = union(enum) {
-    none,
-    json: []u8,
-};
 
 /// One request to `uri`, a GET or a POST by `payload`. 200 and 201 are success.
 /// The body is borrowed: it's valid until the next request.
-fn fetch(client: *Client, uri: std.Uri, payload: Payload) Error![]const u8 {
+fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u8 {
     std.debug.assert(client.response_status == null);
     const method: std.http.Method, const content_type: std.http.Client.Request.Headers.Value =
-        switch (payload) {
+        switch (payload.*) {
             .none => .{ .GET, .default },
             .json => .{ .POST, .{ .override = "application/json" } },
         };
@@ -202,7 +217,7 @@ fn fetch(client: *Client, uri: std.Uri, payload: Payload) Error![]const u8 {
     request.accept_encoding = @splat(false);
     request.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
 
-    switch (payload) {
+    switch (payload.*) {
         .none => request.sendBodiless() catch return error.SendFailed,
         .json => |bytes| request.sendBodyComplete(bytes) catch return error.SendFailed,
     }
@@ -306,20 +321,9 @@ fn parseError(err: json.ParseError) Error {
     };
 }
 
-/// A message to send. A struct, so the two strings can't be swapped at a call site.
-pub const NewMessage = struct {
-    /// The message's HTML (see `teams_html`), at most `content_size_max` bytes.
-    content: []const u8,
-    /// Your name, shown as the sender.
-    display_name: []const u8,
-};
-
-/// Teams refuses messages much past 28 KB of HTML; callers check before sending.
-pub const content_size_max = 28 * 1024;
-
 /// Posts `message` to a conversation, once. Returns the new message's id: its arrival time in
 /// milliseconds.
-pub fn send(client: *Client, conversation_id: []const u8, message: NewMessage) Error!u64 {
+pub fn send(client: *Client, conversation_id: []const u8, message: *const NewMessage) Error!u64 {
     std.debug.assert(conversation_id.len > 0);
     std.debug.assert(message.content.len > 0);
     std.debug.assert(message.content.len <= content_size_max);
@@ -331,7 +335,7 @@ pub fn send(client: *Client, conversation_id: []const u8, message: NewMessage) E
     const payload = try sendPayload(client.gpa, message, client_message_id);
     defer client.gpa.free(payload);
 
-    const body = try client.sendPost(path, payload);
+    const body = try client.post(path, payload);
     return sendAnswerId(client.gpa, body);
 }
 
@@ -353,7 +357,7 @@ fn sendPath(gpa: std.mem.Allocator, conversation_id: []const u8) error{OutOfMemo
 /// any fresh number does. Owned by the caller.
 fn sendPayload(
     gpa: std.mem.Allocator,
-    message: NewMessage,
+    message: *const NewMessage,
     client_message_id: u64,
 ) error{OutOfMemory}![]u8 {
     // Sized for the longest u64, so the number always fits.
@@ -374,13 +378,14 @@ fn sendPayload(
 }
 
 /// The new message's id from a send's answer, `{"OriginalArrivalTime": <ms>, ...}`. An id from
-/// before 1970-01-02 means the answer isn't what it should be.
+/// before 1970-01-02 or after `message_id_max` means the answer isn't what it should be.
 fn sendAnswerId(gpa: std.mem.Allocator, body: []const u8) Error!u64 {
     const Answer = struct { OriginalArrivalTime: u64 };
     const parsed = std.json.parseFromSlice(Answer, gpa, body, json.parse_options) catch |err|
         return parseError(err);
     defer parsed.deinit();
     if (parsed.value.OriginalArrivalTime < std.time.ms_per_day) return error.UnexpectedJson;
+    if (parsed.value.OriginalArrivalTime > message_id_max) return error.UnexpectedJson;
     return parsed.value.OriginalArrivalTime;
 }
 
@@ -709,7 +714,7 @@ test "sendPayload writes the fields Teams expects, escaped as JSON" {
         .content = "<p>fake \"one\"</p>",
         .display_name = "Fake Person",
     };
-    const payload = try sendPayload(std.testing.allocator, message, 1_700_000_000_000);
+    const payload = try sendPayload(std.testing.allocator, &message, 1_700_000_000_000);
     defer std.testing.allocator.free(payload);
 
     const expected = "{\"content\":\"<p>fake \\\"one\\\"</p>\"," ++
@@ -725,4 +730,7 @@ test "sendAnswerId reads the new message's id and rejects other shapes" {
     try std.testing.expectError(error.UnexpectedJson, no_id);
     const early_id = sendAnswerId(std.testing.allocator, "{\"OriginalArrivalTime\":0}");
     try std.testing.expectError(error.UnexpectedJson, early_id);
+    const late_body = "{\"OriginalArrivalTime\":253402300800000}";
+    const late_id = sendAnswerId(std.testing.allocator, late_body);
+    try std.testing.expectError(error.UnexpectedJson, late_id);
 }
