@@ -121,6 +121,9 @@ comptime {
     std.debug.assert(conversation_count_default <= Seen.chat_count_limit);
     std.debug.assert(conversation_count_default <= conversation_count_limit);
     std.debug.assert(message_count_default <= message_count_limit);
+    // Every id `send` accepts has a time the display can show.
+    std.debug.assert(@divFloor(chat.Client.message_id_max, std.time.ms_per_s) <=
+        short_time.gmt_seconds_max);
 }
 
 const message_count_limit = chat.Client.message_count_limit;
@@ -182,8 +185,9 @@ const Clock = struct {
         buffer: *[short_time.width_max]u8,
         at_seconds: i64,
     ) []const u8 {
-        // Local times must stay after 1970 (see `short_time.write`).
+        // Local times must stay after 1970 and fit `width_max` (see `short_time.write`).
         std.debug.assert(at_seconds >= std.time.s_per_day);
+        std.debug.assert(at_seconds <= short_time.gmt_seconds_max);
         const times: short_time.Times = .{
             .at_seconds = at_seconds + clock.zone.secondsFromGmt(at_seconds),
             .now_seconds = clock.now_seconds + clock.zone.secondsFromGmt(clock.now_seconds),
@@ -400,8 +404,8 @@ fn runSend(
     started_at.store(requests_idle, .release);
 
     var time_buffer: [short_time.width_max]u8 = undefined;
-    // `send` takes only ids from 1970-01-02 to a day before the end of 9999, which
-    // `shortTimeAt` can show in any time zone.
+    // `send` takes only ids from 1970-01-02 to `message_id_max`, which `shortTimeAt` can show
+    // (asserted at comptime above).
     const at_seconds: i64 = @intCast(@divFloor(message_id, std.time.ms_per_s));
     try stdout.print("Sent {s}.\n", .{clock.shortTimeAt(&time_buffer, at_seconds)});
 }

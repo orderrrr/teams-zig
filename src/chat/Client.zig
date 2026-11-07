@@ -73,9 +73,9 @@ pub const message_count_limit = page_item_count_limit * page_count_limit;
 /// Teams refuses messages much past 28 KB of HTML; callers check before sending.
 pub const content_size_max = 28 * 1024;
 
-/// The newest message id `send` accepts: a day before the end of 9999, since the time shown for
-/// it has room for a four-digit year, and every time zone is within a day of GMT.
-const message_id_max = 253_402_300_799_999 - std.time.ms_per_day;
+/// The newest message id `send` accepts: a day before the end of 9999, so the time shown for it
+/// fits a four-digit year in every zone. Checked against the display's own bound in main.
+pub const message_id_max = 253_402_300_799_999 - std.time.ms_per_day;
 
 /// A message to send. A struct, so the two strings can't be swapped at a call site.
 pub const NewMessage = struct {

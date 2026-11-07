@@ -11,6 +11,11 @@ pub const width_max = "2026-10-12 14:05".len;
 /// recent also keeps every time, local or not, after 1970.
 const year_min = 2000;
 
+/// The latest time, in seconds since 1970 GMT, that `write` can show in every zone: a day before
+/// the end of 9999, since `width_max` has room for a four-digit year and every zone is within a
+/// day of GMT.
+pub const gmt_seconds_max = 253_402_300_799 - std.time.s_per_day;
+
 /// Seconds since 1970-01-01 GMT for a service timestamp such as `2026-11-01T10:00:00.000Z`, or
 /// null if `text` isn't one. The fraction of a second is ignored.
 pub fn parseIso(text: []const u8) ?i64 {
@@ -56,6 +61,7 @@ pub fn parseIso(text: []const u8) ?i64 {
         minute * std.time.s_per_min + second;
     // A year from `year_min` on is far past the first day, so a local time stays positive.
     std.debug.assert(unix_seconds >= std.time.s_per_day);
+    if (unix_seconds > gmt_seconds_max) return null;
     return unix_seconds;
 }
 
@@ -170,6 +176,7 @@ test "parseIso rejects anything else" {
         "2025-11-01T12:26:40.Z1",
         "1999-12-31T23:59:59Z",
         "+025-11-01T12:26:40Z",
+        "9999-12-31T23:59:59Z",
     };
     for (not_timestamps) |text| try std.testing.expectEqual(null, parseIso(text));
 }
