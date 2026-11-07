@@ -311,8 +311,8 @@ const Inline = struct {
         for (state.marks_open[0..state.marks_open_count]) |open| {
             if (open.mark == marker.mark) return false;
         }
-        if (!nextMarkerOpenAllowed(state.line, state.index, marker)) return false;
-        if (!nextMarkerOpenCloserAfter(state.line, state.index, marker)) return false;
+        if (!state.nextMarkerOpenAllowed(marker)) return false;
+        if (!state.nextMarkerOpenCloserAfter(marker)) return false;
         std.debug.assert(state.marks_open_count < mark_count);
         state.marks_open[state.marks_open_count] = .{
             .mark = marker.mark,
@@ -322,6 +322,33 @@ const Inline = struct {
         try state.writer.print("<{s}>", .{marker.mark.tagName()});
         state.index += marker.len;
         return true;
+    }
+
+    /// The marker at `index` opens if text follows it; `_` also needs no letter or digit before it, so
+    /// `snake_case_name` stays as typed.
+    fn nextMarkerOpenAllowed(state: *const Inline, marker: MarkerAt) bool {
+        std.debug.assert(state.index < state.line.len);
+        const after = state.index + marker.len;
+        if (after == state.line.len) return false;
+        if (std.ascii.isWhitespace(state.line[after])) return false;
+        if (state.line[state.index] != '_') return true;
+        if (state.index == 0) return true;
+        return !std.ascii.isAlphanumeric(state.line[state.index - 1]);
+    }
+
+    /// Whether a partner for the marker at `index`, the same bytes and able to close, follows on
+    /// the line. Quadratic per line at worst (`_a _a _a …`); the 16 KiB cap on what `send` takes
+    /// keeps that near a tenth of a second.
+    fn nextMarkerOpenCloserAfter(state: *const Inline, marker: MarkerAt) bool {
+        std.debug.assert(state.index < state.line.len);
+        var candidate: u32 = state.index + marker.len;
+        while (candidate < state.line.len) : (candidate += 1) {
+            const found = markerAt(state.line, candidate) orelse continue;
+            if (found.mark != marker.mark) continue;
+            if (state.line[candidate] != state.line[state.index]) continue;
+            if (markerCanClose(state.line, candidate, found)) return true;
+        }
+        return false;
     }
 
     /// Plain text, up to the next byte that could start markup.
@@ -362,33 +389,6 @@ fn markerCanClose(line: []const u8, index: u32, marker: MarkerAt) bool {
     const after = index + marker.len;
     if (after == line.len) return true;
     return !std.ascii.isAlphanumeric(line[after]);
-}
-
-/// A marker opens if text follows it; `_` also needs no letter or digit before it, so
-/// `snake_case_name` stays as typed.
-fn nextMarkerOpenAllowed(line: []const u8, index: u32, marker: MarkerAt) bool {
-    std.debug.assert(index < line.len);
-    const after = index + marker.len;
-    if (after == line.len) return false;
-    if (std.ascii.isWhitespace(line[after])) return false;
-    if (line[index] != '_') return true;
-    if (index == 0) return true;
-    return !std.ascii.isAlphanumeric(line[index - 1]);
-}
-
-/// Whether a partner for the marker at `line[index]`, the same bytes and able to close, follows
-/// on the line. Quadratic per line at worst (`_a _a _a …`); the 16 KiB cap on what `send` takes
-/// keeps that near a tenth of a second.
-fn nextMarkerOpenCloserAfter(line: []const u8, index: u32, marker: MarkerAt) bool {
-    std.debug.assert(index < line.len);
-    var candidate: u32 = index + marker.len;
-    while (candidate < line.len) : (candidate += 1) {
-        const found = markerAt(line, candidate) orelse continue;
-        if (found.mark != marker.mark) continue;
-        if (line[candidate] != line[index]) continue;
-        if (markerCanClose(line, candidate, found)) return true;
-    }
-    return false;
 }
 
 /// How long the address at the start of `text` is, up to the `)` that closes the link. Brackets

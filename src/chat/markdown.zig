@@ -70,8 +70,10 @@ const Output = struct {
     at_start: bool = true,
     /// The current line holds text.
     line_has_text: bool = false,
-    /// Line breaks owed before the next text: 1 starts a new line, 2 leaves a blank line.
-    breaks_pending: u2 = 0,
+    /// Line breaks owed before the next text: a new line, or a blank line, which holds the quotes
+    /// open when it was owed. A quote that opens after it doesn't prefix it, so the blank line
+    /// before a quote stays outside it.
+    breaks_pending: union(enum) { none, line, blank: u8 } = .none,
     /// A space owed before the next text on this line, from collapsed whitespace.
     space_pending: bool = false,
     /// The latest paragraph or div opened has held no text yet.
@@ -86,9 +88,6 @@ const Output = struct {
     link_href: []const u8 = "",
     /// How many quotes are open; lines show at most `quote_depth_limit` of them.
     quote_depth: u8 = 0,
-    /// How many quotes were open when the pending blank line was owed. A quote that opens
-    /// after it doesn't prefix it, so the blank line before a quote stays outside it.
-    blank_line_quote_depth: u8 = 0,
     /// The open lists, outermost first; only the first `list_depth_limit` are kept.
     lists: [list_depth_limit]List = undefined,
     /// How many lists are open, counting those deeper than `list_depth_limit`.
@@ -292,7 +291,8 @@ const Output = struct {
             try output.writer.writeAll(mark.marker());
             output.marks_written.remove(mark);
         }
-        output.breaks_pending = @max(output.breaks_pending, 1);
+        // A blank line already owed stays owed.
+        if (output.breaks_pending == .none) output.breaks_pending = .line;
         output.line_has_text = false;
         output.space_pending = false;
     }
@@ -459,30 +459,34 @@ const Output = struct {
     }
 
     fn blankLine(output: *Output) void {
-        output.breaks_pending = 2;
-        output.blank_line_quote_depth = output.quote_depth;
+        output.breaks_pending = .{ .blank = output.quote_depth };
         output.space_pending = false;
     }
 
     /// Writes the line breaks or space owed before the next text, with each new line's prefix.
     fn flushSpacing(output: *Output) std.Io.Writer.Error!void {
-        std.debug.assert(output.breaks_pending <= 2);
         defer output.space_pending = false;
         if (output.at_start) {
             output.at_start = false;
-            output.breaks_pending = 0;
+            output.breaks_pending = .none;
             return output.writeLinePrefix();
         }
-        if (output.breaks_pending > 0) {
-            try output.writer.writeByte('\n');
-            if (output.breaks_pending == 2) {
+        switch (output.breaks_pending) {
+            .none => {},
+            .line => {
+                try output.writer.writeByte('\n');
+                output.breaks_pending = .none;
+                return output.writeLinePrefix();
+            },
+            .blank => |blank_quote_depth| {
                 // A blank line inside quotes holds only them, the last as a bare `>`.
-                const depth = @min(output.blank_line_quote_depth, output.quote_depth);
+                const depth = @min(blank_quote_depth, output.quote_depth);
+                try output.writer.writeByte('\n');
                 try output.writeQuotes(depth, ">");
                 try output.writer.writeByte('\n');
-            }
-            output.breaks_pending = 0;
-            return output.writeLinePrefix();
+                output.breaks_pending = .none;
+                return output.writeLinePrefix();
+            },
         }
         if (!output.space_pending) return;
         // Spaces at a line's start are dropped.
