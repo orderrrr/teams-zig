@@ -110,8 +110,12 @@ const Output = struct {
             try output.writer.writeAll("</p>");
             return;
         }
-        if (lineTextBulletStart(text)) |start| return output.lineTextItem(.list_bulleted, text[start..]);
-        if (lineTextNumberStart(text)) |start| return output.lineTextItem(.list_numbered, text[start..]);
+        if (lineTextBulletStart(text)) |start| {
+            return output.lineTextItem(.list_bulleted, text[start..]);
+        }
+        if (lineTextNumberStart(text)) |start| {
+            return output.lineTextItem(.list_numbered, text[start..]);
+        }
         if (output.block == .paragraph) {
             try output.writer.writeAll("<br>");
         } else {
