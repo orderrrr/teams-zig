@@ -13,3 +13,12 @@ pub const parse_options: std.json.ParseOptions = .{
     .max_value_len = null,
     .allocate = .alloc_always,
 };
+
+/// Every option spelled out, for request bodies: compact, with strings as text.
+pub const stringify_options: std.json.Stringify.Options = .{
+    .whitespace = .minified,
+    .emit_null_optional_fields = true,
+    .emit_strings_as_arrays = false,
+    .escape_unicode = false,
+    .emit_nonportable_numbers_as_strings = false,
+};

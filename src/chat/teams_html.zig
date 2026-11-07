@@ -21,19 +21,18 @@ pub fn writeMarkdown(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Err
 const Output = struct {
     writer: *std.Io.Writer,
     block: Block = .none,
-    /// Inside a fenced code block, which has held this many lines.
-    code_line_count: ?u32 = null,
-    /// A blank line was typed after earlier content, and the next block starts with one.
-    blank_pending: bool = false,
-    /// Something has been written, so a blank line is worth keeping.
-    started: bool = false,
+    /// What came before the next block: nothing yet, content, or content and then a blank line,
+    /// which the next block keeps.
+    before: enum { nothing, content, blank } = .nothing,
 
-    const Block = enum {
+    const Block = union(enum) {
         none,
         paragraph,
         quote,
         list_bulleted,
         list_numbered,
+        /// A fenced code block that has held this many lines.
+        code: u32,
 
         fn closeTags(block: Block) []const u8 {
             return switch (block) {
@@ -42,21 +41,21 @@ const Output = struct {
                 .quote => "</blockquote>",
                 .list_bulleted => "</ul>",
                 .list_numbered => "</ol>",
+                .code => "</pre>",
             };
         }
     };
 
     fn line(output: *Output, text: []const u8) std.Io.Writer.Error!void {
-        if (output.code_line_count != null) return output.lineCode(text);
+        if (output.block == .code) return output.lineCode(text);
         if (std.mem.trim(u8, text, " \t").len == 0) {
             try output.closeBlock();
-            output.blank_pending = output.started;
+            if (output.before == .content) output.before = .blank;
             return;
         }
         if (std.mem.startsWith(u8, text, "```")) {
-            try output.startBlock(.none);
+            try output.startBlock(.{ .code = 0 });
             try output.writer.writeAll("<pre>");
-            output.code_line_count = 0;
             return;
         }
         if (lineHeadingLevel(text)) |level| {
@@ -85,7 +84,11 @@ const Output = struct {
     }
 
     fn lineItem(output: *Output, list: Block, item: []const u8) std.Io.Writer.Error!void {
-        const open_tag = if (list == .list_bulleted) "<ul>" else "<ol>";
+        const open_tag = switch (list) {
+            .list_bulleted => "<ul>",
+            .list_numbered => "<ol>",
+            .none, .paragraph, .quote, .code => unreachable,
+        };
         try output.continueBlock(list, open_tag);
         try output.writer.writeAll("<li>");
         try writeInline(output.writer, item);
@@ -94,19 +97,15 @@ const Output = struct {
 
     /// Code is written as typed, escaped, one line per line, until a closing fence.
     fn lineCode(output: *Output, text: []const u8) std.Io.Writer.Error!void {
-        if (std.mem.startsWith(u8, text, "```")) {
-            try output.writer.writeAll("</pre>");
-            output.code_line_count = null;
-            return;
-        }
-        if (output.code_line_count.? > 0) try output.writer.writeByte('\n');
+        if (std.mem.startsWith(u8, text, "```")) return output.closeBlock();
+        if (output.block.code > 0) try output.writer.writeByte('\n');
         try writeEscaped(output.writer, text);
-        output.code_line_count.? += 1;
+        output.block.code += 1;
     }
 
     /// Keeps `block` going if it's the current one; otherwise closes that and opens `block`.
     fn continueBlock(output: *Output, block: Block, open_tag: []const u8) std.Io.Writer.Error!void {
-        if (output.block == block) return;
+        if (std.meta.activeTag(output.block) == std.meta.activeTag(block)) return;
         try output.startBlock(block);
         try output.writer.writeAll(open_tag);
     }
@@ -114,12 +113,9 @@ const Output = struct {
     /// Closes the current block, writes a pending blank line, and makes `block` current.
     fn startBlock(output: *Output, block: Block) std.Io.Writer.Error!void {
         try output.closeBlock();
-        if (output.blank_pending) {
-            try output.writer.writeAll("<p>&nbsp;</p>");
-            output.blank_pending = false;
-        }
+        if (output.before == .blank) try output.writer.writeAll("<p>&nbsp;</p>");
+        output.before = .content;
         output.block = block;
-        output.started = true;
     }
 
     fn closeBlock(output: *Output) std.Io.Writer.Error!void {
@@ -127,19 +123,15 @@ const Output = struct {
         output.block = .none;
     }
 
-    /// Closes what the text left open: a code block without its closing fence, or the last
-    /// block.
+    /// Closes what the text left open, a code block without its closing fence included.
     fn finish(output: *Output) std.Io.Writer.Error!void {
-        if (output.code_line_count != null) {
-            try output.writer.writeAll("</pre>");
-            output.code_line_count = null;
-        }
         try output.closeBlock();
     }
 };
 
 /// The level of a `# `, `## ` or `### ` heading line, or null.
 fn lineHeadingLevel(text: []const u8) ?u8 {
+    std.debug.assert(text.len > 0);
     const level = std.mem.indexOfNone(u8, text, "#") orelse return null;
     if (level == 0) return null;
     if (level > 3) return null;
@@ -149,6 +141,7 @@ fn lineHeadingLevel(text: []const u8) ?u8 {
 
 /// Where a quote line's text starts, after `>` and one optional space; null if it isn't one.
 fn lineQuoteStart(text: []const u8) ?u32 {
+    std.debug.assert(text.len > 0);
     if (text[0] != '>') return null;
     if (std.mem.startsWith(u8, text, "> ")) return 2;
     return 1;
@@ -205,98 +198,161 @@ const inline_special = "\\`[*_~";
 /// A marker without a partner on the line is text. Marks still open at the end are closed.
 fn writeInline(writer: *std.Io.Writer, line: []const u8) std.Io.Writer.Error!void {
     std.debug.assert(std.mem.indexOfScalar(u8, line, '\n') == null);
-    var marks_open: [mark_count]Mark = undefined;
-    var marks_open_count: u8 = 0;
-    var index: usize = 0;
-    while (index < line.len) {
-        const rest = line[index..];
-        if (rest[0] == '\\') {
-            if (rest.len > 1) {
-                if (std.ascii.isPunctuation(rest[1])) {
-                    try writeEscaped(writer, rest[1..2]);
-                    index += 2;
-                    continue;
-                }
-            }
-        }
-        if (rest[0] == '`') {
-            if (std.mem.indexOfScalar(u8, rest[1..], '`')) |close_index| {
-                if (close_index > 0) {
-                    try writer.writeAll("<code>");
-                    try writeEscaped(writer, rest[1..][0..close_index]);
-                    try writer.writeAll("</code>");
-                    index += close_index + 2;
-                    continue;
-                }
-            }
-        }
-        if (rest[0] == '[') {
-            const link_len = try writeInlineLink(writer, rest);
-            if (link_len > 0) {
-                index += link_len;
-                continue;
-            }
-        }
-        if (writeInlineMarkerAt(line, index)) |marker| {
-            const open = marks_open[0..marks_open_count];
-            const top_open = marks_open_count > 0 and open[open.len - 1] == marker.mark;
-            if (top_open) {
-                if (writeInlineCanClose(line, index, marker)) {
-                    try writer.print("</{s}>", .{marker.mark.tagName()});
-                    marks_open_count -= 1;
-                    index += marker.len;
-                    continue;
-                }
-            }
-            const is_open = std.mem.indexOfScalar(Mark, open, marker.mark) != null;
-            if (!is_open) {
-                if (writeInlineCanOpen(line, index, marker)) {
-                    if (writeInlineCloserAfter(line, index + marker.len, marker)) {
-                        try writer.print("<{s}>", .{marker.mark.tagName()});
-                        marks_open[marks_open_count] = marker.mark;
-                        marks_open_count += 1;
-                        index += marker.len;
-                        continue;
-                    }
-                }
-            }
-            try writeEscaped(writer, rest[0..marker.len]);
-            index += marker.len;
-            continue;
-        }
-        const run_len = std.mem.indexOfAny(u8, rest[1..], inline_special) orelse rest.len - 1;
-        try writeEscaped(writer, rest[0 .. run_len + 1]);
-        index += run_len + 1;
-    }
-    while (marks_open_count > 0) {
-        marks_open_count -= 1;
-        try writer.print("</{s}>", .{marks_open[marks_open_count].tagName()});
-    }
+    std.debug.assert(line.len <= std.math.maxInt(u32));
+    var state: Inline = .{ .writer = writer, .line = line };
+    while (state.index < line.len) try state.next();
+    try state.finish();
 }
 
+/// One line on its way to inline HTML.
+const Inline = struct {
+    writer: *std.Io.Writer,
+    line: []const u8,
+    /// Where the next unwritten byte is.
+    index: u32 = 0,
+    /// The open marks, outermost first.
+    marks_open: [mark_count]MarkOpen = undefined,
+    marks_open_count: u8 = 0,
+
+    /// An open mark and the byte that opened it, so `_` doesn't close what `*` opened.
+    const MarkOpen = struct {
+        mark: Mark,
+        byte: u8,
+    };
+
+    /// Writes the next piece of the line: an escape, code, a link, a marker or plain text.
+    fn next(state: *Inline) std.Io.Writer.Error!void {
+        std.debug.assert(state.index < state.line.len);
+        const index_before = state.index;
+        defer std.debug.assert(state.index > index_before);
+        if (try state.nextEscape()) return;
+        if (try state.nextCode()) return;
+        if (try state.nextLink()) return;
+        if (try state.nextMarker()) return;
+        try state.nextText();
+    }
+
+    fn rest(state: *const Inline) []const u8 {
+        return state.line[state.index..];
+    }
+
+    /// `\` before punctuation: the punctuation, as text.
+    fn nextEscape(state: *Inline) std.Io.Writer.Error!bool {
+        const text = state.rest();
+        if (text[0] != '\\') return false;
+        if (text.len < 2) return false;
+        if (!std.ascii.isPunctuation(text[1])) return false;
+        try writeEscaped(state.writer, text[1..2]);
+        state.index += 2;
+        return true;
+    }
+
+    /// `` `code` ``: the code as typed, with no markup inside.
+    fn nextCode(state: *Inline) std.Io.Writer.Error!bool {
+        const text = state.rest();
+        if (text[0] != '`') return false;
+        const close_index = std.mem.indexOfScalar(u8, text[1..], '`') orelse return false;
+        if (close_index == 0) return false;
+        try state.writer.writeAll("<code>");
+        try writeEscaped(state.writer, text[1..][0..close_index]);
+        try state.writer.writeAll("</code>");
+        state.index += @intCast(close_index + 2);
+        return true;
+    }
+
+    /// `[text](url)` with a web address: a link. The text is plain.
+    fn nextLink(state: *Inline) std.Io.Writer.Error!bool {
+        const text = state.rest();
+        if (text[0] != '[') return false;
+        const text_end = std.mem.indexOf(u8, text, "](") orelse return false;
+        if (text_end == 1) return false;
+        const url_start = text_end + 2;
+        const url_len = nextLinkUrlLen(text[url_start..]) orelse return false;
+        const url = text[url_start..][0..url_len];
+        if (!nextLinkAllowed(url)) return false;
+
+        try state.writer.writeAll("<a href=\"");
+        try writeEscaped(state.writer, url);
+        try state.writer.writeAll("\">");
+        try writeEscaped(state.writer, text[1..text_end]);
+        try state.writer.writeAll("</a>");
+        state.index += @intCast(url_start + url_len + 1);
+        return true;
+    }
+
+    /// `**`, `~~`, `*` or `_`: closes the innermost mark, opens a new one, or is text.
+    fn nextMarker(state: *Inline) std.Io.Writer.Error!bool {
+        const marker = markerAt(state.line, state.index) orelse return false;
+        if (try state.nextMarkerClose(marker)) return true;
+        if (try state.nextMarkerOpen(marker)) return true;
+        try writeEscaped(state.writer, state.rest()[0..marker.len]);
+        state.index += marker.len;
+        return true;
+    }
+
+    /// Closes the innermost mark, if `marker` is its partner.
+    fn nextMarkerClose(state: *Inline, marker: MarkerAt) std.Io.Writer.Error!bool {
+        if (state.marks_open_count == 0) return false;
+        const innermost = state.marks_open[state.marks_open_count - 1];
+        if (innermost.mark != marker.mark) return false;
+        if (innermost.byte != state.line[state.index]) return false;
+        if (!markerCanClose(state.line, state.index, marker)) return false;
+        try state.writer.print("</{s}>", .{marker.mark.tagName()});
+        state.marks_open_count -= 1;
+        state.index += marker.len;
+        return true;
+    }
+
+    /// Opens a mark, if it isn't open already and a partner follows on the line.
+    fn nextMarkerOpen(state: *Inline, marker: MarkerAt) std.Io.Writer.Error!bool {
+        for (state.marks_open[0..state.marks_open_count]) |open| {
+            if (open.mark == marker.mark) return false;
+        }
+        if (!nextMarkerOpenAllowed(state.line, state.index, marker)) return false;
+        if (!nextMarkerOpenCloserAfter(state.line, state.index, marker)) return false;
+        std.debug.assert(state.marks_open_count < mark_count);
+        state.marks_open[state.marks_open_count] = .{
+            .mark = marker.mark,
+            .byte = state.line[state.index],
+        };
+        state.marks_open_count += 1;
+        try state.writer.print("<{s}>", .{marker.mark.tagName()});
+        state.index += marker.len;
+        return true;
+    }
+
+    /// Plain text, up to the next byte that could start markup.
+    fn nextText(state: *Inline) std.Io.Writer.Error!void {
+        const text = state.rest();
+        const run_len = std.mem.indexOfAny(u8, text[1..], inline_special) orelse text.len - 1;
+        try writeEscaped(state.writer, text[0 .. run_len + 1]);
+        state.index += @intCast(run_len + 1);
+    }
+
+    /// Closes the marks still open, innermost first.
+    fn finish(state: *Inline) std.Io.Writer.Error!void {
+        while (state.marks_open_count > 0) {
+            state.marks_open_count -= 1;
+            const open = state.marks_open[state.marks_open_count];
+            try state.writer.print("</{s}>", .{open.mark.tagName()});
+        }
+    }
+};
+
 /// The marker at `line[index]`, if any: `**`, `~~`, `*` or `_`.
-fn writeInlineMarkerAt(line: []const u8, index: usize) ?MarkerAt {
-    const rest = line[index..];
-    if (std.mem.startsWith(u8, rest, "**")) return .{ .mark = .bold, .len = 2 };
-    if (std.mem.startsWith(u8, rest, "~~")) return .{ .mark = .strike, .len = 2 };
-    if (rest[0] == '*') return .{ .mark = .italic, .len = 1 };
-    if (rest[0] == '_') return .{ .mark = .italic, .len = 1 };
+fn markerAt(line: []const u8, index: u32) ?MarkerAt {
+    std.debug.assert(index < line.len);
+    const text = line[index..];
+    if (std.mem.startsWith(u8, text, "**")) return .{ .mark = .bold, .len = 2 };
+    if (std.mem.startsWith(u8, text, "~~")) return .{ .mark = .strike, .len = 2 };
+    if (text[0] == '*') return .{ .mark = .italic, .len = 1 };
+    if (text[0] == '_') return .{ .mark = .italic, .len = 1 };
     return null;
 }
 
-/// A marker opens if text follows it; `_` also needs no letter or digit before it, so
-/// `snake_case_name` stays as typed.
-fn writeInlineCanOpen(line: []const u8, index: usize, marker: MarkerAt) bool {
-    const after = index + marker.len;
-    if (after == line.len) return false;
-    if (std.ascii.isWhitespace(line[after])) return false;
-    if (line[index] != '_') return true;
-    if (index == 0) return true;
-    return !std.ascii.isAlphanumeric(line[index - 1]);
-}
-
 /// A marker closes if text precedes it; `_` also needs no letter or digit after it.
-fn writeInlineCanClose(line: []const u8, index: usize, marker: MarkerAt) bool {
+fn markerCanClose(line: []const u8, index: u32, marker: MarkerAt) bool {
+    std.debug.assert(index < line.len);
     if (index == 0) return false;
     if (std.ascii.isWhitespace(line[index - 1])) return false;
     if (line[index] != '_') return true;
@@ -305,39 +361,48 @@ fn writeInlineCanClose(line: []const u8, index: usize, marker: MarkerAt) bool {
     return !std.ascii.isAlphanumeric(line[after]);
 }
 
-/// Whether the same marker, able to close, appears in `line` from `start` on.
-fn writeInlineCloserAfter(line: []const u8, start: usize, marker: MarkerAt) bool {
-    var index = start;
-    while (index < line.len) : (index += 1) {
-        const found = writeInlineMarkerAt(line, index) orelse continue;
+/// A marker opens if text follows it; `_` also needs no letter or digit before it, so
+/// `snake_case_name` stays as typed.
+fn nextMarkerOpenAllowed(line: []const u8, index: u32, marker: MarkerAt) bool {
+    std.debug.assert(index < line.len);
+    const after = index + marker.len;
+    if (after == line.len) return false;
+    if (std.ascii.isWhitespace(line[after])) return false;
+    if (line[index] != '_') return true;
+    if (index == 0) return true;
+    return !std.ascii.isAlphanumeric(line[index - 1]);
+}
+
+/// Whether a partner for the marker at `line[index]`, the same bytes and able to close, follows
+/// on the line. Quadratic per line at worst (`_a _a _a …`); the 16 KiB cap on what `send` takes
+/// keeps that near a tenth of a second.
+fn nextMarkerOpenCloserAfter(line: []const u8, index: u32, marker: MarkerAt) bool {
+    std.debug.assert(index < line.len);
+    var candidate: u32 = index + marker.len;
+    while (candidate < line.len) : (candidate += 1) {
+        const found = markerAt(line, candidate) orelse continue;
         if (found.mark != marker.mark) continue;
-        if (line[index] != line[start - marker.len]) continue;
-        if (writeInlineCanClose(line, index, found)) return true;
+        if (line[candidate] != line[index]) continue;
+        if (markerCanClose(line, candidate, found)) return true;
     }
     return false;
 }
 
-/// Writes `[text](url)` at the start of `rest` as a link and returns its length, or 0 if
-/// `rest` doesn't start with one. Only `http` and `https` targets count; the text is plain.
-fn writeInlineLink(writer: *std.Io.Writer, rest: []const u8) std.Io.Writer.Error!usize {
-    std.debug.assert(rest[0] == '[');
-    const text_end = std.mem.indexOf(u8, rest, "](") orelse return 0;
-    if (text_end == 1) return 0;
-    const url_start = text_end + 2;
-    const url_len = std.mem.indexOfScalar(u8, rest[url_start..], ')') orelse return 0;
-    const url = rest[url_start..][0..url_len];
-    if (!writeInlineLinkAllowed(url)) return 0;
-
-    try writer.writeAll("<a href=\"");
-    try writeEscaped(writer, url);
-    try writer.writeAll("\">");
-    try writeEscaped(writer, rest[1..text_end]);
-    try writer.writeAll("</a>");
-    return url_start + url_len + 1;
+/// How long the address at the start of `text` is, up to the `)` that closes the link. Brackets
+/// inside it pair up, as in `https://en.wikipedia.org/wiki/Foo_(bar)`. Null if nothing closes it.
+fn nextLinkUrlLen(text: []const u8) ?u32 {
+    var depth: u32 = 0;
+    for (text, 0..) |byte, index| {
+        if (byte == '(') depth += 1;
+        if (byte != ')') continue;
+        if (depth == 0) return @intCast(index);
+        depth -= 1;
+    }
+    return null;
 }
 
 /// Web links only, with no spaces, so a typed `javascript:` or local path stays text.
-fn writeInlineLinkAllowed(url: []const u8) bool {
+fn nextLinkAllowed(url: []const u8) bool {
     if (std.mem.indexOfAny(u8, url, &std.ascii.whitespace) != null) return false;
     if (std.ascii.startsWithIgnoreCase(url, "https://")) return url.len > "https://".len;
     if (std.ascii.startsWithIgnoreCase(url, "http://")) return url.len > "http://".len;
@@ -346,7 +411,7 @@ fn writeInlineLinkAllowed(url: []const u8) bool {
 
 /// Writes text with `&`, `<`, `>` and `"` as entities.
 fn writeEscaped(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
-    var run_start: usize = 0;
+    var run_start: u32 = 0;
     for (text, 0..) |byte, index| {
         const entity = switch (byte) {
             '&' => "&amp;",
@@ -357,7 +422,7 @@ fn writeEscaped(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!vo
         };
         try writer.writeAll(text[run_start..index]);
         try writer.writeAll(entity);
-        run_start = index + 1;
+        run_start = @intCast(index + 1);
     }
     try writer.writeAll(text[run_start..]);
 }
@@ -414,6 +479,11 @@ test "writeInline closes marks left open by crossed markers" {
     try expectInline("**a _b** c_", "<b>a <i>b** c</i></b>");
 }
 
+test "writeInline closes italic only with the byte that opened it" {
+    try expectInline("_a* b_", "<i>a* b</i>");
+    try expectInline("*a_ b*", "<i>a_ b</i>");
+}
+
 test "writeInline writes web links and leaves others as text" {
     try expectInline("[fake](https://example.invalid/?a=1&b=\"2\")",
         \\<a href="https://example.invalid/?a=1&amp;b=&quot;2&quot;">fake</a>
@@ -422,6 +492,10 @@ test "writeInline writes web links and leaves others as text" {
     try expectInline("[fake](https://)", "[fake](https://)");
     try expectInline("[](https://example.invalid)", "[](https://example.invalid)");
     try expectInline("[fake](https://a b)", "[fake](https://a b)");
+    try expectInline("[fake](https://example.invalid/Foo_(bar)) x",
+        \\<a href="https://example.invalid/Foo_(bar)">fake</a> x
+    );
+    try expectInline("[fake](https://example.invalid/(open", "[fake](https://example.invalid/(open");
 }
 
 test "writeInline round-trips through what messages shows" {

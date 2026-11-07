@@ -143,10 +143,10 @@ const watch_read_count_limit = 10;
 const unread_read_count_limit = 10;
 
 /// The only chats `send` may write to: your own notes, until the owner widens it.
-const send_allowed_chat_ids = [_][]const u8{"48:notes"};
+const send_chat_ids_allowed = [_][]const u8{"48:notes"};
 
-/// The most text `send` takes. Teams refuses messages much past 28 KB of HTML, and escaping
-/// makes the HTML longer than the text.
+/// The most text `send` takes. Its HTML is checked too (see `chat.Client.content_size_max`),
+/// since escaping makes the HTML longer than the text.
 const send_text_size_max = 16 * 1024;
 
 /// The longest `watch` waits after throttling or a failure before trying again.
@@ -361,7 +361,7 @@ const Command = union(enum) {
     }
 };
 
-/// Sends `send.text` as one message, if its chat is in `send_allowed_chat_ids`, and prints when
+/// Sends `send.text` as one message, if its chat is in `send_chat_ids_allowed`, and prints when
 /// it arrived. Both checks come before any request that writes.
 fn runSend(
     client: *chat.Client,
@@ -388,21 +388,26 @@ fn runSend(
     chat.teams_html.writeMarkdown(&html.writer, send.text) catch return error.OutOfMemory;
     // The text holds more than whitespace (see `Command.parse`), so some HTML comes out.
     std.debug.assert(html.written().len > 0);
+    if (html.written().len > chat.Client.content_size_max) return error.SendTextTooLong;
 
     const user = try client.whoami();
     defer user.deinit();
 
-    const message_id = try client.send(conversation_id, html.written(), user.name);
+    const message_id = try client.send(conversation_id, .{
+        .content = html.written(),
+        .display_name = user.name,
+    });
     started_at.store(requests_idle, .release);
 
     var time_buffer: [short_time.width_max]u8 = undefined;
-    const at_seconds: i64 = @intCast(message_id / std.time.ms_per_s);
+    // `send` rejects ids from before 1970-01-02, so this fits `shortTimeAt`.
+    const at_seconds: i64 = @intCast(@divFloor(message_id, std.time.ms_per_s));
     try stdout.print("Sent {s}.\n", .{clock.shortTimeAt(&time_buffer, at_seconds)});
 }
 
 /// Whether `send` may write to `conversation_id`.
 fn runSendAllowed(conversation_id: []const u8) bool {
-    for (send_allowed_chat_ids) |allowed_id| {
+    for (send_chat_ids_allowed) |allowed_id| {
         if (std.mem.eql(u8, conversation_id, allowed_id)) return true;
     }
     return false;
@@ -1017,8 +1022,9 @@ fn reportError(
             " newest; check the spelling, or use its id from teams-zig chats",
         error.ChatNameAmbiguous => "several chats have that name; use one of the ids above",
         error.SendNotAllowed => "for now teams-zig only sends to your notes, 48:notes",
-        error.SendTextTooLong => "the text is longer than " ++
-            std.fmt.comptimePrint("{d}", .{send_text_size_max / 1024}) ++ " KiB",
+        error.SendTextTooLong => "the text is too long: at most " ++
+            std.fmt.comptimePrint("{d}", .{send_text_size_max / 1024}) ++
+            " KiB, and less if it holds many of & < > \"",
         error.ConversationIdTooLong => "the Chat Service sent a chat id longer than teams-zig " ++
             "keeps track of",
         error.UnexpectedStatus => {
@@ -1340,6 +1346,12 @@ test "runSend refuses long text and other chats before any request" {
     const too_long: Command.Send = .{ .chat = .{ .id = "48:notes" }, .text = &long_text };
     const too_long_result = runSend(&client, &clock, &out.writer, &started_at, &too_long);
     try std.testing.expectError(error.SendTextTooLong, too_long_result);
+
+    // Under the text cap, but `"` becomes `&quot;`, so the HTML is far over its own.
+    const quotes: [send_text_size_max]u8 = @splat('"');
+    const quoted: Command.Send = .{ .chat = .{ .id = "48:notes" }, .text = &quotes };
+    const quoted_result = runSend(&client, &clock, &out.writer, &started_at, &quoted);
+    try std.testing.expectError(error.SendTextTooLong, quoted_result);
 
     const elsewhere: Command.Send = .{ .chat = .{ .id = "19:fake@thread.v2" }, .text = "fake" };
     const elsewhere_result = runSend(&client, &clock, &out.writer, &started_at, &elsewhere);
