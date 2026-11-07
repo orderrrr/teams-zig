@@ -53,7 +53,7 @@ const Output = struct {
             if (output.before == .content) output.before = .blank;
             return;
         }
-        if (std.mem.startsWith(u8, text, "```")) {
+        if (lineFenceOpens(text)) {
             try output.startBlock(.{ .code = 0 });
             try output.writer.writeAll("<pre>");
             return;
@@ -128,6 +128,14 @@ const Output = struct {
         try output.closeBlock();
     }
 };
+
+/// Whether a line opens a fenced code block: `` ``` `` and maybe a language, but no backtick
+/// after the opening run, so a one-line ```` ```code``` ```` stays inline code (as in CommonMark).
+fn lineFenceOpens(text: []const u8) bool {
+    if (!std.mem.startsWith(u8, text, "```")) return false;
+    const run_len = std.mem.indexOfNone(u8, text, "`") orelse return true;
+    return std.mem.indexOfScalar(u8, text[run_len..], '`') == null;
+}
 
 /// The level of a `# `, `## ` or `### ` heading line, or null.
 fn lineHeadingLevel(text: []const u8) ?u8 {
@@ -591,6 +599,12 @@ test "writeMarkdown writes headings, quotes and lists" {
     try expectMarkdown("- a\n* b\n1. c\n2) d",
         \\<ul><li>a</li><li>b</li></ul><ol><li>c</li><li>d</li></ol>
     );
+}
+
+test "writeMarkdown keeps one-line code at a line's start inline" {
+    try expectMarkdown("```ls -la```\nfake", "<p><code>ls -la</code><br>fake</p>");
+    try expectMarkdown("```zig\nfake\n```", "<pre>fake</pre>");
+    try expectMarkdown("````\nfake\n````", "<pre>fake</pre>");
 }
 
 test "writeMarkdown fences code as typed and closes an unclosed fence" {
