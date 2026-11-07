@@ -452,7 +452,8 @@ fn watchdog(io: Io, started_at: *const std.atomic.Value(i64)) void {
     }
 
     std.debug.print(
-        "teams-zig: no answer from the Chat Service in {d} seconds; check the network\n",
+        "teams-zig: no answer from the Chat Service in {d} seconds; check the network " ++
+            "(after a send, check the chat first)\n",
         .{requests_seconds_max},
     );
     // _exit, not exit: exit handlers mustn't run on this thread while main is still working.
