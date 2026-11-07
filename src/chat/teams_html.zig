@@ -495,7 +495,8 @@ test "writeInline writes web links and leaves others as text" {
     try expectInline("[fake](https://example.invalid/Foo_(bar)) x",
         \\<a href="https://example.invalid/Foo_(bar)">fake</a> x
     );
-    try expectInline("[fake](https://example.invalid/(open", "[fake](https://example.invalid/(open");
+    const unclosed = "[fake](https://example.invalid/(open";
+    try expectInline(unclosed, unclosed);
 }
 
 test "writeInline round-trips through what messages shows" {
