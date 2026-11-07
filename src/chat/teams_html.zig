@@ -200,7 +200,12 @@ fn writeInline(writer: *std.Io.Writer, line: []const u8) std.Io.Writer.Error!voi
     std.debug.assert(std.mem.indexOfScalar(u8, line, '\n') == null);
     std.debug.assert(line.len <= std.math.maxInt(u32));
     var state: Inline = .{ .writer = writer, .line = line };
-    while (state.index < line.len) try state.next();
+    while (state.index < line.len) {
+        const index_before = state.index;
+        try state.next();
+        // Checked after success only: a failed write leaves the index where it was.
+        std.debug.assert(state.index > index_before);
+    }
     try state.finish();
 }
 
@@ -223,8 +228,6 @@ const Inline = struct {
     /// Writes the next piece of the line: an escape, code, a link, a marker or plain text.
     fn next(state: *Inline) std.Io.Writer.Error!void {
         std.debug.assert(state.index < state.line.len);
-        const index_before = state.index;
-        defer std.debug.assert(state.index > index_before);
         if (try state.nextEscape()) return;
         if (try state.nextCode()) return;
         if (try state.nextLink()) return;
