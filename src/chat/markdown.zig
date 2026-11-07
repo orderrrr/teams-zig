@@ -86,6 +86,9 @@ const Output = struct {
     link_href: []const u8 = "",
     /// How many quotes are open; lines show at most `quote_depth_limit` of them.
     quote_depth: u8 = 0,
+    /// How many quotes were open when the pending blank line was owed. A quote that opens
+    /// after it doesn't prefix it, so the blank line before a quote stays outside it.
+    blank_line_quote_depth: u8 = 0,
     /// The open lists, outermost first; only the first `list_depth_limit` are kept.
     lists: [list_depth_limit]List = undefined,
     /// How many lists are open, counting those deeper than `list_depth_limit`.
@@ -408,7 +411,7 @@ const Output = struct {
     /// Writes the start of a line: `> ` for each quote shown, then the list indent, with the
     /// item's marker on an item's first line, then a heading's `#` marks.
     fn writeLinePrefix(output: *Output) std.Io.Writer.Error!void {
-        try output.writeQuotes("> ");
+        try output.writeQuotes(output.quote_depth, "> ");
         try output.writeLinePrefixList();
         if (output.heading_starting) |level| {
             std.debug.assert(level >= 1);
@@ -419,8 +422,8 @@ const Output = struct {
     }
 
     /// Writes `> ` for each quote shown, with `last` for the innermost.
-    fn writeQuotes(output: *Output, last: []const u8) std.Io.Writer.Error!void {
-        const quote_depth = @min(output.quote_depth, quote_depth_limit);
+    fn writeQuotes(output: *Output, depth: u8, last: []const u8) std.Io.Writer.Error!void {
+        const quote_depth = @min(depth, quote_depth_limit);
         if (quote_depth == 0) return;
         try output.writer.splatBytesAll("> ", quote_depth - 1);
         try output.writer.writeAll(last);
@@ -457,6 +460,7 @@ const Output = struct {
 
     fn blankLine(output: *Output) void {
         output.breaks_pending = 2;
+        output.blank_line_quote_depth = output.quote_depth;
         output.space_pending = false;
     }
 
@@ -473,7 +477,8 @@ const Output = struct {
             try output.writer.writeByte('\n');
             if (output.breaks_pending == 2) {
                 // A blank line inside quotes holds only them, the last as a bare `>`.
-                try output.writeQuotes(">");
+                const depth = @min(output.blank_line_quote_depth, output.quote_depth);
+                try output.writeQuotes(depth, ">");
                 try output.writer.writeByte('\n');
             }
             output.breaks_pending = 0;
@@ -752,7 +757,7 @@ test "writeHtml escapes typed text that would start a Markdown block" {
 test "writeHtml escapes after a line's prefix, and only at a line's start" {
     try expectMarkdown("<ul><li># fake</li></ul><blockquote>- fake</blockquote>",
         \\- \# fake
-        \\>
+        \\
         \\> \- fake
     );
     try expectMarkdown("<p>fake # - 1. &gt; ```</p>", "fake # - 1. > ```");
@@ -762,4 +767,24 @@ test "writeHtml escapes after a line's prefix, and only at a line's start" {
     try expectMarkdown("<p>123456789. fake</p>", "123456789\\. fake");
     try expectMarkdown("<p>1234567890. fake</p>", "1234567890. fake");
     try expectMarkdown("<pre># fake</pre>", "```\n# fake\n```");
+}
+
+test "writeHtml keeps the blank line before a quote outside it" {
+    try expectMarkdown("<ul><li>fake</li></ul><blockquote>fake quote</blockquote>",
+        \\- fake
+        \\
+        \\> fake quote
+    );
+    const nested = "<blockquote><blockquote>fake quote</blockquote></blockquote>";
+    try expectMarkdown("<p>fake</p><p>&nbsp;</p>" ++ nested,
+        \\fake
+        \\
+        \\> > fake quote
+    );
+    const spaced = "<blockquote><p>fake one</p><p>&nbsp;</p><p>fake two</p></blockquote>";
+    try expectMarkdown(spaced,
+        \\> fake one
+        \\>
+        \\> fake two
+    );
 }
