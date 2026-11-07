@@ -306,3 +306,7 @@ Reads were checked live after each change to the request code (counts only). The
 ## After M5: send to any chat (0.7.0)
 
 On 2026-11-07 the owner asked to remove the notes-only restriction. `send` now writes to any chat chosen by exact name or id; the allow list, `SendNotAllowed` and their tests are gone, and the size checks stay before any request. No live send was made for this change; live sends stay limited to `48:notes`, with the owner's go-ahead each time.
+
+## 0.7.1 and 0.8.0: code spans and fences (owner-reported)
+
+The owner sent a snippet wrapped in ``` on one line (fish had joined the lines) and it was cut at the first inner backtick. 0.7.1 matched code spans by backtick run length, as CommonMark does. The owner then chose Teams' compose-box behaviour over CommonMark for three or more backticks: 0.8.0 makes ``` a code block wherever it is typed, with surrounding text as its own paragraphs. One live send to `48:notes` (owner-approved at the time) came back with every form as intended.
