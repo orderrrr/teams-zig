@@ -5,8 +5,8 @@ const std = @import("std");
 
 /// Writes `text`, Markdown you typed, as a message's HTML. Lines are paragraphs (lines next to
 /// each other share one, split by `<br>`), and a blank line between them stays. Lines starting
-/// `#`–`###`, `> `, `- `/`* `/`+ ` or `1. ` are headings, quotes and list items; `` ``` `` lines
-/// fence a code block, kept as typed. `\r` is dropped.
+/// `#`–`###`, `> `, `- `/`* `/`+ ` or `1. ` are headings, quotes and list items. Three or more
+/// backticks anywhere fence a code block, kept as typed, as in Teams. `\r` is dropped.
 pub fn writeMarkdown(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     var output: Output = .{ .writer = writer };
     var lines = std.mem.splitScalar(u8, text, '\n');
