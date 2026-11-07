@@ -260,9 +260,9 @@ All six chunks done; live check (read-only, counts only) over 11 chats: every he
 - **Round 3.** mr-review: `writeDay`'s comment read as "yesterday". STYLE 1.6: `writeDay`'s helpers carry its name. Tiger Style: the time is computed after the day is written, close to its use.
 - **Round 4:** all three reviews found nothing new. Gate passed. Polish pass resolved at 0.5.0.
 
-## M5: send messages, written in Markdown (planned, needs approval)
+## M5: send messages, written in Markdown
 
-Asked for by the owner on 2026-11-06: sending, with Markdown turned into Teams' format. Testing uses the owner's own account, sends only to their notes chat (`48:notes`), and is kept to a minimum.
+Asked for by the owner on 2026-11-06: sending, with Markdown turned into Teams' format. Testing uses the owner's own account, sends only to their notes chat (`48:notes`), and is kept to a minimum. Plan approved by the owner on 2026-11-07, on the condition that the live send (M5.5) waits for their go-ahead at that moment; until then nothing is sent.
 
 Protocol (from `inspo/`, facts only): `POST /v1/users/ME/conversations/{id}/messages` with JSON `content` (HTML), `messagetype: "RichText/Html"`, `contenttype: "text"`, `clientmessageid` (a fresh number) and `imdisplayname` (your name); the answer carries `OriginalArrivalTime`, the new message's id.
 
