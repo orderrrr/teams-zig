@@ -282,7 +282,11 @@ const Inline = struct {
     /// `text` begins, or null if none follows.
     fn nextCodeCloseStart(text: []const u8, run_len: u32) ?u32 {
         std.debug.assert(run_len > 0);
+        std.debug.assert(run_len <= text.len);
         std.debug.assert(text.len <= std.math.maxInt(u32));
+        // `text` opens with exactly `run_len` backticks.
+        std.debug.assert(std.mem.indexOfNone(u8, text[0..run_len], "`") == null);
+        if (run_len < text.len) std.debug.assert(text[run_len] != '`');
         var search_start: u32 = run_len;
         while (std.mem.indexOfScalarPos(u8, text, search_start, '`')) |candidate| {
             const candidate_end = std.mem.indexOfNonePos(u8, text, candidate, "`") orelse text.len;
