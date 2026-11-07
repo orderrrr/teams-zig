@@ -302,3 +302,7 @@ On 2026-11-07, with the owner's go-ahead at that moment: one `send` to `48:notes
 - **Round 5:** all three reviews found nothing new. Gate passed. M5 resolved at 0.6.0.
 
 Reads were checked live after each change to the request code (counts only). The only write in M5 was the one approved send to `48:notes`.
+
+## After M5: send to any chat (0.7.0)
+
+On 2026-11-07 the owner asked to remove the notes-only restriction. `send` now writes to any chat chosen by exact name or id; the allow list, `SendNotAllowed` and their tests are gone, and the size checks stay before any request. No live send was made for this change; live sends stay limited to `48:notes`, with the owner's go-ahead each time.

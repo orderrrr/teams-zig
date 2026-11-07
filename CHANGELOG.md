@@ -2,6 +2,11 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.7.0: send to any chat
+
+- `teams-zig send` sends to any chat you can name or give the id of, not just your notes. Choose the chat the way `messages` does: its exact name, or its id. A name that several chats share is refused, with their ids listed.
+- Writes to Teams: sending is the only write.
+
 ## 0.6.0 (M5): send messages in Markdown
 
 - `teams-zig send <chat> <text>` sends one message. The text is Markdown, sent as Teams' own formatting: `**bold**`, `_italic_` or `*italic*`, `~~strike~~`, `` `code` ``, `[text](https://…)` links, `#` to `###` headings, `- ` and `1. ` lists, `> ` quotes and `` ``` `` code blocks. Everything typed is escaped, so it can't become hidden markup; a `\` before punctuation keeps it literal.

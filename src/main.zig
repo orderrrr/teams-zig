@@ -70,8 +70,7 @@ const usage =
     \\                               arrive; Ctrl-C stops
     \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
     \\                               name as chats shows it (quote it if it has spaces) or its id
-    \\  send <chat> <text>           send <text>, written in Markdown (quote it), to <chat>;
-    \\                               for now only to your notes, 48:notes
+    \\  send <chat> <text>           send <text>, written in Markdown (quote it), to <chat>
     \\
     \\Sign in first with scripts/teams-token.fish, which stores the token in the login keychain.
     \\
@@ -145,9 +144,6 @@ const watch_read_count_limit = 10;
 /// watchdog's limit.
 const unread_read_count_limit = 10;
 
-/// The only chats `send` may write to: your own notes, until the owner widens it.
-const send_chat_ids_allowed = [_][]const u8{"48:notes"};
-
 /// The most text `send` takes. Its HTML is checked too (see `chat.Client.content_size_max`),
 /// since escaping makes the HTML longer than the text.
 const send_text_size_max = 16 * 1024;
@@ -212,7 +208,7 @@ const RunError = chat.Client.Error || Io.Writer.Error || ChatNameError || WatchE
 const ChatNameError = error{ ChatNameNotFound, ChatNameAmbiguous };
 
 /// Failures of `send` found before any request.
-const SendError = error{ SendNotAllowed, SendTextTooLong };
+const SendError = error{SendTextTooLong};
 
 /// Failures of `watch` beyond the Chat Service's and the output's.
 const WatchError = Seen.Error;
@@ -365,8 +361,8 @@ const Command = union(enum) {
     }
 };
 
-/// Sends `send.text` as one message, if its chat is in `send_chat_ids_allowed`, and prints when
-/// it arrived. Both checks come before any request that writes.
+/// Sends `send.text` as one message and prints when it arrived. Text too long to send is
+/// refused before any request.
 fn runSend(
     client: *chat.Client,
     clock: *const Clock,
@@ -385,7 +381,6 @@ fn runSend(
         .id => |id| id,
         .name => |name| try findChat(client, arena, name, clock, stdout, started_at),
     };
-    if (!runSendAllowed(conversation_id)) return error.SendNotAllowed;
 
     var html: Io.Writer.Allocating = .init(arena);
     // An Allocating writer fails only when it can't grow.
@@ -408,14 +403,6 @@ fn runSend(
     // (asserted at comptime above).
     const at_seconds: i64 = @intCast(@divFloor(message_id, std.time.ms_per_s));
     try stdout.print("Sent {s}.\n", .{clock.shortTimeAt(&time_buffer, at_seconds)});
-}
-
-/// Whether `send` may write to `conversation_id`.
-fn runSendAllowed(conversation_id: []const u8) bool {
-    for (send_chat_ids_allowed) |allowed_id| {
-        if (std.mem.eql(u8, conversation_id, allowed_id)) return true;
-    }
-    return false;
 }
 
 /// Lists your `conversation_count` newest chats, one `printChat` row each.
@@ -1026,7 +1013,6 @@ fn reportError(
             std.fmt.comptimePrint("{d}", .{conversation_count_limit}) ++
             " newest; check the spelling, or use its id from teams-zig chats",
         error.ChatNameAmbiguous => "several chats have that name; use one of the ids above",
-        error.SendNotAllowed => "for now teams-zig only sends to your notes, 48:notes",
         error.SendTextTooLong => "the text is too long: at most " ++
             std.fmt.comptimePrint("{d}", .{send_text_size_max / 1024}) ++
             " KiB, and less if it holds many of & < > \"",
@@ -1324,15 +1310,7 @@ test "lookupErrorSkips skips errors about one chat and stops on ones that hit ev
     try std.testing.expect(!lookupErrorSkips(error.ConnectFailed, null));
 }
 
-test "runSendAllowed allows only your notes" {
-    try std.testing.expect(runSendAllowed("48:notes"));
-    try std.testing.expect(!runSendAllowed("48:notes "));
-    try std.testing.expect(!runSendAllowed("48:Notes"));
-    try std.testing.expect(!runSendAllowed("19:fake@thread.v2"));
-    try std.testing.expect(!runSendAllowed(""));
-}
-
-test "runSend refuses long text and other chats before any request" {
+test "runSend refuses text too long to send before any request" {
     var client: chat.Client = undefined;
     // A fake token: a request would be refused with another error. None is expected, which
     // `response_status` staying null confirms.
@@ -1357,10 +1335,6 @@ test "runSend refuses long text and other chats before any request" {
     const quoted: Command.Send = .{ .chat = .{ .id = "48:notes" }, .text = &quotes };
     const quoted_result = runSend(&client, &clock, &out.writer, &started_at, &quoted);
     try std.testing.expectError(error.SendTextTooLong, quoted_result);
-
-    const elsewhere: Command.Send = .{ .chat = .{ .id = "19:fake@thread.v2" }, .text = "fake" };
-    const elsewhere_result = runSend(&client, &clock, &out.writer, &started_at, &elsewhere);
-    try std.testing.expectError(error.SendNotAllowed, elsewhere_result);
     try std.testing.expectEqual(null, client.response_status);
     try std.testing.expectEqualStrings("", out.written());
 }
