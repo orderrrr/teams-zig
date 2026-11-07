@@ -70,6 +70,8 @@ const usage =
     \\                               arrive; Ctrl-C stops
     \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
     \\                               name as chats shows it (quote it if it has spaces) or its id
+    \\  send <chat> <text>           send <text>, written in Markdown (quote it), to <chat>;
+    \\                               for now only to your notes, 48:notes
     \\
     \\Sign in first with scripts/teams-token.fish, which stores the token in the login keychain.
     \\
@@ -140,6 +142,13 @@ const watch_read_count_limit = 10;
 /// watchdog's limit.
 const unread_read_count_limit = 10;
 
+/// The only chats `send` may write to: your own notes, until the owner widens it.
+const send_allowed_chat_ids = [_][]const u8{"48:notes"};
+
+/// The most text `send` takes. Teams refuses messages much past 28 KB of HTML, and escaping
+/// makes the HTML longer than the text.
+const send_text_size_max = 16 * 1024;
+
 /// The longest `watch` waits after throttling or a failure before trying again.
 const watch_backoff_seconds_max = 300;
 
@@ -164,6 +173,17 @@ const Clock = struct {
         timestamp: []const u8,
     ) ?[]const u8 {
         const at_seconds = short_time.parseIso(timestamp) orelse return null;
+        return clock.shortTimeAt(buffer, at_seconds);
+    }
+
+    /// `at_seconds`, since 1970 GMT, in its short local form, written into `buffer`.
+    fn shortTimeAt(
+        clock: *const Clock,
+        buffer: *[short_time.width_max]u8,
+        at_seconds: i64,
+    ) []const u8 {
+        // Local times must stay after 1970 (see `short_time.write`).
+        std.debug.assert(at_seconds >= std.time.s_per_day);
         const times: short_time.Times = .{
             .at_seconds = at_seconds + clock.zone.secondsFromGmt(at_seconds),
             .now_seconds = clock.now_seconds + clock.zone.secondsFromGmt(clock.now_seconds),
@@ -183,9 +203,12 @@ const KeychainReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory }
 
 /// Failures running a command: the Chat Service's, writing the output, or a chat name that
 /// picks no chat or several.
-const RunError = chat.Client.Error || Io.Writer.Error || ChatNameError || WatchError;
+const RunError = chat.Client.Error || Io.Writer.Error || ChatNameError || WatchError || SendError;
 
 const ChatNameError = error{ ChatNameNotFound, ChatNameAmbiguous };
+
+/// Failures of `send` found before any request.
+const SendError = error{ SendNotAllowed, SendTextTooLong };
 
 /// Failures of `watch` beyond the Chat Service's and the output's.
 const WatchError = Seen.Error;
@@ -200,10 +223,17 @@ const Command = union(enum) {
     /// How many conversations to list.
     chats: u16,
     messages: Messages,
+    send: Send,
 
     const Messages = struct {
         chat: Chat,
         count: u32,
+    };
+
+    const Send = struct {
+        chat: Chat,
+        /// Markdown, as typed. Borrows the argument, which lives as long as `main`.
+        text: []const u8,
     };
 
     /// A chat as typed on the command line. Both borrow the argument slice, which lives as long
@@ -261,6 +291,12 @@ const Command = union(enum) {
                 message_count_default;
             return .{ .messages = .{ .chat = .parse(rest[0]), .count = count } };
         }
+        if (std.mem.eql(u8, name, "send")) {
+            if (rest.len != 2) return null;
+            if (rest[0].len == 0) return null;
+            if (std.mem.trim(u8, rest[1], &std.ascii.whitespace).len == 0) return null;
+            return .{ .send = .{ .chat = .parse(rest[0]), .text = rest[1] } };
+        }
         return null;
     }
 
@@ -289,6 +325,7 @@ const Command = union(enum) {
                 try writeVisible(stdout, user.upn);
                 try stdout.writeAll(">\n");
             },
+            .send => |send| try runSend(client, clock, stdout, started_at, &send),
             .chats => |conversation_count| {
                 try runChats(client, clock, stdout, started_at, conversation_count);
             },
@@ -323,6 +360,53 @@ const Command = union(enum) {
         }
     }
 };
+
+/// Sends `send.text` as one message, if its chat is in `send_allowed_chat_ids`, and prints when
+/// it arrived. Both checks come before any request that writes.
+fn runSend(
+    client: *chat.Client,
+    clock: *const Clock,
+    stdout: *Io.Writer,
+    started_at: *std.atomic.Value(i64),
+    send: *const Command.Send,
+) RunError!void {
+    if (send.text.len > send_text_size_max) return error.SendTextTooLong;
+
+    // Holds a looked-up chat's id and the message's HTML; freed with the command.
+    var send_arena: std.heap.ArenaAllocator = .init(client.gpa);
+    defer send_arena.deinit();
+
+    const arena = send_arena.allocator();
+    const conversation_id = switch (send.chat) {
+        .id => |id| id,
+        .name => |name| try findChat(client, arena, name, clock, stdout, started_at),
+    };
+    if (!runSendAllowed(conversation_id)) return error.SendNotAllowed;
+
+    var html: Io.Writer.Allocating = .init(arena);
+    // An Allocating writer fails only when it can't grow.
+    chat.teams_html.writeMarkdown(&html.writer, send.text) catch return error.OutOfMemory;
+    // The text holds more than whitespace (see `Command.parse`), so some HTML comes out.
+    std.debug.assert(html.written().len > 0);
+
+    const user = try client.whoami();
+    defer user.deinit();
+
+    const message_id = try client.send(conversation_id, html.written(), user.name);
+    started_at.store(requests_idle, .release);
+
+    var time_buffer: [short_time.width_max]u8 = undefined;
+    const at_seconds: i64 = @intCast(message_id / std.time.ms_per_s);
+    try stdout.print("Sent {s}.\n", .{clock.shortTimeAt(&time_buffer, at_seconds)});
+}
+
+/// Whether `send` may write to `conversation_id`.
+fn runSendAllowed(conversation_id: []const u8) bool {
+    for (send_allowed_chat_ids) |allowed_id| {
+        if (std.mem.eql(u8, conversation_id, allowed_id)) return true;
+    }
+    return false;
+}
 
 /// Lists your `conversation_count` newest chats, one `printChat` row each.
 fn runChats(
@@ -931,6 +1015,9 @@ fn reportError(
             std.fmt.comptimePrint("{d}", .{conversation_count_limit}) ++
             " newest; check the spelling, or use its id from teams-zig chats",
         error.ChatNameAmbiguous => "several chats have that name; use one of the ids above",
+        error.SendNotAllowed => "for now teams-zig only sends to your notes, 48:notes",
+        error.SendTextTooLong => "the text is longer than " ++
+            std.fmt.comptimePrint("{d}", .{send_text_size_max / 1024}) ++ " KiB",
         error.ConversationIdTooLong => "the Chat Service sent a chat id longer than teams-zig " ++
             "keeps track of",
         error.UnexpectedStatus => {
@@ -946,8 +1033,11 @@ fn reportError(
         error.ForeignLink => "the Chat Service sent a link teams-zig won't follow",
         error.Redirected => "the Chat Service redirected; not following, so the token stays there",
         error.ConnectFailed => "couldn't reach the Chat Service; check the network",
-        error.SendFailed => "couldn't send the request to the Chat Service; try again",
-        error.ConnectionDropped => "the connection dropped mid-response; try again",
+        // A send that failed this way may still have arrived, so look before sending it again.
+        error.SendFailed => "couldn't send the request to the Chat Service; try again " ++
+            "(after a send, check the chat first)",
+        error.ConnectionDropped => "the connection dropped mid-response; try again " ++
+            "(after a send, check the chat first)",
         error.BadResponse => "the Chat Service sent a response that isn't valid HTTP",
         error.UnexpectedJson => "the Chat Service's reply had an unexpected shape",
         error.ResponseTooLarge => "the Chat Service sent a response larger than teams-zig accepts",
@@ -967,6 +1057,10 @@ test {
 test "Command.parse accepts the commands and rejects anything else" {
     try std.testing.expectEqual(Command.whoami, Command.parse(&.{ "teams-zig", "whoami" }).?);
     try std.testing.expectEqual(Command.unread, Command.parse(&.{ "teams-zig", "unread" }).?);
+
+    const send = Command.parse(&.{ "teams-zig", "send", "48:notes", "**fake**" }).?;
+    try std.testing.expectEqualStrings("48:notes", send.send.chat.id);
+    try std.testing.expectEqualStrings("**fake**", send.send.text);
 
     const chats = Command.parse(&.{ "teams-zig", "chats" }).?;
     try std.testing.expectEqual(conversation_count_default, chats.chats);
@@ -997,6 +1091,10 @@ test "Command.parse accepts the commands and rejects anything else" {
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "messages", "19:x", "-1" }));
     try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send", "48:notes" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send", "48:notes", " \n" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send", "", "fake" }));
+    try std.testing.expectEqual(null, Command.parse(&.{ "teams-zig", "send", "a", "b", "c" }));
 }
 
 test "Command.Chat.parse tells ids from names" {
@@ -1212,4 +1310,39 @@ test "lookupErrorSkips skips errors about one chat and stops on ones that hit ev
     try std.testing.expect(!lookupErrorSkips(error.UnexpectedStatus, .service_unavailable));
     try std.testing.expect(!lookupErrorSkips(error.TokenExpired, .unauthorized));
     try std.testing.expect(!lookupErrorSkips(error.ConnectFailed, null));
+}
+
+test "runSendAllowed allows only your notes" {
+    try std.testing.expect(runSendAllowed("48:notes"));
+    try std.testing.expect(!runSendAllowed("48:notes "));
+    try std.testing.expect(!runSendAllowed("48:Notes"));
+    try std.testing.expect(!runSendAllowed("19:fake@thread.v2"));
+    try std.testing.expect(!runSendAllowed(""));
+}
+
+test "runSend refuses long text and other chats before any request" {
+    var client: chat.Client = undefined;
+    // A fake token: a request would be refused with another error. None is expected, which
+    // `response_status` staying null confirms.
+    try client.init(std.testing.allocator, std.testing.io, .emea, "fake-token");
+    defer client.deinit();
+
+    const zone = try core_foundation.TimeZone.createFixed(0);
+    defer core_foundation.release(zone);
+
+    const clock: Clock = .{ .zone = zone, .now_seconds = 1_793_966_400 };
+    var started_at: std.atomic.Value(i64) = .init(requests_idle);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    const long_text: [send_text_size_max + 1]u8 = @splat('a');
+    const too_long: Command.Send = .{ .chat = .{ .id = "48:notes" }, .text = &long_text };
+    const too_long_result = runSend(&client, &clock, &out.writer, &started_at, &too_long);
+    try std.testing.expectError(error.SendTextTooLong, too_long_result);
+
+    const elsewhere: Command.Send = .{ .chat = .{ .id = "19:fake@thread.v2" }, .text = "fake" };
+    const elsewhere_result = runSend(&client, &clock, &out.writer, &started_at, &elsewhere);
+    try std.testing.expectError(error.SendNotAllowed, elsewhere_result);
+    try std.testing.expectEqual(null, client.response_status);
+    try std.testing.expectEqualStrings("", out.written());
 }
