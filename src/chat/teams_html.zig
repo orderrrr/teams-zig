@@ -324,8 +324,8 @@ const Inline = struct {
         return true;
     }
 
-    /// The marker at `index` opens if text follows it; `_` also needs no letter or digit before it, so
-    /// `snake_case_name` stays as typed.
+    /// The marker at `index` opens if text follows it; `_` also needs no letter or digit before
+    /// it, so `snake_case_name` stays as typed.
     fn nextMarkerOpenAllowed(state: *const Inline, marker: MarkerAt) bool {
         std.debug.assert(state.index < state.line.len);
         const after = state.index + marker.len;
