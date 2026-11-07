@@ -400,7 +400,8 @@ fn runSend(
     started_at.store(requests_idle, .release);
 
     var time_buffer: [short_time.width_max]u8 = undefined;
-    // `send` takes only ids from 1970-01-02 to the end of 9999, which `shortTimeAt` can show.
+    // `send` takes only ids from 1970-01-02 to a day before the end of 9999, which
+    // `shortTimeAt` can show in any time zone.
     const at_seconds: i64 = @intCast(@divFloor(message_id, std.time.ms_per_s));
     try stdout.print("Sent {s}.\n", .{clock.shortTimeAt(&time_buffer, at_seconds)});
 }

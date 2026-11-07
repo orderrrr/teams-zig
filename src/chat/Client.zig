@@ -73,9 +73,9 @@ pub const message_count_limit = page_item_count_limit * page_count_limit;
 /// Teams refuses messages much past 28 KB of HTML; callers check before sending.
 pub const content_size_max = 28 * 1024;
 
-/// The newest message id `send` accepts: the last millisecond of 9999, since the time shown
-/// for it has room for a four-digit year.
-const message_id_max = 253_402_300_799_999;
+/// The newest message id `send` accepts: a day before the end of 9999, since the time shown for
+/// it has room for a four-digit year, and every time zone is within a day of GMT.
+const message_id_max = 253_402_300_799_999 - std.time.ms_per_day;
 
 /// A message to send. A struct, so the two strings can't be swapped at a call site.
 pub const NewMessage = struct {
@@ -730,7 +730,9 @@ test "sendAnswerId reads the new message's id and rejects other shapes" {
     try std.testing.expectError(error.UnexpectedJson, no_id);
     const early_id = sendAnswerId(std.testing.allocator, "{\"OriginalArrivalTime\":0}");
     try std.testing.expectError(error.UnexpectedJson, early_id);
-    const late_body = "{\"OriginalArrivalTime\":253402300800000}";
+    const last_body = "{\"OriginalArrivalTime\":253402214399999}";
+    try std.testing.expectEqual(message_id_max, try sendAnswerId(std.testing.allocator, last_body));
+    const late_body = "{\"OriginalArrivalTime\":253402214400000}";
     const late_id = sendAnswerId(std.testing.allocator, late_body);
     try std.testing.expectError(error.UnexpectedJson, late_id);
 }
