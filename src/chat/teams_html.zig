@@ -48,8 +48,8 @@ const Output = struct {
 
     /// A typed line. As in Teams' compose box, a run of three or more backticks anywhere is a code
     /// fence: with a run of the same length later on the line, what's between is a code block;
-    /// without one, the block starts on the next line (the rest of this one names the language).
-    /// Text before and after a fence becomes its own block.
+    /// without one, the block runs on to a later fence (see `lineFenceOpen` for the rest of this
+    /// line). Text before and after a fence becomes its own block.
     fn line(output: *Output, text: []const u8) std.Io.Writer.Error!void {
         var rest = text;
         // Each pass ends the line or consumes a fence and its partner, so it stops within it.
