@@ -250,17 +250,48 @@ const Inline = struct {
         return true;
     }
 
-    /// `` `code` ``: the code as typed, with no markup inside.
+    /// `` `code` ``: the code as typed, with no markup or escapes inside. As in CommonMark, a run
+    /// of backticks closes only at a run of the same length, so ``` ``a `b` c`` ``` holds
+    /// backticks, and one space just inside each end is dropped. A run with no partner is text,
+    /// whole, so no part of it opens code later.
     fn nextCode(state: *Inline) std.Io.Writer.Error!bool {
         const text = state.rest();
         if (text[0] != '`') return false;
-        const close_index = std.mem.indexOfScalar(u8, text[1..], '`') orelse return false;
-        if (close_index == 0) return false;
+        const run_len: u32 = @intCast(std.mem.indexOfNone(u8, text, "`") orelse text.len);
+        const close_start = nextCodeCloseStart(text, run_len) orelse {
+            try state.writer.writeAll(text[0..run_len]);
+            state.index += run_len;
+            return true;
+        };
         try state.writer.writeAll("<code>");
-        try writeEscaped(state.writer, text[1..][0..close_index]);
+        try writeEscaped(state.writer, nextCodeTrim(text[run_len..close_start]));
         try state.writer.writeAll("</code>");
-        state.index += @intCast(close_index + 2);
+        state.index += @intCast(close_start + run_len);
         return true;
+    }
+
+    /// Where the run of exactly `run_len` backticks that closes code opened at the start of
+    /// `text` begins, or null if none follows.
+    fn nextCodeCloseStart(text: []const u8, run_len: u32) ?u32 {
+        std.debug.assert(run_len > 0);
+        std.debug.assert(text.len <= std.math.maxInt(u32));
+        var search_start: u32 = run_len;
+        while (std.mem.indexOfScalarPos(u8, text, search_start, '`')) |candidate| {
+            const candidate_end = std.mem.indexOfNonePos(u8, text, candidate, "`") orelse text.len;
+            if (candidate_end - candidate == run_len) return @intCast(candidate);
+            search_start = @intCast(candidate_end);
+        }
+        return null;
+    }
+
+    /// Code with one space dropped from each end when both ends have one and it isn't all
+    /// spaces, so `` `` `x` `` `` shows `` `x` ``.
+    fn nextCodeTrim(code: []const u8) []const u8 {
+        if (code.len < 2) return code;
+        if (code[0] != ' ') return code;
+        if (code[code.len - 1] != ' ') return code;
+        if (std.mem.indexOfNone(u8, code, " ") == null) return code;
+        return code[1 .. code.len - 1];
     }
 
     /// `[text](url)` with a web address: a link. The text is plain.
@@ -472,6 +503,18 @@ test "writeInline leaves markers without a partner as text" {
     try expectInline("**open only", "**open only");
     try expectInline("`open only", "`open only");
     try expectInline("``", "``");
+    try expectInline("``fake`", "``fake`");
+}
+
+test "writeInline closes code only at a backtick run of the same length" {
+    try expectInline("```a `b` c```", "<code>a `b` c</code>");
+    try expectInline("`` `fake` ``", "<code>`fake`</code>");
+    try expectInline("`a\\`b`", "<code>a\\</code>b`");
+    // A fenced snippet typed on one line, backslashes and all, stays one code span.
+    const snippet = "just: ```send \"Fake\" \"**hi** \\`test\\`\"``` in markdown";
+    try expectInline(snippet,
+        \\just: <code>send &quot;Fake&quot; &quot;**hi** \`test\`&quot;</code> in markdown
+    );
 }
 
 test "writeInline keeps backslash-escaped punctuation literal" {

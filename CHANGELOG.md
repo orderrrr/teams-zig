@@ -2,6 +2,12 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.7.1: inline code with backticks inside
+
+- Fixed: in `send`, inline code opened with several backticks (```` ``` ````) now closes only at the same number of backticks, as in Markdown, so code holding single backticks stays whole. Before, it ended at the next backtick. One space just inside each end is dropped, so `` `` `x` `` `` sends `` `x` ``.
+
+Known limits: `messages` still shows inline code between single backticks, so code holding a backtick reads ambiguously there. In fish, a `\` at a line's end inside quotes joins the lines; press Enter inside the quotes instead.
+
 ## 0.7.0: send to any chat
 
 - `teams-zig send` sends to any chat you can name or give the id of, not just your notes. Choose the chat the way `messages` does: its exact name, or its id. A name that several chats share is refused, with their ids listed.
