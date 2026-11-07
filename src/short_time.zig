@@ -161,6 +161,7 @@ test "parseIso reads the service's timestamps" {
     try std.testing.expectEqual(1_762_000_000, parseIso("2025-11-01T12:26:40Z").?);
     try std.testing.expectEqual(1_709_164_800, parseIso("2024-02-29T00:00:00.5Z").?);
     try std.testing.expectEqual(946_684_800, parseIso("2000-01-01T00:00:00.000Z").?);
+    try std.testing.expectEqual(gmt_seconds_max, parseIso("9999-12-30T23:59:59Z").?);
 }
 
 test "parseIso rejects anything else" {
@@ -176,7 +177,7 @@ test "parseIso rejects anything else" {
         "2025-11-01T12:26:40.Z1",
         "1999-12-31T23:59:59Z",
         "+025-11-01T12:26:40Z",
-        "9999-12-31T23:59:59Z",
+        "9999-12-31T00:00:00Z",
     };
     for (not_timestamps) |text| try std.testing.expectEqual(null, parseIso(text));
 }
