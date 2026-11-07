@@ -64,12 +64,23 @@ const Output = struct {
             try output.writer.writeAll("<pre>");
 
             const after = rest[fence.start + fence.len ..];
-            const close_start = backtickRunFind(after, 0, fence.len) orelse return;
+            const close_start = backtickRunFind(after, 0, fence.len) orelse
+                return output.lineFenceOpen(after);
             try writeEscaped(output.writer, std.mem.trim(u8, after[0..close_start], " \t"));
             try output.closeBlock();
             rest = std.mem.trim(u8, after[close_start + fence.len ..], " \t");
             if (rest.len == 0) return;
         }
+    }
+
+    /// What follows a fence with no partner on its line: one word names the language and is
+    /// dropped; anything longer is the block's first line, so typed words are never lost.
+    fn lineFenceOpen(output: *Output, after: []const u8) std.Io.Writer.Error!void {
+        std.debug.assert(output.block == .code);
+        const rest = std.mem.trim(u8, after, " \t");
+        if (rest.len == 0) return;
+        if (std.mem.indexOfAny(u8, rest, " \t") == null) return;
+        try output.lineCodeWrite(rest);
     }
 
     /// A line with no code fence: a blank line, a heading, a quote, a list item or text.
@@ -679,6 +690,9 @@ test "writeMarkdown makes a code block from ``` anywhere on a line, as Teams doe
     );
     try expectMarkdown("```\nfake\n``` after", "<pre>fake</pre><p>after</p>");
     try expectMarkdown("``two`` stays", "<p><code>two</code> stays</p>");
+    // After an unpaired fence one word is the language; more words are code, never dropped.
+    try expectMarkdown("fake ```zig\none\n```", "<p>fake</p><pre>one</pre>");
+    try expectMarkdown("wrap it in ``` for a block", "<p>wrap it in</p><pre>for a block</pre>");
     // The owner's message, its lines joined by the shell: the snippet becomes a code block.
     const joined = "So cool: ```send \"Fake\" \"**hi** \\`test\\`\"```in markdown " ++
         "[link](https://example.invalid)";
