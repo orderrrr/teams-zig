@@ -137,7 +137,34 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     // Cleared first, so a status only ever describes this request.
     client.response_status = null;
     const uri = try checkLink(client.region, url);
-    var request = client.http.request(.GET, uri, .{
+    return client.fetch(uri, null);
+}
+
+/// POSTs `payload`, JSON, to `path` (starting with `/`) under the base URL. Never retried: after a
+/// lost answer the service may already have acted, and a second try could act twice.
+/// The body is borrowed: it's valid until the next request.
+fn post(client: *Client, path: []const u8, payload: []u8) Error![]const u8 {
+    std.debug.assert(std.mem.startsWith(u8, path, "/"));
+    std.debug.assert(payload.len > 0);
+    client.response_status = null;
+
+    const url = try std.mem.concat(client.gpa, u8, &.{ client.region.baseUrl(), path });
+    defer client.gpa.free(url);
+
+    const uri = try checkLink(client.region, url);
+    return client.fetch(uri, payload);
+}
+
+/// One request to `uri`: a GET, or a POST of `payload` as JSON. 200 and 201 are success.
+/// The body is borrowed: it's valid until the next request.
+fn fetch(client: *Client, uri: std.Uri, payload: ?[]u8) Error![]const u8 {
+    std.debug.assert(client.response_status == null);
+    const method: std.http.Method = if (payload == null) .GET else .POST;
+    const content_type: std.http.Client.Request.Headers.Value = if (payload == null)
+        .default
+    else
+        .{ .override = "application/json" };
+    var request = client.http.request(method, uri, .{
         .version = .@"HTTP/1.1",
         .handle_continue = true,
         .keep_alive = true,
@@ -154,7 +181,7 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
             // Written out: with only identity enabled, std 0.17 sends a bare "accept-encoding" line
             // with no colon (it undoes the ", " of a list it never wrote), which gets a 400.
             .accept_encoding = .{ .override = "identity" },
-            .content_type = .default,
+            .content_type = content_type,
         },
         .extra_headers = &.{
             .{ .name = "Authentication", .value = client.authentication },
@@ -169,13 +196,17 @@ pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     request.accept_encoding = @splat(false);
     request.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
 
-    request.sendBodiless() catch return error.SendFailed;
+    if (payload) |bytes| {
+        request.sendBodyComplete(bytes) catch return error.SendFailed;
+    } else {
+        request.sendBodiless() catch return error.SendFailed;
+    }
     // Redirects are refused, so receiveHead never needs a redirect buffer.
     var response = request.receiveHead(&.{}) catch |err| return receiveHeadError(err);
 
     client.response_status = response.head.status;
     switch (response.head.status) {
-        .ok => {},
+        .ok, .created => {},
         .unauthorized => return error.TokenExpired,
         .not_found => return error.NotFound,
         else => return error.UnexpectedStatus,
@@ -268,6 +299,79 @@ fn parseError(err: json.ParseError) Error {
         error.OutOfMemory => error.OutOfMemory,
         else => error.UnexpectedJson,
     };
+}
+
+/// Posts `content`, a message's HTML (see `teams_html`), to a conversation as `display_name`,
+/// once. Returns the new message's id: its arrival time in milliseconds.
+pub fn send(
+    client: *Client,
+    conversation_id: []const u8,
+    content: []const u8,
+    display_name: []const u8,
+) Error!u64 {
+    std.debug.assert(conversation_id.len > 0);
+    std.debug.assert(content.len > 0);
+
+    const path = try sendPath(client.gpa, conversation_id);
+    defer client.gpa.free(path);
+
+    const client_message_id: u64 = @intCast(std.Io.Clock.real.now(client.http.io).toMilliseconds());
+    const payload = try sendPayload(client.gpa, .{
+        .content = content,
+        .display_name = display_name,
+        .client_message_id = client_message_id,
+    });
+    defer client.gpa.free(payload);
+
+    const body = try client.post(path, payload);
+    return sendAnswerId(client.gpa, body) catch |err| parseError(err);
+}
+
+/// `/users/ME/conversations/{id}/messages` with the id percent-encoded. Owned by the caller.
+fn sendPath(gpa: std.mem.Allocator, conversation_id: []const u8) error{OutOfMemory}![]u8 {
+    var path: std.Io.Writer.Allocating = .init(gpa);
+    errdefer path.deinit();
+
+    // An Allocating writer fails only when it can't grow, so every writer error here is OOM.
+    const writer = &path.writer;
+    writer.writeAll("/users/ME/conversations/") catch return error.OutOfMemory;
+    std.Uri.Component.percentEncode(writer, conversation_id, isUnreserved) catch
+        return error.OutOfMemory;
+    writer.writeAll("/messages") catch return error.OutOfMemory;
+    return path.toOwnedSlice();
+}
+
+const SendFields = struct {
+    content: []const u8,
+    display_name: []const u8,
+    /// Lets the service tell this message from others; any fresh number does.
+    client_message_id: u64,
+};
+
+/// The JSON body of a send. Owned by the caller.
+fn sendPayload(gpa: std.mem.Allocator, fields: SendFields) error{OutOfMemory}![]u8 {
+    var client_message_id_buffer: [20]u8 = undefined;
+    const client_message_id = std.fmt.bufPrint(
+        &client_message_id_buffer,
+        "{d}",
+        .{fields.client_message_id},
+    ) catch unreachable; // a u64 has at most 20 digits
+    const body = .{
+        .content = fields.content,
+        .messagetype = "RichText/Html",
+        .contenttype = "text",
+        .clientmessageid = client_message_id,
+        .imdisplayname = fields.display_name,
+    };
+    return std.json.Stringify.valueAlloc(gpa, body, .{});
+}
+
+/// The new message's id from a send's answer, `{"OriginalArrivalTime": <ms>, ...}`.
+fn sendAnswerId(gpa: std.mem.Allocator, body: []const u8) json.ParseError!u64 {
+    const Answer = struct { OriginalArrivalTime: u64 };
+    const parsed = try std.json.parseFromSlice(Answer, gpa, body, json.parse_options);
+    defer parsed.deinit();
+    return parsed.value.OriginalArrivalTime;
 }
 
 /// Returns the signed-in user, owned by the caller: free it with `User.deinit`.
@@ -581,4 +685,32 @@ test "collectMessages reads one page when limited to one" {
     const items = try collectMessages(arena.allocator(), &pages, "https://x/first", 50, 1);
     try std.testing.expectEqual(0, items.len);
     try std.testing.expectEqual(1, pages.request_count);
+}
+
+test "sendPath percent-encodes the conversation id" {
+    const path = try sendPath(std.testing.allocator, "48:notes");
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectEqualStrings("/users/ME/conversations/48%3Anotes/messages", path);
+}
+
+test "sendPayload writes the fields Teams expects, escaped as JSON" {
+    const payload = try sendPayload(std.testing.allocator, .{
+        .content = "<p>fake \"one\"</p>",
+        .display_name = "Fake Person",
+        .client_message_id = 1_700_000_000_000,
+    });
+    defer std.testing.allocator.free(payload);
+
+    const expected = "{\"content\":\"<p>fake \\\"one\\\"</p>\"," ++
+        "\"messagetype\":\"RichText/Html\",\"contenttype\":\"text\"," ++
+        "\"clientmessageid\":\"1700000000000\",\"imdisplayname\":\"Fake Person\"}";
+    try std.testing.expectEqualStrings(expected, payload);
+}
+
+test "sendAnswerId reads the new message's id and rejects other shapes" {
+    const body = "{\"OriginalArrivalTime\":1700000000000,\"other\":1}";
+    try std.testing.expectEqual(1_700_000_000_000, try sendAnswerId(std.testing.allocator, body));
+    const no_id = sendAnswerId(std.testing.allocator, "{}");
+    try std.testing.expectError(error.MissingField, no_id);
 }
