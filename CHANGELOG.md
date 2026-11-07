@@ -2,6 +2,10 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.8.0: ``` makes a code block anywhere, as in Teams
+
+- In `send`, three or more backticks start a code block wherever they are typed, as in Teams' compose box: `` ```ls -la``` `` on one line is a code block, and `` text ``` `` at a line's end starts one on the next line. Text before and after a block becomes its own paragraph. Single and double backticks stay inline code.
+
 ## 0.7.1: inline code with backticks inside
 
 - Fixed: in `send`, inline code opened with several backticks (```` ``` ````) now closes only at the same number of backticks, as in Markdown, so code holding single backticks stays whole. Before, it ended at the next backtick. One space just inside each end is dropped, so `` `` `x` `` `` sends `` `x` ``.

@@ -46,16 +46,37 @@ const Output = struct {
         }
     };
 
+    /// A typed line. As in Teams' compose box, a run of three or more backticks anywhere is a code
+    /// fence: with a run of the same length later on the line, what's between is a code block;
+    /// without one, the block starts on the next line (the rest of this one names the language).
+    /// Text before and after a fence becomes its own block.
     fn line(output: *Output, text: []const u8) std.Io.Writer.Error!void {
-        if (output.block == .code) return output.lineCode(text);
+        var rest = text;
+        // Each pass ends the line or consumes a fence and its partner, so it stops within it.
+        while (true) {
+            if (output.block == .code) {
+                rest = try output.lineCode(rest) orelse return;
+            }
+            const fence = lineFence(rest) orelse return output.lineText(rest);
+            const before = std.mem.trim(u8, rest[0..fence.start], " \t");
+            if (before.len > 0) try output.lineText(before);
+            try output.startBlock(.{ .code = 0 });
+            try output.writer.writeAll("<pre>");
+
+            const after = rest[fence.start + fence.len ..];
+            const close_start = backtickRunFind(after, 0, fence.len) orelse return;
+            try writeEscaped(output.writer, std.mem.trim(u8, after[0..close_start], " \t"));
+            try output.closeBlock();
+            rest = std.mem.trim(u8, after[close_start + fence.len ..], " \t");
+            if (rest.len == 0) return;
+        }
+    }
+
+    /// A line with no code fence: a blank line, a heading, a quote, a list item or text.
+    fn lineText(output: *Output, text: []const u8) std.Io.Writer.Error!void {
         if (std.mem.trim(u8, text, " \t").len == 0) {
             try output.closeBlock();
             if (output.before == .content) output.before = .blank;
-            return;
-        }
-        if (lineFenceOpens(text)) {
-            try output.startBlock(.{ .code = 0 });
-            try output.writer.writeAll("<pre>");
             return;
         }
         if (lineHeadingLevel(text)) |level| {
@@ -95,11 +116,27 @@ const Output = struct {
         try output.writer.writeAll("</li>");
     }
 
-    /// Code is written as typed, escaped, one line per line, until a closing fence.
-    fn lineCode(output: *Output, text: []const u8) std.Io.Writer.Error!void {
-        if (std.mem.startsWith(u8, text, "```")) return output.closeBlock();
+    /// A line inside a code block, written as typed, escaped. A fence on it ends the block, after
+    /// the code before the fence; what follows the fence on the line is returned, or null if
+    /// nothing does.
+    fn lineCode(output: *Output, text: []const u8) std.Io.Writer.Error!?[]const u8 {
+        std.debug.assert(output.block == .code);
+        const found = lineFence(text) orelse {
+            try output.lineCodeWrite(text);
+            return null;
+        };
+        // Code typed before the fence on its line, as in `ls -la```, is the block's last line.
+        const code = text[0..found.start];
+        if (std.mem.trim(u8, code, " \t").len > 0) try output.lineCodeWrite(code);
+        try output.closeBlock();
+        const after = std.mem.trim(u8, text[found.start + found.len ..], " \t");
+        if (after.len == 0) return null;
+        return after;
+    }
+
+    fn lineCodeWrite(output: *Output, code: []const u8) std.Io.Writer.Error!void {
         if (output.block.code > 0) try output.writer.writeByte('\n');
-        try writeEscaped(output.writer, text);
+        try writeEscaped(output.writer, code);
         output.block.code += 1;
     }
 
@@ -129,12 +166,47 @@ const Output = struct {
     }
 };
 
-/// Whether a line opens a fenced code block: `` ``` `` and maybe a language, but no backtick
-/// after the opening run, so a one-line ```` ```code``` ```` stays inline code (as in CommonMark).
-fn lineFenceOpens(text: []const u8) bool {
-    if (!std.mem.startsWith(u8, text, "```")) return false;
-    const run_len = std.mem.indexOfNone(u8, text, "`") orelse return true;
-    return std.mem.indexOfScalar(u8, text[run_len..], '`') == null;
+/// A code fence on a line: where its run of backticks starts and how long it is.
+const Fence = struct {
+    start: u32,
+    len: u32,
+};
+
+/// The first run of three or more backticks on a line, or null if there's none.
+fn lineFence(text: []const u8) ?Fence {
+    std.debug.assert(text.len <= std.math.maxInt(u32));
+    var search_start: u32 = 0;
+    while (std.mem.indexOfScalarPos(u8, text, search_start, '`')) |run_index| {
+        const run_start: u32 = @intCast(run_index);
+        const run_end: u32 = @intCast(
+            std.mem.indexOfNonePos(u8, text, run_start, "`") orelse text.len,
+        );
+        // Each pass moves past a whole run, so the loop ends within `text`.
+        std.debug.assert(run_end > run_start);
+        if (run_end - run_start >= 3) return .{ .start = run_start, .len = run_end - run_start };
+        search_start = run_end;
+    }
+    return null;
+}
+
+/// Where the first run of exactly `run_len` backticks at or after `search_start` begins, or null
+/// if there's none.
+fn backtickRunFind(text: []const u8, search_start: u32, run_len: u32) ?u32 {
+    std.debug.assert(run_len > 0);
+    std.debug.assert(search_start <= text.len);
+    std.debug.assert(text.len <= std.math.maxInt(u32));
+    var candidate_start: u32 = search_start;
+    while (std.mem.indexOfScalarPos(u8, text, candidate_start, '`')) |candidate_index| {
+        const candidate: u32 = @intCast(candidate_index);
+        const candidate_end: u32 = @intCast(
+            std.mem.indexOfNonePos(u8, text, candidate, "`") orelse text.len,
+        );
+        // Each pass moves past a whole run, so the loop ends within `text`.
+        std.debug.assert(candidate_end > candidate);
+        if (candidate_end - candidate == run_len) return candidate;
+        candidate_start = candidate_end;
+    }
+    return null;
 }
 
 /// The level of a `# `, `## ` or `### ` heading line, or null.
@@ -266,7 +338,9 @@ const Inline = struct {
         const text = state.rest();
         if (text[0] != '`') return false;
         const run_len: u32 = @intCast(std.mem.indexOfNone(u8, text, "`") orelse text.len);
-        const close_start = nextCodeCloseStart(text, run_len) orelse {
+        // `text` opens with exactly `run_len` backticks, so the partner is the next such run.
+        std.debug.assert(run_len == text.len or text[run_len] != '`');
+        const close_start = backtickRunFind(text, run_len, run_len) orelse {
             try state.writer.writeAll(text[0..run_len]);
             state.index += run_len;
             return true;
@@ -278,30 +352,6 @@ const Inline = struct {
         try state.writer.writeAll("</code>");
         state.index += close_start + run_len;
         return true;
-    }
-
-    /// Where the run of exactly `run_len` backticks that closes code opened at the start of
-    /// `text` begins, or null if none follows.
-    fn nextCodeCloseStart(text: []const u8, run_len: u32) ?u32 {
-        std.debug.assert(run_len > 0);
-        std.debug.assert(run_len <= text.len);
-        std.debug.assert(text.len <= std.math.maxInt(u32));
-        // `text` opens with exactly `run_len` backticks.
-        std.debug.assert(std.mem.indexOfNone(u8, text[0..run_len], "`") == null);
-        if (run_len < text.len) std.debug.assert(text[run_len] != '`');
-        var search_start: u32 = run_len;
-        while (std.mem.indexOfScalarPos(u8, text, search_start, '`')) |candidate_index| {
-            const candidate: u32 = @intCast(candidate_index);
-            const candidate_end: u32 = @intCast(
-                std.mem.indexOfNonePos(u8, text, candidate, "`") orelse text.len,
-            );
-            // Each pass moves past a whole run, so the loop ends within `text`.
-            std.debug.assert(candidate_end > candidate);
-            std.debug.assert(candidate > run_len);
-            if (candidate_end - candidate == run_len) return candidate;
-            search_start = candidate_end;
-        }
-        return null;
     }
 
     /// Code with one space dropped from each end when both ends have one and it isn't all
@@ -618,10 +668,23 @@ test "writeMarkdown writes headings, quotes and lists" {
     );
 }
 
-test "writeMarkdown keeps one-line code at a line's start inline" {
-    try expectMarkdown("```ls -la```\nfake", "<p><code>ls -la</code><br>fake</p>");
+test "writeMarkdown makes a code block from ``` anywhere on a line, as Teams does" {
+    try expectMarkdown("```ls -la```\nfake", "<pre>ls -la</pre><p>fake</p>");
+    try expectMarkdown("fake: ```ls -la``` after", "<p>fake:</p><pre>ls -la</pre><p>after</p>");
     try expectMarkdown("```zig\nfake\n```", "<pre>fake</pre>");
     try expectMarkdown("````\nfake\n````", "<pre>fake</pre>");
+    try expectMarkdown("fake: ```\none\ntwo```\nafter",
+        \\<p>fake:</p><pre>one
+        \\two</pre><p>after</p>
+    );
+    try expectMarkdown("```\nfake\n``` after", "<pre>fake</pre><p>after</p>");
+    try expectMarkdown("``two`` stays", "<p><code>two</code> stays</p>");
+    // The owner's message, its lines joined by the shell: the snippet becomes a code block.
+    const joined = "So cool: ```send \"Fake\" \"**hi** \\`test\\`\"```in markdown " ++
+        "[link](https://example.invalid)";
+    try expectMarkdown(joined, "<p>So cool:</p>" ++
+        "<pre>send &quot;Fake&quot; &quot;**hi** \\`test\\`&quot;</pre>" ++
+        "<p>in markdown <a href=\"https://example.invalid\">link</a></p>");
 }
 
 test "writeMarkdown fences code as typed and closes an unclosed fence" {
