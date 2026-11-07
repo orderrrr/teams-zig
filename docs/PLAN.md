@@ -292,3 +292,13 @@ Sending anywhere but `48:notes`. Editing, deleting, reacting, replies, mentions,
 ### M5 live send
 
 On 2026-11-07, with the owner's go-ahead at that moment: one `send` to `48:notes` holding every supported form. Read back with `messages 48:notes 1`, each form came back as typed; the only differences are the blank lines `messages` always puts after lists and around quotes. Nothing was retried. Reads checked live first, after the GET path's refactor in M5.3.
+
+## M5 gate
+
+- **Round 1.** mr-review: the watchdog's timeout hint now says to check the chat after a send, like the other send-failure hints; a link address keeps paired brackets (`Foo_(bar)`); an italic closes only with the byte that opened it. Owner-reported during the gate: `messages` drew the blank line before a quote with the quote's `>`; fixed, and an escaping test that had recorded the wrong output corrected. STYLE: the inline writer became an `Inline` state type with guard-clause helpers (no sentinel `0`, no deep nesting), `Block` a union carrying the code block's line count, one `before` enum for two bools. Tiger Style: `u32` indexes, helper preconditions asserted, a `NewMessage` options struct, explicit JSON write options, the id buffer sized from `maxInt(u64)`, the answer's id range-checked, the HTML capped at 28 KiB before sending, `@divFloor`, `send_chat_ids_allowed`, GET or POST decided once.
+- **Round 2.** mr-review: `writeInline`'s progress assert sat in a `defer`, so a failed write would have panicked; the changelog gained the quote fix. STYLE: `breaks_pending` became a union whose blank case carries its quote depth; the marker-open helpers became `Inline` methods. Tiger Style: an upper bound on the answer's id, `*const` for `NewMessage` and `Payload`, types and limits at the top of `Client.zig`. `post` went back to its plain name, since STYLE 1.6 makes a type's methods its interface (round 1's `sendPost` reverted).
+- **Round 3.** mr-review: the id bound needed a day's margin for time zones. Tiger Style: one bound for shown times, `short_time.gmt_seconds_max`, which `parseIso` enforces (a `9999-12-31` timestamp could previously overflow the display), `shortTimeAt` asserts, and a comptime assert ties to `message_id_max`.
+- **Round 4.** Tiger Style: `parseIso`'s tests now sit on both sides of the bound.
+- **Round 5:** all three reviews found nothing new. Gate passed. M5 resolved at 0.6.0.
+
+Reads were checked live after each change to the request code (counts only). The only write in M5 was the one approved send to `48:notes`.
