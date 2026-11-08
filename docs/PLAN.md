@@ -310,3 +310,13 @@ On 2026-11-07 the owner asked to remove the notes-only restriction. `send` now w
 ## 0.7.1 and 0.8.0: code spans and fences (owner-reported)
 
 The owner sent a snippet wrapped in ``` on one line (fish had joined the lines) and it was cut at the first inner backtick. 0.7.1 matched code spans by backtick run length, as CommonMark does. The owner then chose Teams' compose-box behaviour over CommonMark for three or more backticks: 0.8.0 makes ``` a code block wherever it is typed, with surrounding text as its own paragraphs. One live send to `48:notes` (owner-approved at the time) came back with every form as intended.
+
+## 0.8.1: `messages` shows code holding backticks (open item)
+
+`messages` wrapped inline code in one backtick, so code holding a backtick read ambiguously. It now fences code with one more backtick than the longest run inside it (found by looking ahead in the raw HTML to `</code>`), capped at 16, with a space inside each end when the fence is longer than one. No live calls; the change only affects reading.
+
+- **Round 1.** mr-review: the CHANGELOG's own example was ambiguous; a comment says why a long run at a line's start isn't a fence. STYLE: `code_ticks`' bounds asserted where used (4.5). Tiger Style: the link assert as an implication, `writeMarker` switching on `side`, sized counters capped as they count, paired bounds asserts and a comptime check that the cap fits `u8`, tests for the cap, an unclosed `<code>` and `</CODE>`.
+- **Round 2.** mr-review: nothing new. STYLE: a `ticks >= 1` assert that a `u8` plus one always meets was padding (4.5), so it went. Tiger Style: an exhaustive switch instead of `else`, a comptime lower bound (`code_ticks_max >= 2`), the counters named in ticks rather than `len`.
+- **Round 3:** all three reviews found nothing new in the code. Gate passed.
+
+Also in this pass: CLAUDE.md's zero-writes section now says `send` may write, and agents' live sends stay on `48:notes` with the owner's go-ahead each time.
