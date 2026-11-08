@@ -524,14 +524,21 @@ const Output = struct {
         side: enum { opening, closing },
     ) std.Io.Writer.Error!void {
         // A link's closer carries its target, so `closeMark` writes it.
-        std.debug.assert(!(mark == .link and side == .closing));
+        if (mark == .link) std.debug.assert(side == .opening);
         if (mark != .code) return output.writer.writeAll(mark.marker());
         std.debug.assert(output.code_ticks >= 1);
         std.debug.assert(output.code_ticks <= code_ticks_max);
         const padded = output.code_ticks > 1;
-        if (padded and side == .closing) try output.writer.writeByte(' ');
-        try output.writer.splatByteAll('`', output.code_ticks);
-        if (padded and side == .opening) try output.writer.writeByte(' ');
+        switch (side) {
+            .opening => {
+                try output.writer.splatByteAll('`', output.code_ticks);
+                if (padded) try output.writer.writeByte(' ');
+            },
+            .closing => {
+                if (padded) try output.writer.writeByte(' ');
+                try output.writer.splatByteAll('`', output.code_ticks);
+            },
+        }
     }
 };
 
@@ -574,20 +581,28 @@ fn headingLevel(tag: *const html.Tag) ?u2 {
 /// HTML holds them all.
 fn tagMarkOpenCodeTicks(after: []const u8) u8 {
     const code_end = std.ascii.findIgnoreCase(after, "</code") orelse after.len;
-    var run_len_max: usize = 0;
-    var run_len: usize = 0;
+    // Nobody types a longer run; past it, the code shows ambiguous, nothing worse.
+    const run_len_limit = code_ticks_max - 1;
+    var run_len_max: u8 = 0;
+    var run_len: u8 = 0;
     for (after[0..code_end]) |byte| {
-        run_len = if (byte == '`') run_len + 1 else 0;
+        run_len = if (byte == '`') @min(run_len + 1, run_len_limit) else 0;
         run_len_max = @max(run_len_max, run_len);
     }
     // A run of three or more at a line's start isn't a fence: Markdown forbids backticks after
     // a fence's opener, and the closing run is on the same line.
-    // Nobody types a longer run; past it, the code shows ambiguous, nothing worse.
-    return @intCast(@min(run_len_max, code_ticks_max - 1) + 1);
+    const ticks = run_len_max + 1;
+    std.debug.assert(ticks >= 1);
+    std.debug.assert(ticks <= code_ticks_max);
+    return ticks;
 }
 
 /// The most backticks written around code.
 const code_ticks_max = 16;
+
+comptime {
+    std.debug.assert(code_ticks_max <= std.math.maxInt(u8));
+}
 
 /// Deeper quotes are shown at this depth.
 const quote_depth_limit = 8;
@@ -654,6 +669,18 @@ test "writeHtml fences code holding backticks with a longer run" {
     try expectMarkdown("<code>a ``` b</code> <code>c</code>", "```` a ``` b ```` `c`");
     try expectMarkdown("<code>x</code> <code>a``b</code>", "`x` ``` a``b ```");
     try expectMarkdown("<code>a`b<br>c</code>", "`` a`b ``\n`` c ``");
+    try expectMarkdown("<code>a`b</CODE> c", "`` a`b `` c");
+    try expectMarkdown("<code>a`b", "`` a`b ``");
+}
+
+test "writeHtml caps the backticks around code" {
+    const run_15: [15]u8 = @splat('`');
+    const run_20: [20]u8 = @splat('`');
+    const ticks_16: [16]u8 = @splat('`');
+    const fenced_15 = ticks_16 ++ " " ++ run_15 ++ " " ++ ticks_16;
+    try expectMarkdown("<code>" ++ run_15 ++ "</code>", fenced_15);
+    const fenced_20 = ticks_16 ++ " " ++ run_20 ++ " " ++ ticks_16;
+    try expectMarkdown("<code>" ++ run_20 ++ "</code>", fenced_20);
 }
 
 test "writeHtml leaves out markup around nothing and keeps edge spaces outside markers" {
