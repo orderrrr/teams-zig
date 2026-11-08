@@ -4,7 +4,7 @@ One entry per milestone. The version lives in `build.zig.zon`.
 
 ## 0.8.1: `messages` shows code holding backticks unambiguously
 
-- Fixed: `messages` fences inline code with one more backtick than the longest run inside it, with a space inside each end when it holds a backtick, so `a`b` shows as ``` `` a`b `` ```. Before, it always used one backtick, which ended at the first backtick inside.
+- Fixed: `messages` fences inline code with one more backtick than the longest run inside it, with a space inside each end when it holds a backtick, so code holding a backtick between `a` and `b` shows as ``` `` a`b `` ```. Before, it always used one backtick, which ended at the first backtick inside.
 
 ## 0.8.0: ``` makes a code block anywhere, as in Teams
 

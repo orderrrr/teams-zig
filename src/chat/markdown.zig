@@ -578,6 +578,8 @@ fn tagMarkOpenCodeTicks(after: []const u8) u8 {
         run_len = if (byte == '`') run_len + 1 else 0;
         run_len_max = @max(run_len_max, run_len);
     }
+    // A run of three or more at a line's start isn't a fence: Markdown forbids backticks after
+    // a fence's opener, and the closing run is on the same line.
     // Nobody types a longer run; past it, the code shows ambiguous, nothing worse.
     return @intCast(@min(run_len_max, code_ticks_max - 1) + 1);
 }
