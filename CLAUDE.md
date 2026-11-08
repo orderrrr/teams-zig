@@ -22,9 +22,11 @@ Build this semi-autonomously. I'm involved at milestone boundaries, not chunk by
 - When one decision blocks you, park it, carry on with work that doesn't depend on it, and bring parked questions to the next checkpoint.
 - At the end of a milestone, run the gate, then give me one report: what was built, decisions you made, and parked questions.
 
-## Zero writes to Teams
+## Writes to Teams
 
-For now, nothing may write to Teams: no sending, editing, deleting, reacting, marking as read, changing presence or any other state change. Code, tests, scripts and live checks only make GET requests to read. This holds until I explicitly lift it; a plan or milestone that includes writes (such as M2) does not lift it on its own.
+The `send` command may post messages; I lifted the ban for it in M5. Nothing else may write to Teams: no editing, deleting, reacting, marking as read, changing presence or any other state change. Other code, tests and scripts only make GET requests to read. This holds until I explicitly lift it for another write; a plan or milestone that includes writes does not lift it on its own.
+
+Agents' live send tests go only to my own notes chat (`48:notes`), are kept minimal, and run only after I confirm each one at that moment.
 
 ## Secrets
 

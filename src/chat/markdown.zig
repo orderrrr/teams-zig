@@ -592,7 +592,6 @@ fn tagMarkOpenCodeTicks(after: []const u8) u8 {
     // A run of three or more at a line's start isn't a fence: Markdown forbids backticks after
     // a fence's opener, and the closing run is on the same line.
     const ticks = run_len_max + 1;
-    std.debug.assert(ticks >= 1);
     std.debug.assert(ticks <= code_ticks_max);
     return ticks;
 }
