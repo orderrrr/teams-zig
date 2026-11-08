@@ -262,7 +262,7 @@ const Output = struct {
         switch (mark) {
             .link => output.link_href = html_tag.attribute("href") orelse "",
             .code => output.code_ticks = tagMarkOpenCodeTicks(after),
-            else => {},
+            .bold, .italic, .strike => {},
         }
     }
 
@@ -582,16 +582,16 @@ fn headingLevel(tag: *const html.Tag) ?u2 {
 fn tagMarkOpenCodeTicks(after: []const u8) u8 {
     const code_end = std.ascii.findIgnoreCase(after, "</code") orelse after.len;
     // Nobody types a longer run; past it, the code shows ambiguous, nothing worse.
-    const run_len_limit = code_ticks_max - 1;
-    var run_len_max: u8 = 0;
-    var run_len: u8 = 0;
+    const run_ticks_limit = code_ticks_max - 1;
+    var run_ticks_max: u8 = 0;
+    var run_ticks: u8 = 0;
     for (after[0..code_end]) |byte| {
-        run_len = if (byte == '`') @min(run_len + 1, run_len_limit) else 0;
-        run_len_max = @max(run_len_max, run_len);
+        run_ticks = if (byte == '`') @min(run_ticks + 1, run_ticks_limit) else 0;
+        run_ticks_max = @max(run_ticks_max, run_ticks);
     }
     // A run of three or more at a line's start isn't a fence: Markdown forbids backticks after
     // a fence's opener, and the closing run is on the same line.
-    const ticks = run_len_max + 1;
+    const ticks = run_ticks_max + 1;
     std.debug.assert(ticks <= code_ticks_max);
     return ticks;
 }
@@ -600,6 +600,8 @@ fn tagMarkOpenCodeTicks(after: []const u8) u8 {
 const code_ticks_max = 16;
 
 comptime {
+    // Room for at least one backtick inside, and the count fits a u8.
+    std.debug.assert(code_ticks_max >= 2);
     std.debug.assert(code_ticks_max <= std.math.maxInt(u8));
 }
 
