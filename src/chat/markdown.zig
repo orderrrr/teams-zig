@@ -17,7 +17,7 @@ pub fn writeHtml(writer: *std.Io.Writer, content: []const u8) std.Io.Writer.Erro
     while (reader.next()) |token| switch (token) {
         .text => |run| try output.text(run),
         .entity => |replacement| try output.entity(replacement),
-        .tag => |tag| try output.tag(&tag),
+        .tag => |tag| try output.tag(&tag, reader.rest),
     };
     try output.finish();
 }
@@ -30,13 +30,14 @@ const Mark = enum {
     code,
     link,
 
-    /// The opening marker; for all but links, the closing one too.
+    /// The opening marker; for bold, italic and strike, the closing one too. Code's markers are
+    /// backtick runs, written by `Output.writeMarker`.
     fn marker(mark: Mark) []const u8 {
         return switch (mark) {
             .bold => "**",
             .italic => "_",
             .strike => "~~",
-            .code => "`",
+            .code => unreachable,
             .link => "[",
         };
     }
@@ -86,6 +87,9 @@ const Output = struct {
     marks_written: std.EnumSet(Mark) = .empty,
     /// The open link's target, still entity-encoded, borrowed from the content.
     link_href: []const u8 = "",
+    /// How many backticks fence the open code: one more than its longest run, so none inside
+    /// ends it early.
+    code_ticks: u8 = 1,
     /// How many quotes are open; lines show at most `quote_depth_limit` of them.
     quote_depth: u8 = 0,
     /// The open lists, outermost first; only the first `list_depth_limit` are kept.
@@ -180,7 +184,12 @@ const Output = struct {
         output.block_empty = false;
     }
 
-    fn tag(output: *Output, html_tag: *const html.Tag) std.Io.Writer.Error!void {
+    /// `after` is the HTML after the tag.
+    fn tag(
+        output: *Output,
+        html_tag: *const html.Tag,
+        after: []const u8,
+    ) std.Io.Writer.Error!void {
         if (output.code_block != null) {
             // Inside a code block only its end and line breaks count; markup is dropped.
             if (html_tag.is("pre")) {
@@ -192,8 +201,7 @@ const Output = struct {
         }
         if (tagMark(html_tag)) |mark| {
             if (html_tag.closing) return output.closeMark(mark);
-            if (mark == .link) output.link_href = html_tag.attribute("href") orelse "";
-            return output.tagMarkOpen(mark);
+            return output.tagMarkOpen(html_tag, mark, after);
         }
         if (html_tag.closing) return output.tagClose(html_tag);
         return output.tagOpen(html_tag);
@@ -246,11 +254,16 @@ const Output = struct {
         try output.endLine();
     }
 
-    fn tagMarkOpen(output: *Output, mark: Mark) void {
+    fn tagMarkOpen(output: *Output, html_tag: *const html.Tag, mark: Mark, after: []const u8) void {
         if (output.markIndex(mark) != null) return;
         std.debug.assert(output.marks_open_count < mark_count);
         output.marks_open[output.marks_open_count] = mark;
         output.marks_open_count += 1;
+        switch (mark) {
+            .link => output.link_href = html_tag.attribute("href") orelse "",
+            .code => output.code_ticks = tagMarkOpenCodeTicks(after),
+            else => {},
+        }
     }
 
     fn closeMark(output: *Output, mark: Mark) std.Io.Writer.Error!void {
@@ -265,7 +278,7 @@ const Output = struct {
 
         if (!output.marks_written.contains(mark)) return;
         output.marks_written.remove(mark);
-        if (mark != .link) return output.writer.writeAll(mark.marker());
+        if (mark != .link) return output.writeMarker(mark, .closing);
         try output.writer.writeAll("](");
         try html.writeDecoded(output.writer, output.link_href);
         try output.writer.writeByte(')');
@@ -288,7 +301,7 @@ const Output = struct {
             const mark = output.marks_open[index];
             if (mark == .link) continue;
             if (!output.marks_written.contains(mark)) continue;
-            try output.writer.writeAll(mark.marker());
+            try output.writeMarker(mark, .closing);
             output.marks_written.remove(mark);
         }
         // A blank line already owed stays owed.
@@ -498,9 +511,25 @@ const Output = struct {
         try output.flushSpacing();
         for (output.marks_open[0..output.marks_open_count]) |mark| {
             if (output.marks_written.contains(mark)) continue;
-            try output.writer.writeAll(mark.marker());
+            try output.writeMarker(mark, .opening);
             output.marks_written.insert(mark);
         }
+    }
+
+    /// Code with a backtick inside gets a space inside each end of its run, which Markdown drops,
+    /// so a backtick at the code's edge doesn't join the run.
+    fn writeMarker(
+        output: *Output,
+        mark: Mark,
+        side: enum { opening, closing },
+    ) std.Io.Writer.Error!void {
+        // A link's closer carries its target, so `closeMark` writes it.
+        std.debug.assert(!(mark == .link and side == .closing));
+        if (mark != .code) return output.writer.writeAll(mark.marker());
+        const padded = output.code_ticks > 1;
+        if (padded and side == .closing) try output.writer.writeByte(' ');
+        try output.writer.splatByteAll('`', output.code_ticks);
+        if (padded and side == .opening) try output.writer.writeByte(' ');
     }
 };
 
@@ -537,6 +566,24 @@ fn headingLevel(tag: *const html.Tag) ?u2 {
     if (tag.is("h3")) return 3;
     return null;
 }
+
+/// The backticks fencing code that starts `after`, the HTML after its `<code>`: one more than
+/// the longest run before its `</code>`, or the end. No entity decodes to a backtick, so the raw
+/// HTML holds them all.
+fn tagMarkOpenCodeTicks(after: []const u8) u8 {
+    const code_end = std.ascii.findIgnoreCase(after, "</code") orelse after.len;
+    var run_len_max: usize = 0;
+    var run_len: usize = 0;
+    for (after[0..code_end]) |byte| {
+        run_len = if (byte == '`') run_len + 1 else 0;
+        run_len_max = @max(run_len_max, run_len);
+    }
+    // Nobody types a longer run; past it, the code shows ambiguous, nothing worse.
+    return @intCast(@min(run_len_max, code_ticks_max - 1) + 1);
+}
+
+/// The most backticks written around code.
+const code_ticks_max = 16;
 
 /// Deeper quotes are shown at this depth.
 const quote_depth_limit = 8;
@@ -595,6 +642,14 @@ test "writeHtml writes bold, italic, strike and code markers" {
     try expectMarkdown(emphasis, "**fake** **bold** _it_ _em_");
     const other = "<s>gone</s> <del>gone</del> <code>x = 1</code> <u>plain</u>";
     try expectMarkdown(other, "~~gone~~ ~~gone~~ `x = 1` plain");
+}
+
+test "writeHtml fences code holding backticks with a longer run" {
+    try expectMarkdown("<code>a`b</code>", "`` a`b ``");
+    try expectMarkdown("<code>`fake`</code> x", "`` `fake` `` x");
+    try expectMarkdown("<code>a ``` b</code> <code>c</code>", "```` a ``` b ```` `c`");
+    try expectMarkdown("<code>x</code> <code>a``b</code>", "`x` ``` a``b ```");
+    try expectMarkdown("<code>a`b<br>c</code>", "`` a`b ``\n`` c ``");
 }
 
 test "writeHtml leaves out markup around nothing and keeps edge spaces outside markers" {
