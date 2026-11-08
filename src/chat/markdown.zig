@@ -526,6 +526,8 @@ const Output = struct {
         // A link's closer carries its target, so `closeMark` writes it.
         std.debug.assert(!(mark == .link and side == .closing));
         if (mark != .code) return output.writer.writeAll(mark.marker());
+        std.debug.assert(output.code_ticks >= 1);
+        std.debug.assert(output.code_ticks <= code_ticks_max);
         const padded = output.code_ticks > 1;
         if (padded and side == .closing) try output.writer.writeByte(' ');
         try output.writer.splatByteAll('`', output.code_ticks);
