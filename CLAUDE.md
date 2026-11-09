@@ -24,7 +24,7 @@ Build this semi-autonomously. I'm involved at milestone boundaries, not chunk by
 
 ## Writes to Teams
 
-The `send` command may post messages; I lifted the ban for it in M5. Nothing else may write to Teams: no editing, deleting, reacting, marking as read, changing presence or any other state change. Other code, tests and scripts only make GET requests to read. This holds until I explicitly lift it for another write; a plan or milestone that includes writes does not lift it on its own.
+The `send` command may post messages; I lifted the ban for it in 0.7.0. Nothing else may write to Teams: no editing, deleting, reacting, marking as read, changing presence or any other state change. Other code, tests and scripts only make GET requests to read. This holds until I explicitly lift it for another write; a plan or milestone that includes writes does not lift it on its own.
 
 Agents' live send tests go only to my own notes chat (`48:notes`), are kept minimal, and run only after I confirm each one at that moment.
 
