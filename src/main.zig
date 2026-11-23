@@ -92,6 +92,7 @@ fn serveMcp(init: std.process.Init, stderr: *Io.Writer) !u8 {
         .zone = zone,
         .stderr = stderr,
     };
+    defer runner.deinit();
     var server: Server = .{
         .reader = &stdin_file_reader.interface,
         .writer = &stdout_file_writer.interface,
@@ -112,8 +113,9 @@ var mcp_request_buffer: [Server.request_size_max]u8 = undefined;
 var mcp_request_memory: [Server.request_memory_size_max]u8 = undefined;
 var mcp_output_buffer: [Server.output_size_max]u8 = undefined;
 
-/// Runs each tool's command as one CLI run does: it reads the token again, so one that the token
-/// script stores while the server runs is used, and connects for that call only.
+/// Runs each tool's command with one client kept across calls, so its connection is reused. The
+/// keychain is read again only when there is no client: at the first call, and after a token or
+/// connection failure drops it. A read tool then runs once more; `send` never does.
 const McpRunner = struct {
     gpa: std.mem.Allocator,
     io: Io,
@@ -121,20 +123,59 @@ const McpRunner = struct {
     zone: *const core_foundation.TimeZone,
     /// `Command.run` takes it for `watch`'s notes, which no tool writes.
     stderr: *Io.Writer,
+    /// Null until the first call, and after a failure that drops it. Initialized in place, since
+    /// the client must not move once its connections exist.
+    client: ?chat.Client = null,
+    /// When the kept client last finished a call, in awake-clock seconds.
+    client_used_at: i64 = 0,
+
+    /// A send on a connection idle longer than this starts on a fresh one: the service may have
+    /// closed it, and a send can't be retried. Reads just retry once.
+    const send_idle_seconds_max = 30;
 
     fn interface(runner: *McpRunner) Server.Runner {
         return .{ .context = runner, .run_fn = run };
+    }
+
+    fn deinit(runner: *McpRunner) void {
+        if (runner.client) |*client| client.deinit();
+        runner.client = null;
     }
 
     fn run(context: *anyopaque, command: *const Command, output: *Io.Writer) ?Server.Failure {
         const runner: *McpRunner = @ptrCast(@alignCast(context));
         // `watch` never ends, so no tool runs it.
         std.debug.assert(command.* != .watch);
-        var client: chat.Client = undefined;
-        connect(&client, runner.gpa, runner.io, runner.environment) catch |err| {
-            return .{ .err = err, .status = null };
+        std.debug.assert(output.end == 0);
+        const failure = runner.runOnce(command, output) orelse return null;
+        if (!retries(command, failure.err)) return failure;
+        // The second run starts from empty output; at most one more run.
+        output.end = 0;
+        return runner.runOnce(command, output);
+    }
+
+    /// Whether `err` leaves the client unusable or its token stale, so the next run connects
+    /// again and reads the keychain.
+    fn dropsClient(err: commands.CommandError) bool {
+        return switch (err) {
+            error.TokenExpired, error.ConnectFailed, error.SendFailed => true,
+            error.ConnectionDropped => true,
+            else => false,
         };
-        defer client.deinit();
+    }
+
+    /// Whether a call that failed with `err` runs once more: only a read, and only after the
+    /// client was dropped. A send never runs twice, since the first may have posted.
+    fn retries(command: *const Command, err: commands.CommandError) bool {
+        if (command.* == .send) return false;
+        return dropsClient(err);
+    }
+
+    fn runOnce(runner: *McpRunner, command: *const Command, output: *Io.Writer) ?Server.Failure {
+        const now = Io.Clock.awake.now(runner.io).toSeconds();
+        if (command.* == .send and sendsFresh(now, runner.client_used_at)) runner.deinit();
+        const client = runner.connected() catch |err| return .{ .err = err, .status = null };
+        defer runner.client_used_at = Io.Clock.awake.now(runner.io).toSeconds();
 
         // Read for every call, so a cache deleted at sign-in takes effect at once.
         const home = openHome(runner.io, runner.environment);
@@ -153,7 +194,7 @@ const McpRunner = struct {
         // A failed command leaves the clock running; the server waits next, which mustn't count.
         defer requests_started_at.store(requests_idle, .release);
         command.run(
-            &client,
+            client,
             &cache,
             runner.io,
             &clock,
@@ -163,9 +204,28 @@ const McpRunner = struct {
         ) catch |err| {
             // Client sets response_status before it returns UnexpectedStatus.
             if (err == error.UnexpectedStatus) std.debug.assert(client.response_status != null);
-            return .{ .err = err, .status = client.response_status };
+            const failure: Server.Failure = .{ .err = err, .status = client.response_status };
+            if (dropsClient(err)) runner.deinit();
+            return failure;
         };
         return null;
+    }
+
+    /// Whether a send at `now` should start on a fresh connection, the kept one last used at
+    /// `used_at` (both awake-clock seconds).
+    fn sendsFresh(now: i64, used_at: i64) bool {
+        return now -| used_at > send_idle_seconds_max;
+    }
+
+    /// The kept client, connecting first (and reading the keychain) if there is none.
+    fn connected(runner: *McpRunner) commands.CommandError!*chat.Client {
+        if (runner.client) |*client| return client;
+        runner.client = @as(chat.Client, undefined);
+        connect(&runner.client.?, runner.gpa, runner.io, runner.environment) catch |err| {
+            runner.client = null;
+            return err;
+        };
+        return &runner.client.?;
     }
 };
 
@@ -287,4 +347,30 @@ test "servesMcp takes mcp alone" {
     try std.testing.expect(!servesMcp(&.{ "teams-zig", "mcp", "fake" }));
     try std.testing.expect(!servesMcp(&.{ "teams-zig", "whoami" }));
     try std.testing.expect(!servesMcp(&.{"teams-zig"}));
+}
+
+test "McpRunner drops its client after a token or connection failure, and keeps it otherwise" {
+    try std.testing.expect(McpRunner.dropsClient(error.TokenExpired));
+    try std.testing.expect(McpRunner.dropsClient(error.ConnectFailed));
+    try std.testing.expect(McpRunner.dropsClient(error.SendFailed));
+    try std.testing.expect(McpRunner.dropsClient(error.ConnectionDropped));
+    try std.testing.expect(!McpRunner.dropsClient(error.NotFound));
+    try std.testing.expect(!McpRunner.dropsClient(error.ChatNameAmbiguous));
+    try std.testing.expect(!McpRunner.dropsClient(error.UnexpectedStatus));
+}
+
+test "McpRunner runs a read once more after a dropped client, and never a send" {
+    const send: Command = .{ .send = .{ .chat = .{ .id = "48:notes" }, .text = "fake" } };
+    const chats: Command = .{ .chats = 5 };
+    try std.testing.expect(McpRunner.retries(&chats, error.TokenExpired));
+    try std.testing.expect(McpRunner.retries(&chats, error.ConnectionDropped));
+    try std.testing.expect(!McpRunner.retries(&chats, error.NotFound));
+    try std.testing.expect(!McpRunner.retries(&send, error.TokenExpired));
+    try std.testing.expect(!McpRunner.retries(&send, error.ConnectionDropped));
+}
+
+test "McpRunner starts a send on a fresh connection after 30 idle seconds" {
+    try std.testing.expect(!McpRunner.sendsFresh(1000, 1000));
+    try std.testing.expect(!McpRunner.sendsFresh(1030, 1000));
+    try std.testing.expect(McpRunner.sendsFresh(1031, 1000));
 }
