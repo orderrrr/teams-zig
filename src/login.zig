@@ -32,7 +32,7 @@ pub fn login(
     gpa: std.mem.Allocator,
     io: std.Io,
     agent_browser: AgentBrowser,
-    options: LoginOptions,
+    options: *const LoginOptions,
 ) LoginError!void {
     options.home.createDirPath(io, profile_sub_path) catch return error.ProfileDirFailed;
     const profile_path = options.home.realPathFileAlloc(io, profile_sub_path, gpa) catch |err| {
@@ -43,7 +43,7 @@ pub fn login(
     };
     defer gpa.free(profile_path);
 
-    var signed_in = try signIn(gpa, io, agent_browser, .{
+    var signed_in = try signIn(gpa, io, agent_browser, &.{
         .profile_path = profile_path,
         .poll_interval = options.poll_interval,
         .poll_count_max = options.poll_count_max,
@@ -151,7 +151,7 @@ pub fn signIn(
     gpa: std.mem.Allocator,
     io: std.Io,
     agent_browser: AgentBrowser,
-    options: SignInOptions,
+    options: *const SignInOptions,
 ) SignInError!SignedIn {
     std.debug.assert(options.poll_count_max > 0);
     // Registered first: a failed `open` may still have started the window.
@@ -266,6 +266,7 @@ pub const ChildAgentBrowser = struct {
         const child: *ChildAgentBrowser = @ptrCast(@alignCast(context));
         var argv_buffer: [argument_count_max + 1][]const u8 = undefined;
         std.debug.assert(arguments.len <= argument_count_max);
+        std.debug.assert(child.run_seconds_max > 0);
         argv_buffer[0] = child.program;
         @memcpy(argv_buffer[1..][0..arguments.len], arguments);
 
@@ -566,10 +567,16 @@ test "ChildAgentBrowser tells a missing program, a failed run and too much outpu
 
     const failed = shell.interface().run(gpa, &.{ "-c", "exit 3" });
     try std.testing.expectError(error.AgentBrowserFailed, failed);
+    // 64 MiB must arrive within the limit, so this run gets more time than the others.
+    var roomy_shell: ChildAgentBrowser = .{
+        .io = std.testing.io,
+        .program = "/bin/sh",
+        .run_seconds_max = 30,
+    };
     const too_much = std.fmt.comptimePrint("head -c {d} /dev/zero", .{output_size_max + 1});
     try std.testing.expectError(
         error.AgentBrowserOutputTooLarge,
-        shell.interface().run(gpa, &.{ "-c", too_much }),
+        roomy_shell.interface().run(gpa, &.{ "-c", too_much }),
     );
     const stuck = shell.interface().run(gpa, &.{ "-c", "sleep 5" });
     try std.testing.expectError(error.AgentBrowserTimedOut, stuck);
@@ -625,7 +632,7 @@ const fake_found =
 const fake_nothing = "{\"data\":{\"requests\":[]}}";
 
 fn testSignIn(fake: *FakeAgentBrowser, note: *std.Io.Writer) SignInError!SignedIn {
-    return signIn(std.testing.allocator, std.testing.io, fake.interface(), .{
+    return signIn(std.testing.allocator, std.testing.io, fake.interface(), &.{
         .profile_path = "/fake/profile",
         .poll_interval = .zero,
         .poll_count_max = 3,
@@ -759,7 +766,7 @@ test "login signs in, stores the token and region, deletes the cache and says so
     var note_buffer: [512]u8 = undefined;
     var note: std.Io.Writer = .fixed(&note_buffer);
 
-    try login(std.testing.allocator, std.testing.io, fake.interface(), .{
+    try login(std.testing.allocator, std.testing.io, fake.interface(), &.{
         .home = tmp.dir,
         .service_name = service_name,
         .note = &note,

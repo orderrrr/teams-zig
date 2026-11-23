@@ -103,7 +103,7 @@ fn runLogin(init: std.process.Init, stderr: *Io.Writer) !u8 {
         .program = "agent-browser",
         .run_seconds_max = login.ChildAgentBrowser.run_seconds_default,
     };
-    login.login(init.gpa, init.io, agent_browser.interface(), .{
+    login.login(init.gpa, init.io, agent_browser.interface(), &.{
         .home = home,
         .service_name = keychain.service,
         .note = stderr,

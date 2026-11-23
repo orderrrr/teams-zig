@@ -670,3 +670,7 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
   - STYLE: no new findings.
   - Tiger Style: `parse_options` names `parse_numbers`; `keychain.read` uses `name`'s fields with no copied locals; `ItemName` (32 bytes) is passed as `*const`; the first-poll test sits with the other `signIn` tests; `writeHint`'s `seconds` is `wait_seconds`.
   - To the owner, added to round 1's list: a run that times out or gives too much output frees its partial stdout, which may hold the token, without zeroing it (std's `run` frees it).
+- **Round 3** (the same three reviews of `d3f04dc`).
+  - mr-review: the "too much output" test shared the 1 s runner, so on a busy machine the deadline could come before 64 MiB arrived; it now has its own runner with 30 s. `login` and `signIn` take their options as `*const`, as `ItemName` does (Tiger: more than 16 bytes).
+  - STYLE: no new findings.
+  - Tiger Style: `ChildAgentBrowser.run` asserts `run_seconds_max > 0`, since 0 would make every run look stuck.
