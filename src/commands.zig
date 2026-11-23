@@ -1306,13 +1306,13 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     try std.testing.expectEqualStrings("fake", send.text);
     try std.testing.expectEqual(null, Command.initSend("", "fake"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", " \n"));
-    // Tab and newline stay; every other control byte is refused, from argv or JSON. Bytes from
-    // space up, UTF-8 included, pass.
+    // Tab and newline stay; every other control byte (below space, and DEL) is refused, from
+    // argv or JSON. Printable ASCII and UTF-8 pass.
     try std.testing.expect(Command.initSend("48:notes", "fake\tone\nfake two") != null);
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x00"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\r\n"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x1b[31m"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x7f"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x1f"));
-    try std.testing.expect(Command.initSend("48:notes", "fake \x20 é") != null);
+    try std.testing.expect(Command.initSend("48:notes", "fake ~ é") != null);
 }
