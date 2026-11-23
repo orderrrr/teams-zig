@@ -599,6 +599,10 @@ From a copy of `HEAD` in a scratch directory; the repo was not changed.
 11. **M8.11 0.11.0 and gate.** Version, CHANGELOG, then the milestone gate.
 12. **M8.12 first release.** *Owner step, after the gate.* The owner pushes `main`, tags `v0.11.0`, runs `zig build release`, makes the tar file and `SHA256SUMS`, and runs `gh release create v0.11.0 --title v0.11.0 --notes-file <CHANGELOG part> <files>`. Agents never push. Then one check: download the asset with a browser, follow the README, and run `teams-zig --help`.
 
+### M8.1 agent-browser output
+
+On 2026-11-23, agent-browser 0.43.0 (its Chrome 149, headless, a throwaway session) opened `https://example.com`, and a page script sent one `POST` with a fake body and a fake `X-SkypeToken` header. `network requests --json` gave `{"success": true, "data": {"lifecycle": {…}, "requests": [...]}, "error": null}`. Each request has `method`, `url`, `headers` (an object; names keep their case, so `X-SkypeToken` as sent), `requestId`, `resourceType`, `mimeType`, `status`, `timestamp` and `responseHeaders`. `postData` is a string on the `POST` and absent on each `GET`. These are the fields the script reads, so the plan stands. agent-browser warned that its Chrome is behind the current stable release; per the owner's answer, agents don't run `agent-browser install`.
+
 ### Owner approvals in this plan
 
 - agent-browser stays an outside tool (approved in M1.5), now run by `teams-zig login`.
