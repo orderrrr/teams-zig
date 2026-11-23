@@ -163,6 +163,9 @@ pub fn init(
 /// Whether `skype_token` is the token this client sends, compared in memory and in constant
 /// time for a given length. Neither token is written anywhere.
 pub fn usesToken(client: *const Client, skype_token: []const u8) bool {
+    // The same token rules `init` asserts.
+    std.debug.assert(skype_token.len > 0);
+    std.debug.assert(std.mem.indexOfAny(u8, skype_token, "\r\n") == null);
     const prefix = "skypetoken=";
     std.debug.assert(std.mem.startsWith(u8, client.authentication, prefix));
     const current = client.authentication[prefix.len..];

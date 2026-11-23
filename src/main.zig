@@ -131,9 +131,9 @@ const McpRunner = struct {
     zone: *const core_foundation.TimeZone,
     /// `Command.run` takes it for `watch`'s notes, which no tool writes.
     stderr: *Io.Writer,
-    /// Null until the first call, and after `dropClient`: a token or connection failure, or a
-    /// send after an idle spell. Initialized in place, since the client must not move once its
-    /// connections exist.
+    /// Null until the first call, and after `dropClient`: a new sign-in's token or region, a
+    /// token or connection failure, or a send after an idle spell. Initialized in place, since
+    /// the client must not move once its connections exist.
     kept: ?Kept = null,
 
     /// The client kept across calls, when it last finished one, and whether the cache's user
@@ -143,7 +143,7 @@ const McpRunner = struct {
         /// Awake-clock seconds.
         used_at_seconds: i64,
         /// True from connecting until a call forgets the cached user and writes the file
-        /// without it: a new client read the keychain, and its token may be another account's.
+        /// without it: a new client's token may be another account's.
         /// Kept here, not per call, so a failed save, or no home, forgets it again next call.
         cached_self_stale: bool,
     };
@@ -161,7 +161,7 @@ const McpRunner = struct {
         runner.* = undefined;
     }
 
-    /// Closes the kept client, so the next call connects again and reads the keychain.
+    /// Closes the kept client, so the next call connects again.
     fn dropClient(runner: *McpRunner) void {
         if (runner.kept) |*kept| kept.client.deinit();
         runner.kept = null;
@@ -180,7 +180,7 @@ const McpRunner = struct {
     }
 
     /// Whether `err` leaves the client unusable or its token stale, so the next run connects
-    /// again and reads the keychain.
+    /// again.
     fn dropsClient(err: commands.CommandError) bool {
         return switch (err) {
             error.TokenExpired, error.ConnectFailed, error.SendFailed => true,
@@ -197,7 +197,6 @@ const McpRunner = struct {
     }
 
     fn runOnce(runner: *McpRunner, command: *const Command, output: *Io.Writer) ?Server.Failure {
-        const now_seconds = Io.Clock.awake.now(runner.io).toSeconds();
         // Read for every call, so a token a new sign-in stored is used at once: a kept client
         // with another token or region is dropped, and the new one forgets the cached user.
         var credentials = commands.readCredentials(
@@ -206,9 +205,11 @@ const McpRunner = struct {
             runner.environment,
         ) catch |err| return .{ .err = err, .status = null };
         defer credentials.deinit();
+
         if (runner.kept) |*kept| {
             if (!runOnceSameCredentials(&kept.client, &credentials)) runner.dropClient();
         }
+        const now_seconds = Io.Clock.awake.now(runner.io).toSeconds();
         if (command.* == .send) {
             if (runner.kept) |*kept| {
                 if (sendsFresh(now_seconds, kept.used_at_seconds)) runner.dropClient();
@@ -296,12 +297,16 @@ const McpRunner = struct {
             .used_at_seconds = now_seconds,
             .cached_self_stale = true,
         };
-        const client = &runner.kept.?.client;
-        client.init(runner.gpa, runner.io, credentials.region, credentials.token) catch |err| {
+        runner.kept.?.client.init(
+            runner.gpa,
+            runner.io,
+            credentials.region,
+            credentials.token,
+        ) catch |err| {
             runner.kept = null;
             return err;
         };
-        return client;
+        return &runner.kept.?.client;
     }
 };
 
@@ -513,6 +518,7 @@ test "McpRunner keeps its client only for the same token and region" {
         .region = .emea,
     };
     defer credentials.deinit();
+
     try std.testing.expect(McpRunner.runOnceSameCredentials(&client, &credentials));
 
     credentials.region = .amer;

@@ -467,6 +467,7 @@ pub fn connect(
     var credentials = try readCredentials(gpa, io, environment);
     // std's connection buffers still hold a copy of the token until the process exits.
     defer credentials.deinit();
+
     try client.init(gpa, io, credentials.region, credentials.token);
 }
 
@@ -1582,10 +1583,20 @@ test "readCredentials takes test mode's token and region, as its own copy" {
 
     var credentials = try readCredentials(std.testing.allocator, std.testing.io, &environment);
     defer credentials.deinit();
+
     try std.testing.expectEqualStrings("fake-token", credentials.token);
     try std.testing.expectEqual(chat.Client.Region.amer, credentials.region);
 
     try environment.put(region_variable, "fake");
     const unknown = readCredentials(std.testing.allocator, std.testing.io, &environment);
     try std.testing.expectError(error.UnknownRegion, unknown);
+
+    _ = environment.orderedRemove(region_variable);
+    const missing = readCredentials(std.testing.allocator, std.testing.io, &environment);
+    try std.testing.expectError(error.UnknownRegion, missing);
+
+    try environment.put(region_variable, "amer");
+    try environment.put(token_variable, "fake\r\nX-Injected: 1");
+    const broken = readCredentials(std.testing.allocator, std.testing.io, &environment);
+    try std.testing.expectError(error.InvalidToken, broken);
 }
