@@ -467,6 +467,10 @@ Plan decisions:
 13. **M7.13 one live send by name.** One `send` to `48:notes` by its name through the cache, after the owner's go-ahead at that moment. Read back with `messages`; never retried.
 14. **M7.14 0.10.0 and gate.** Version, CHANGELOG, README if the cache needs a line, then the milestone gate.
 
+### M7.1 front-door check
+
+On 2026-11-23, with the owner's go-ahead in the work session: one `GET /users/ME/properties` through `https://teams.microsoft.com/api/chatsvc/emea/v1`, the token on stdin to curl. HTTP 200 in 0.58 s (TCP 0.04 s, TLS 0.10 s), 20,581 bytes, the same body size as on the old host, where the first authenticated read took about 1.17 s. The switch (M7.2) goes ahead.
+
 ### M7.12 timings (before the front door)
 
 On 2026-11-23, reads only, three runs each, with a temporary `HOME` holding a warm cache (the real cache path is first written by the owner's own runs). Speed report figures in brackets.
