@@ -467,6 +467,20 @@ Plan decisions:
 13. **M7.13 one live send by name.** One `send` to `48:notes` by its name through the cache, after the owner's go-ahead at that moment. Read back with `messages`; never retried.
 14. **M7.14 0.10.0 and gate.** Version, CHANGELOG, README if the cache needs a line, then the milestone gate.
 
+### M7.12 timings (before the front door)
+
+On 2026-11-23, reads only, three runs each, with a temporary `HOME` holding a warm cache (the real cache path is first written by the owner's own runs). Speed report figures in brackets.
+
+| Command | CLI | MCP (one session) |
+|---|---|---|
+| `whoami` | 1.04–1.13 s [1.30–1.96] | 0.54 s after the first call [1.34–1.52] |
+| `chats 5` | 0.93–0.97 s [1.75–2.10] | 0.50–0.51 s [1.80–2.10] |
+| `messages 48:notes 5` | 0.94–1.00 s [1.07–1.11] | 0.55–0.56 s [1.07–1.10] |
+| `unread` | 1.11–1.52 s [2.31–2.71] | 0.84–0.85 s [2.21–2.52] |
+| `messages <name> 1` | 1.02–1.09 s once cached (2.19 s on a miss) | |
+
+The CLI still pays about 0.7 s per run to connect; the front door (M7.1–M7.3) is meant to cut that.
+
 ### Out of M7
 
 Parallel lookups. Paging sizes. A cache age limit. Caching message content. Any write but `send`.
