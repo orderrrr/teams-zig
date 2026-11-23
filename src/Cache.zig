@@ -34,6 +34,46 @@ pub const User = struct {
     upn: []const u8,
 };
 
+/// Where the cache file lives, under your home directory. Only `scripts/teams-token.fish`
+/// deletes it, at each new sign-in.
+pub const sub_path = "Library/Caches/teams-zig/cache.txt";
+
+/// Failures saving the cache. Callers go on without it: a cache must never stop a command.
+pub const SaveError = std.Io.Dir.CreateFileAtomicError || std.Io.File.Atomic.ReplaceError ||
+    error{WriteFailed};
+
+/// Reads the cache file under `home`. A file that is missing, unreadable, too large or bad gives
+/// an empty cache.
+pub fn load(gpa: std.mem.Allocator, io: std.Io, home: std.Io.Dir) error{OutOfMemory}!Cache {
+    var cache: Cache = .init(gpa);
+    errdefer cache.deinit();
+    const limit: std.Io.Limit = .limited(file_size_max + 1);
+    const text = home.readFileAlloc(io, sub_path, gpa, limit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cache,
+    };
+    defer gpa.free(text);
+    try cache.parse(text);
+    return cache;
+}
+
+/// Writes the cache file under `home` in one step: a new file, readable only by you, renamed
+/// over the old one. Two writers at once: the last one wins.
+pub fn save(cache: *const Cache, io: std.Io, home: std.Io.Dir) SaveError!void {
+    var atomic = try home.createFileAtomic(io, sub_path, .{
+        .permissions = .fromMode(0o600),
+        .make_path = true,
+        .replace = true,
+    });
+    defer atomic.deinit(io);
+
+    var buffer: [4096]u8 = undefined;
+    var file_writer = atomic.file.writer(io, &buffer);
+    try cache.write(&file_writer.interface);
+    try file_writer.interface.flush();
+    try atomic.replace(io);
+}
+
 pub fn init(gpa: std.mem.Allocator) Cache {
     return .{ .arena = .init(gpa) };
 }
@@ -229,4 +269,40 @@ test "values that would break a line, and entries past the limit, are not stored
     try std.testing.expectEqualStrings("19:fake-new", cache.chatId("fake 0").?);
     cache.removeChat("Fake 0");
     try std.testing.expectEqual(null, cache.chatId("fake 0"));
+}
+
+test "load gives an empty cache when the file is missing or too large" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var missing = try load(std.testing.allocator, std.testing.io, tmp.dir);
+    defer missing.deinit();
+    try std.testing.expectEqual(null, missing.self_user);
+
+    try tmp.dir.createDirPath(std.testing.io, "Library/Caches/teams-zig");
+    const long_text = try std.testing.allocator.alloc(u8, file_size_max + 1);
+    defer std.testing.allocator.free(long_text);
+    @memset(long_text, '\n');
+    @memcpy(long_text[0..14], "chat\tfake\t19:x");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = long_text });
+    var too_large = try load(std.testing.allocator, std.testing.io, tmp.dir);
+    defer too_large.deinit();
+    try std.testing.expectEqual(0, too_large.chats.count());
+}
+
+test "save writes a file only you can read, and load reads it back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.putChat("Fake Standup", "19:fake-group@thread.v2");
+    try cache.save(std.testing.io, tmp.dir);
+
+    const stat = try tmp.dir.statFile(std.testing.io, sub_path, .{});
+    try std.testing.expectEqual(0o600, stat.permissions.toMode() & 0o777);
+
+    var loaded = try load(std.testing.allocator, std.testing.io, tmp.dir);
+    defer loaded.deinit();
+    try std.testing.expectEqualStrings("19:fake-group@thread.v2", loaded.chatId("fake standup").?);
 }
