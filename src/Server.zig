@@ -1043,14 +1043,16 @@ test "every command error's hint fits in the room kept for it" {
 }
 
 test "a line of the skip limit is skipped, and a longer one stops the server with no answer" {
-    const source = try std.testing.allocator.alloc(u8, skipped_line_size_max + 2);
+    // Two runs over the same bytes: first a line of the limit and its newline, then, with the
+    // newline made an `x`, a line one byte longer.
+    const source = try std.testing.allocator.alloc(u8, skipped_line_size_max + 1);
     defer std.testing.allocator.free(source);
     @memset(source, 'x');
     source[skipped_line_size_max] = '\n';
 
     var buffer: [64]u8 = undefined;
     var reader: SliceReader = .{
-        .source = source[0 .. skipped_line_size_max + 1],
+        .source = source,
         .interface = .{
             .vtable = &.{ .stream = SliceReader.stream },
             .buffer = &buffer,
@@ -1066,8 +1068,9 @@ test "a line of the skip limit is skipped, and a longer one stops the server wit
         \\
     );
 
+    // A fresh reader: the first run used up `source` and left bytes in the buffer.
     source[skipped_line_size_max] = 'x';
-    reader.source = source[0 .. skipped_line_size_max + 1];
+    reader.source = source;
     reader.interface.seek = 0;
     reader.interface.end = 0;
     const result = expectServed(&reader.interface, &runner, 64, "");
