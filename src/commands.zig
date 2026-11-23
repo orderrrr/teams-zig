@@ -234,11 +234,16 @@ pub const Command = union(enum) {
         return .{ .messages = .{ .chat = .parse(chat_text), .count = message_count } };
     }
 
-    /// `send` of `text` to the chat typed as `chat_text`, or null if the chat is empty or the
-    /// text holds only whitespace. Borrows both. The size checks come later, in `runSend`.
+    /// `send` of `text` to the chat typed as `chat_text`, or null if the chat is empty, or the
+    /// text holds only whitespace or a control byte other than tab and newline (JSON can carry
+    /// a NUL, which argv can't). Borrows both. The size checks come later, in `runSend`.
     pub fn initSend(chat_text: []const u8, text: []const u8) ?Command {
         if (chat_text.len == 0) return null;
         if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) return null;
+        for (text) |byte| {
+            if (byte == '\t' or byte == '\n') continue;
+            if (std.ascii.isControl(byte)) return null;
+        }
         return .{ .send = .{ .chat = .parse(chat_text), .text = text } };
     }
 
@@ -1299,4 +1304,10 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     try std.testing.expectEqualStrings("fake", send.text);
     try std.testing.expectEqual(null, Command.initSend("", "fake"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", " \n"));
+    // Tab and newline stay; other control bytes, which argv can't carry but JSON can, don't.
+    try std.testing.expect(Command.initSend("48:notes", "fake\tone\nfake two") != null);
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x00"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\r\n"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x1b[31m"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x7f"));
 }

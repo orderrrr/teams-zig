@@ -231,7 +231,8 @@ const Tool = enum {
                 "chat: its exact name or id; count (optional): 1 to {d}",
                 .{commands.message_count_limit},
             ),
-            .send => "chat: its exact name or id; text: Markdown, not only whitespace",
+            .send => "chat: its exact name or id; text: Markdown, not only whitespace, " ++
+                "with no control bytes but tab and newline",
         };
     }
 };
@@ -929,6 +930,7 @@ test "Tool.command refuses unknown fields, wrong types and values the CLI refuse
         .{ .send, "{\"chat\":\"48:notes\",\"text\":\" \\n\"}" },
         .{ .send, "{\"text\":\"fake\"}" },
         .{ .send, "{\"chat\":\"48:notes\",\"text\":\"fake\",\"fake\":1}" },
+        .{ .send, "{\"chat\":\"48:notes\",\"text\":\"fake\\u0000\"}" },
     };
     for (refused) |case| {
         const tool, const arguments = case;
