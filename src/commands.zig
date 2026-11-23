@@ -198,27 +198,48 @@ pub const Command = union(enum) {
         }
         if (std.mem.eql(u8, name, "chats")) {
             if (rest.len > 1) return null;
-            if (rest.len == 0) return .{ .chats = conversation_count_default };
-            const count = parseCount(rest[0], conversation_count_limit) orelse return null;
-            return .{ .chats = @intCast(count) };
+            if (rest.len == 0) return initChats(null);
+            return initChats(parseCount(rest[0]) orelse return null);
         }
         if (std.mem.eql(u8, name, "messages")) {
             if (rest.len == 0) return null;
             if (rest.len > 2) return null;
-            if (rest[0].len == 0) return null;
-            const count = if (rest.len == 2)
-                parseCount(rest[1], message_count_limit) orelse return null
-            else
-                message_count_default;
-            return .{ .messages = .{ .chat = .parse(rest[0]), .count = count } };
+            if (rest.len == 1) return initMessages(rest[0], null);
+            return initMessages(rest[0], parseCount(rest[1]) orelse return null);
         }
         if (std.mem.eql(u8, name, "send")) {
             if (rest.len != 2) return null;
-            if (rest[0].len == 0) return null;
-            if (std.mem.trim(u8, rest[1], &std.ascii.whitespace).len == 0) return null;
-            return .{ .send = .{ .chat = .parse(rest[0]), .text = rest[1] } };
+            return initSend(rest[0], rest[1]);
         }
         return null;
+    }
+
+    /// `chats` with `count` conversations (null for the default), or null if it is outside
+    /// 1 to `conversation_count_limit`. Shared by the CLI and the MCP server.
+    pub fn initChats(count: ?u32) ?Command {
+        const conversation_count = count orelse conversation_count_default;
+        if (conversation_count == 0) return null;
+        if (conversation_count > conversation_count_limit) return null;
+        return .{ .chats = @intCast(conversation_count) };
+    }
+
+    /// `messages` for the chat typed as `chat_text`, with `count` messages (null for the
+    /// default), or null if the chat is empty or the count is outside 1 to `message_count_limit`.
+    /// Borrows `chat_text`.
+    pub fn initMessages(chat_text: []const u8, count: ?u32) ?Command {
+        if (chat_text.len == 0) return null;
+        const message_count = count orelse message_count_default;
+        if (message_count == 0) return null;
+        if (message_count > message_count_limit) return null;
+        return .{ .messages = .{ .chat = .parse(chat_text), .count = message_count } };
+    }
+
+    /// `send` of `text` to the chat typed as `chat_text`, or null if the chat is empty or the
+    /// text holds only whitespace. Borrows both. The size checks come later, in `runSend`.
+    pub fn initSend(chat_text: []const u8, text: []const u8) ?Command {
+        if (chat_text.len == 0) return null;
+        if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) return null;
+        return .{ .send = .{ .chat = .parse(chat_text), .text = text } };
     }
 
     /// Sets `started_at` to idle once the Chat Service has answered, before any output is written.
@@ -846,13 +867,9 @@ fn otherWriterName(messages: []const chat.Message, self_mri: []const u8) ?[]cons
     return null;
 }
 
-/// A count from the command line: a whole number from 1 to `count_max`, or null.
-fn parseCount(text: []const u8, count_max: u32) ?u32 {
-    std.debug.assert(count_max > 0);
-    const count = std.fmt.parseInt(u32, text, 10) catch return null;
-    if (count == 0) return null;
-    if (count > count_max) return null;
-    return count;
+/// A count from the command line: a whole number, or null. `Command.init…` check its range.
+fn parseCount(text: []const u8) ?u32 {
+    return std.fmt.parseInt(u32, text, 10) catch null;
 }
 
 /// `time  sender: ` and the body as Markdown, which continues on the following lines when it
@@ -1259,4 +1276,26 @@ test "reportError writes the hint as one teams-zig line and exits 1" {
         \\teams-zig: the Chat Service answered HTTP 403
         \\
     , out.written());
+}
+
+test "Command.init… apply the CLI's limits to typed arguments" {
+    try std.testing.expectEqual(conversation_count_default, Command.initChats(null).?.chats);
+    try std.testing.expectEqual(1, Command.initChats(1).?.chats);
+    try std.testing.expectEqual(100, Command.initChats(100).?.chats);
+    try std.testing.expectEqual(null, Command.initChats(0));
+    try std.testing.expectEqual(null, Command.initChats(101));
+
+    const messages = Command.initMessages("Fake Person", null).?.messages;
+    try std.testing.expectEqualStrings("Fake Person", messages.chat.name);
+    try std.testing.expectEqual(message_count_default, messages.count);
+    try std.testing.expectEqual(12800, Command.initMessages("19:fake", 12800).?.messages.count);
+    try std.testing.expectEqual(null, Command.initMessages("19:fake", 0));
+    try std.testing.expectEqual(null, Command.initMessages("19:fake", 12801));
+    try std.testing.expectEqual(null, Command.initMessages("", null));
+
+    const send = Command.initSend("48:notes", "fake").?.send;
+    try std.testing.expectEqualStrings("48:notes", send.chat.id);
+    try std.testing.expectEqualStrings("fake", send.text);
+    try std.testing.expectEqual(null, Command.initSend("", "fake"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", " \n"));
 }
