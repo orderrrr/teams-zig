@@ -366,8 +366,8 @@ pub fn serve(server: *Server) Error!void {
 /// Drops the rest of a line too long for the reader's buffer, and answers it as unreadable. A
 /// line past `skipped_line_size_max` ends the server: its input is not MCP.
 fn serveLongLine(server: *Server) Error!void {
-    const skip_limit: Io.Limit = .limited(skipped_line_size_max);
-    _ = server.reader.discardDelimiterLimit('\n', skip_limit) catch |err| {
+    // One more than the longest line skipped, since the limit counts up to the newline too.
+    _ = server.reader.discardDelimiterLimit('\n', .limited(skipped_line_size_max + 1)) catch |err| {
         return switch (err) {
             error.ReadFailed => error.ReadFailed,
             error.StreamTooLong => error.RequestLineTooLong,
@@ -394,8 +394,12 @@ const parse_options: std.json.ParseOptions = .{
 /// Answers one request line. `arena` holds what parsing it needs; running out of it fails only
 /// this request.
 fn answer(server: *Server, arena: std.mem.Allocator, line: []const u8) Error!void {
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, line, parse_options);
-    const value = parsed catch |err| switch (err) {
+    const value = std.json.parseFromSliceLeaky(
+        std.json.Value,
+        arena,
+        line,
+        parse_options,
+    ) catch |err| switch (err) {
         error.OutOfMemory => return server.answerOutOfMemory(null),
         else => return server.answerError(null, .parse_error, "Parse error"),
     };
@@ -613,8 +617,10 @@ fn expectServed(
         .output_buffer = output_buffer,
         .runner = runner.interface(),
     };
-    try server.serve();
+    // The answers are checked even when `serve` fails, then its error is passed on.
+    const served = server.serve();
     try std.testing.expectEqualStrings(expected, out.written());
+    return served;
 }
 
 /// Runs a server over `input` and checks that its answers are `expected`. No command runs.
@@ -1036,14 +1042,15 @@ test "every command error's hint fits in the room kept for it" {
     }
 }
 
-test "a line longer than the skip limit stops the server, with no answer" {
-    const source = try std.testing.allocator.alloc(u8, skipped_line_size_max + 1);
+test "a line of the skip limit is skipped, and a longer one stops the server with no answer" {
+    const source = try std.testing.allocator.alloc(u8, skipped_line_size_max + 2);
     defer std.testing.allocator.free(source);
     @memset(source, 'x');
+    source[skipped_line_size_max] = '\n';
 
     var buffer: [64]u8 = undefined;
     var reader: SliceReader = .{
-        .source = source,
+        .source = source[0 .. skipped_line_size_max + 1],
         .interface = .{
             .vtable = &.{ .stream = SliceReader.stream },
             .buffer = &buffer,
@@ -1052,6 +1059,17 @@ test "a line longer than the skip limit stops the server, with no answer" {
         },
     };
     var runner: FakeRunner = .{ .output = "", .failure = null, .runs_allowed = false };
+    try expectServed(&reader.interface, &runner, 64,
+        \\{"jsonrpc":"2.0","id":null,
+    ++
+        \\"error":{"code":-32700,"message":"Parse error: the request line is too long"}}
+        \\
+    );
+
+    source[skipped_line_size_max] = 'x';
+    reader.source = source[0 .. skipped_line_size_max + 1];
+    reader.interface.seek = 0;
+    reader.interface.end = 0;
     const result = expectServed(&reader.interface, &runner, 64, "");
     try std.testing.expectError(error.RequestLineTooLong, result);
 }
