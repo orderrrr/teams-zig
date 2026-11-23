@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !u8 {
     var cache = try loadCache(init.gpa, init.io, home);
     defer cache.deinit();
     // Saved even after a failure: what was learned, or a dropped entry, still holds.
-    defer saveCache(&cache, init.io, home);
+    defer saveCacheOrSay(&cache, init.io, home, stderr);
 
     var clock: Clock = .{ .zone = zone, .now_seconds = Io.Clock.real.now(init.io).toSeconds() };
     requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
@@ -213,7 +213,10 @@ const McpRunner = struct {
             return .{ .err = err, .status = null };
         };
         defer cache.deinit();
-        defer saveCache(&cache, runner.io, home);
+        // The owner's choice (M7 gate): the server says nothing about a failed save, since its
+        // stderr carries only the watchdog's line and a failure that ends it. It only costs
+        // requests on later calls.
+        defer saveCache(&cache, runner.io, home) catch {};
         // The cached user may be the old token's, after a sign-in to another account.
         if (client_new) cache.forgetSelf();
 
@@ -279,12 +282,21 @@ fn loadCache(gpa: std.mem.Allocator, io: Io, home: ?Io.Dir) error{OutOfMemory}!C
     return Cache.load(gpa, io, dir);
 }
 
-/// Saves `cache` under `home` if it changed. A failed save only costs requests next time, so
-/// the command goes on without it.
-fn saveCache(cache: *const Cache, io: Io, home: ?Io.Dir) void {
+/// Saves `cache` under `home` if it changed; without a home there is nothing to save.
+fn saveCache(cache: *const Cache, io: Io, home: ?Io.Dir) Cache.SaveError!void {
     const dir = home orelse return;
     if (!cache.changed) return;
-    cache.save(io, dir) catch {};
+    try cache.save(io, dir);
+}
+
+/// The CLI's save: a failed save only costs requests next time, so the command goes on, and one
+/// line on `stderr` says why.
+fn saveCacheOrSay(cache: *const Cache, io: Io, home: ?Io.Dir, stderr: *Io.Writer) void {
+    saveCache(cache, io, home) catch |err| {
+        // stderr is the last place to report anything; if writing there fails, nothing is left.
+        stderr.print("teams-zig: couldn't save the cache: {t}\n", .{err}) catch return;
+        stderr.flush() catch return;
+    };
 }
 
 /// Starts the watchdog thread. Without it a stalled request would hang forever; if the thread
@@ -409,4 +421,27 @@ test "McpRunner starts a send on a fresh connection after 30 idle seconds" {
     try std.testing.expect(!McpRunner.sendsFresh(1000, 1000));
     try std.testing.expect(!McpRunner.sendsFresh(1030, 1000));
     try std.testing.expect(McpRunner.sendsFresh(1031, 1000));
+}
+
+test "the CLI says on stderr when the cache can't be saved" {
+    const tmp_options: Io.Dir.OpenOptions = .{
+        .access_sub_paths = true,
+        .iterate = false,
+        .follow_symlinks = true,
+    };
+    var tmp = std.testing.tmpDir(tmp_options);
+    defer tmp.cleanup();
+    // A file where the cache's directory should be, so the save fails.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Library", .data = "fake" });
+
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.putChat("Fake Standup", "19:fake-group@thread.v2");
+    var out: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    saveCacheOrSay(&cache, std.testing.io, tmp.dir, &out.writer);
+    const line_start = "teams-zig: couldn't save the cache: ";
+    try std.testing.expect(std.mem.startsWith(u8, out.written(), line_start));
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "\n"));
 }
