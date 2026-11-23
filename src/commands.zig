@@ -1575,9 +1575,11 @@ test "forgetStaleChat drops a cached name whose chat answers 404, and nothing el
     try std.testing.expectEqual(null, cache.chatId("fake retro"));
 }
 
-test "readCredentials takes test mode's token and region, as its own copy" {
+test "readCredentials takes test mode's token and region as its own copy, and refuses bad ones" {
+    // A good token and region; then an unknown region, no region, and a token with a line break.
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
+
     try environment.put(token_variable, "fake-token");
     try environment.put(region_variable, "amer");
 

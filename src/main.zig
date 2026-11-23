@@ -225,11 +225,13 @@ const McpRunner = struct {
         // Read for every call, so a cache deleted at sign-in takes effect at once.
         const home = openHome(runner.io, runner.environment);
         defer if (home) |dir| dir.close(runner.io);
+
         var cache = loadCache(runner.gpa, runner.io, home) catch |err| {
             return .{ .err = err, .status = null };
         };
         defer cache.deinit();
         defer runner.runOnceSave(&cache, home);
+
         // The cached user may be the old token's, after a sign-in to another account.
         if (runner.kept.?.cached_self_stale) cache.forgetSelf();
 
