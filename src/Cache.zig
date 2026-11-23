@@ -359,7 +359,19 @@ test "load gives an empty cache when the file is missing or too large" {
     defer std.testing.allocator.free(long_text);
     @memset(long_text, '\n');
     @memcpy(long_text[0..14], "chat\tfake\t19:x");
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = long_text });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = sub_path,
+        .data = long_text,
+        .flags = .{
+            .read = false,
+            .truncate = true,
+            .exclusive = false,
+            .lock = .none,
+            .lock_nonblocking = false,
+            .permissions = .default_file,
+            .resolve_beneath = false,
+        },
+    });
     var too_large = try load(std.testing.allocator, std.testing.io, tmp.dir);
     defer too_large.deinit();
     try std.testing.expectEqual(0, too_large.chats.count());

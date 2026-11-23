@@ -135,11 +135,16 @@ const McpRunner = struct {
     /// connections exist.
     kept: ?Kept = null,
 
-    /// The client kept across calls, and when it last finished one.
+    /// The client kept across calls, when it last finished one, and whether the cache's user
+    /// may still be another token's.
     const Kept = struct {
         client: chat.Client,
         /// Awake-clock seconds.
         used_at_seconds: i64,
+        /// True from connecting until a call forgets the cached user and saves that: a new
+        /// client read the keychain, and its token may be another account's. Kept here, not
+        /// per call, so a failed load or save forgets it again on the next call.
+        cached_self_stale: bool,
     };
 
     /// A send on a connection idle longer than this starts on a fresh one: the service may have
@@ -197,8 +202,6 @@ const McpRunner = struct {
                 if (sendsFresh(now_seconds, kept.used_at_seconds)) runner.dropClient();
             }
         }
-        // A new client reads the keychain again, and its token may be another account's.
-        const client_new = runner.kept == null;
         const client = runner.connected(now_seconds) catch |err| {
             return .{ .err = err, .status = null };
         };
@@ -213,12 +216,16 @@ const McpRunner = struct {
             return .{ .err = err, .status = null };
         };
         defer cache.deinit();
-        // The owner's choice (M7 gate): the server says nothing about a failed save, since its
-        // stderr carries only the watchdog's line and a failure that ends it. It only costs
-        // requests on later calls.
-        defer saveCache(&cache, runner.io, home) catch {};
+        defer {
+            // The server says nothing about a failed save: its stderr carries only the
+            // watchdog's line and a failure that ends it. A failed save costs requests later,
+            // and leaves the cached user marked stale, to forget again.
+            if (saveCache(&cache, runner.io, home)) {
+                if (runner.kept) |*kept| kept.cached_self_stale = false;
+            } else |_| {}
+        }
         // The cached user may be the old token's, after a sign-in to another account.
-        if (client_new) cache.forgetSelf();
+        if (runner.kept.?.cached_self_stale) cache.forgetSelf();
 
         var clock: Clock = .{
             .zone = runner.zone,
@@ -254,7 +261,11 @@ const McpRunner = struct {
     /// The kept client, connecting first (and reading the keychain) if there is none.
     fn connected(runner: *McpRunner, now_seconds: i64) commands.CommandError!*chat.Client {
         if (runner.kept) |*kept| return &kept.client;
-        runner.kept = .{ .client = undefined, .used_at_seconds = now_seconds };
+        runner.kept = .{
+            .client = undefined,
+            .used_at_seconds = now_seconds,
+            .cached_self_stale = true,
+        };
         connect(&runner.kept.?.client, runner.gpa, runner.io, runner.environment) catch |err| {
             runner.kept = null;
             return err;
@@ -432,7 +443,11 @@ test "the CLI says on stderr when the cache can't be saved" {
     var tmp = std.testing.tmpDir(tmp_options);
     defer tmp.cleanup();
     // A file where the cache's directory should be, so the save fails.
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Library", .data = "fake" });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "Library",
+        .data = "fake",
+        .flags = test_create_options,
+    });
 
     var cache: Cache = .init(std.testing.allocator);
     defer cache.deinit();
@@ -445,3 +460,14 @@ test "the CLI says on stderr when the cache can't be saved" {
     try std.testing.expect(std.mem.startsWith(u8, out.written(), line_start));
     try std.testing.expect(std.mem.endsWith(u8, out.written(), "\n"));
 }
+
+/// Options for files the tests create, spelled out.
+const test_create_options: Io.Dir.CreateFileOptions = .{
+    .read = false,
+    .truncate = true,
+    .exclusive = false,
+    .lock = .none,
+    .lock_nonblocking = false,
+    .permissions = .default_file,
+    .resolve_beneath = false,
+};
