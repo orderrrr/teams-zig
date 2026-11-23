@@ -378,6 +378,10 @@ After the gate, the owner registers the server in Claude Code; agents do not cha
 
 `watch` as a tool, and any server-to-client messages (notifications, progress, logging). Resources and prompts. Cancelling a call. Running calls in parallel. HTTP transport. Any write but `send`.
 
+### M6 live send
+
+On 2026-11-23, with the owner's go-ahead in the work session at that moment: one `tools/call send` through `teams-zig mcp` to `48:notes`, text "M6 MCP send check: **bold**, _italic_, `code`.". The tool answered "Sent 15:51."; the `messages` tool read it back with every form as typed. Nothing was retried. This was the only write in M6.
+
 ## M6 gate
 
 - **Round 1** (mr-review, STYLE.md and Tiger Style reviews of `c918fcf..32d024a`). STYLE: helpers carry their caller's name (`serveLongLine`, `answerInitialize`, `answerCallRun`, `Tool.commandCount`), `run_fn`, one path for a missing or non-string field, `Runner.run` as a method. Tiger Style: lines at most 100 columns; no allocation while serving (a static 2 MiB request memory, `-32603` when a request needs more, the hint written after the text in room kept for it); all parse options explicit; pair assertions on `watch` and on `UnexpectedStatus`'s status; comptime asserts on the request size and on `Tool`'s names; `*const` for `Id` and `std.json.Value`; `@divExact`; unit names last; types before methods; the event loop marked unbounded and the skip bounded at 64 MiB; a test under 70 lines. mr-review: a test that a `tools/call` notification runs nothing, and the one-session test the plan asked for in M6.9. `main`'s tests now compile `serveMcp`, which they did not reach before.
