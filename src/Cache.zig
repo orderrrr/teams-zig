@@ -54,8 +54,8 @@ pub const User = struct {
     }
 };
 
-/// Where the cache file lives, under your home directory. Only `scripts/teams-token.fish`
-/// deletes it, at each new sign-in.
+/// Where the cache file lives, under your home directory. Only `teams-zig login` deletes it
+/// (`delete`), at each new sign-in, since the new token may be another account's.
 pub const sub_path = "Library/Caches/teams-zig/cache.txt";
 
 /// Failures saving the cache. Callers go on without it: a cache must never stop a command.
@@ -92,6 +92,14 @@ pub fn save(cache: *const Cache, io: std.Io, home: std.Io.Dir) SaveError!void {
     try cache.write(&file_writer.interface);
     try file_writer.interface.flush();
     try atomic.replace(io);
+}
+
+/// Removes the cache file under `home`; a missing one is already gone.
+pub fn delete(io: std.Io, home: std.Io.Dir) std.Io.Dir.DeleteFileError!void {
+    home.deleteFile(io, sub_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => |other| return other,
+    };
 }
 
 pub fn init(gpa: std.mem.Allocator) Cache {
@@ -463,4 +471,21 @@ test "forgetSelf drops your user, and marks the cache changed even when there wa
     cache.forgetSelf();
     try std.testing.expectEqual(null, cache.self_user);
     try std.testing.expect(cache.changed);
+}
+
+test "delete removes the cache file, and a missing one is fine" {
+    var tmp = std.testing.tmpDir(tmp_options);
+    defer tmp.cleanup();
+
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.putChat("Fake chat", "19:fake");
+    try cache.save(std.testing.io, tmp.dir);
+
+    try delete(std.testing.io, tmp.dir);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, sub_path, .{ .follow_symlinks = true }),
+    );
+    try delete(std.testing.io, tmp.dir);
 }
