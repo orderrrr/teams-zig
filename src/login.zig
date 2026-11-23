@@ -123,6 +123,83 @@ fn urlRegionName(url: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Runs agent-browser with some arguments and gives its stdout, owned by the caller. The seam
+/// tests replace.
+pub const AgentBrowser = struct {
+    context: *anyopaque,
+    run_fn: *const fn (context: *anyopaque, arguments: []const []const u8) RunError![]u8,
+
+    fn run(agent_browser: AgentBrowser, arguments: []const []const u8) RunError![]u8 {
+        std.debug.assert(arguments.len > 0);
+        return agent_browser.run_fn(agent_browser.context, arguments);
+    }
+};
+
+pub const RunError = error{
+    AgentBrowserMissing,
+    AgentBrowserFailed,
+    AgentBrowserOutputTooLarge,
+    OutOfMemory,
+};
+
+/// The largest output read from one run: Teams makes a few thousand requests while it loads.
+pub const output_size_max = 64 * 1024 * 1024;
+
+/// agent-browser as a child process, found on PATH.
+pub const ChildAgentBrowser = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    /// Tests run other programs in its place.
+    program: []const u8 = "agent-browser",
+
+    pub fn interface(child: *ChildAgentBrowser) AgentBrowser {
+        return .{ .context = child, .run_fn = run };
+    }
+
+    fn run(context: *anyopaque, arguments: []const []const u8) RunError![]u8 {
+        const child: *ChildAgentBrowser = @ptrCast(@alignCast(context));
+        var argv_buffer: [argument_count_max + 1][]const u8 = undefined;
+        std.debug.assert(arguments.len <= argument_count_max);
+        argv_buffer[0] = child.program;
+        @memcpy(argv_buffer[1..][0..arguments.len], arguments);
+
+        const result = std.process.run(child.gpa, child.io, .{
+            .exe = .detect,
+            .argv = argv_buffer[0 .. arguments.len + 1],
+            .stderr_limit = .limited(stderr_size_max),
+            .stdout_limit = .limited(output_size_max),
+            .reserve_amount = 64 * 1024,
+            .cwd = .inherit,
+            .environ_map = null,
+            .expand_arg0 = .no_expand,
+            .progress_node = .none,
+            .create_no_window = true,
+            .timeout = .none,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound => return error.AgentBrowserMissing,
+            error.StreamTooLong => return error.AgentBrowserOutputTooLarge,
+            else => return error.AgentBrowserFailed,
+        };
+        // Its notes, such as an out-of-date browser, aren't shown: `login` says what failed.
+        child.gpa.free(result.stderr);
+        errdefer {
+            std.crypto.secureZero(u8, result.stdout);
+            child.gpa.free(result.stdout);
+        }
+
+        switch (result.term) {
+            .exited => |code| if (code != 0) return error.AgentBrowserFailed,
+            else => return error.AgentBrowserFailed,
+        }
+        return result.stdout;
+    }
+
+    /// The most arguments one run takes (`open` with its options is the longest).
+    const argument_count_max = 8;
+    const stderr_size_max = 64 * 1024;
+};
+
 test "find takes the token from the skypetokenauth POST and the region from a Chat Service host" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -233,4 +310,30 @@ test "find refuses output that isn't agent-browser's, and a token over the limit
     @memset(output[head.len..][0 .. token_size_max + 1], 'A');
     @memcpy(output[head.len + token_size_max + 1 ..], tail);
     try std.testing.expectError(error.TokenTooLong, find(arena.allocator(), output));
+}
+
+test "ChildAgentBrowser tells a missing program, a failed run and too much output apart" {
+    var missing: ChildAgentBrowser = .{
+        .gpa = std.testing.allocator,
+        .io = std.testing.io,
+        .program = "teams-zig-no-such-program",
+    };
+    try std.testing.expectError(error.AgentBrowserMissing, missing.interface().run(&.{"open"}));
+
+    var shell: ChildAgentBrowser = .{
+        .gpa = std.testing.allocator,
+        .io = std.testing.io,
+        .program = "/bin/sh",
+    };
+    const said = try shell.interface().run(&.{ "-c", "printf fake-output; echo note >&2" });
+    defer std.testing.allocator.free(said);
+    try std.testing.expectEqualStrings("fake-output", said);
+
+    const failed = shell.interface().run(&.{ "-c", "exit 3" });
+    try std.testing.expectError(error.AgentBrowserFailed, failed);
+    const too_much = std.fmt.comptimePrint("head -c {d} /dev/zero", .{output_size_max + 1});
+    try std.testing.expectError(
+        error.AgentBrowserOutputTooLarge,
+        shell.interface().run(&.{ "-c", too_much }),
+    );
 }
