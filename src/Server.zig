@@ -231,8 +231,11 @@ const Tool = enum {
                 "chat: its exact name or id; count (optional): 1 to {d}",
                 .{commands.message_count_limit},
             ),
-            .send => "chat: its exact name or id; text: Markdown, not only whitespace, " ++
-                "with no control bytes but tab and newline",
+            .send => std.fmt.comptimePrint(
+                "chat: its exact name or id; text: Markdown, at most {d} KiB of UTF-8, " ++
+                    "not only whitespace, with no control bytes but tab and newline",
+                .{@divExact(commands.send_text_size_max, 1024)},
+            ),
         };
     }
 };
@@ -322,9 +325,9 @@ const tools_list = std.fmt.comptimePrint(
 ++
     \\"inputSchema":{{"type":"object","properties":{{"chat":{[chat_schema]s},
 ++
-    \\"text":{{"type":"string","minLength":1,"maxLength":{[send_text_size_max]d},
+    \\"text":{{"type":"string","minLength":1,
 ++
-    \\"description":"The message in Markdown, at most {[send_text_kib_max]d} KiB."}}
+    \\"description":"The message in Markdown, at most {[send_text_kib_max]d} KiB of UTF-8."}}
 ++
     \\}},"required":["chat","text"],"additionalProperties":false}},
 ++
@@ -339,7 +342,6 @@ const tools_list = std.fmt.comptimePrint(
     .messages_max = commands.message_count_limit,
     .messages_default = commands.message_count_default,
     .unread_max = commands.unread_read_count_limit,
-    .send_text_size_max = commands.send_text_size_max,
     .send_text_kib_max = @divExact(commands.send_text_size_max, 1024),
     .chat_schema =
     \\{"type":"string","minLength":1,
@@ -851,9 +853,9 @@ const tools_list_expected =
 ++
     \\"description":"The chat's exact name as chats shows it, or its id."},
 ++
-    \\"text":{"type":"string","minLength":1,"maxLength":16384,
+    \\"text":{"type":"string","minLength":1,
 ++
-    \\"description":"The message in Markdown, at most 16 KiB."}},
+    \\"description":"The message in Markdown, at most 16 KiB of UTF-8."}},
 ++
     \\"required":["chat","text"],"additionalProperties":false},
 ++
