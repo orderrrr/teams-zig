@@ -385,3 +385,4 @@ After the gate, the owner registers the server in Claude Code; agents do not cha
 - **Round 3** (reviews of `99c7c64..7176ff1`). Tiger Style: two variables that only shortened lines gone. mr-review: the test helper checks the answers even when `serve` fails, so the skip-limit test proves no answer goes out; a line of exactly 64 MiB is skipped, as the plan says, with a test on both sides of the edge.
 - **Round 4** (reviews of `7176ff1..ad656ca`). Tiger Style: the edge test allocates only the bytes it reads and says why it resets its reader. mr-review and STYLE: nothing new.
 - **Round 5** (reviews of `ad656ca..db75827`). mr-review: the edge test's comment on its reset said the opposite of what happens; reworded. STYLE and Tiger Style: nothing new.
+- **Round 6:** all three reviews found nothing new. Gate passed. M6 waits on the M6.12 live send, which needs the owner's go-ahead in the work session, before it is resolved at 0.9.0.
