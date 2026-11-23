@@ -23,12 +23,12 @@ const keychain_value_size_max = 64 * 1024;
 const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
 const region_variable = "TEAMS_ZIG_REGION";
 
-const conversation_count_default = 50;
-const message_count_default = 50;
+pub const conversation_count_default = 50;
+pub const message_count_default = 50;
 
 /// `chats` names 1:1 chats with up to one request each, all inside the watchdog's limit, so the
 /// list stays at one page of modest size.
-const conversation_count_limit = 100;
+pub const conversation_count_limit = 100;
 
 /// At most this many 1:1 chats get a recent-messages lookup per run; at about a second each on a
 /// slow link, they stay inside the watchdog's 60 seconds. Chats past it show "(no topic)".
@@ -50,7 +50,7 @@ comptime {
         short_time.gmt_seconds_max);
 }
 
-const message_count_limit = chat.Client.message_count_limit;
+pub const message_count_limit = chat.Client.message_count_limit;
 
 /// How far back `chats` looks for the other person's name in a 1:1 chat where you spoke last.
 const message_count_recent = 20;
@@ -63,11 +63,11 @@ const watch_read_count_limit = 10;
 
 /// At most this many unread chats are read by `unread`, keeping its requests inside the
 /// watchdog's limit.
-const unread_read_count_limit = 10;
+pub const unread_read_count_limit = 10;
 
 /// The most text `send` takes. Its HTML is checked too (see `chat.Client.content_size_max`),
 /// since escaping makes the HTML longer than the text.
-const send_text_size_max = 16 * 1024;
+pub const send_text_size_max = 16 * 1024;
 
 /// The longest `watch` waits after throttling or a failure before trying again.
 const watch_backoff_seconds_max = 300;

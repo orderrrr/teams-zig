@@ -6,6 +6,7 @@ const Io = std.Io;
 const teams = @import("teams");
 const json = teams.chat.json;
 const build_options = @import("build_options");
+const commands = @import("commands.zig");
 
 const Server = @This();
 
@@ -99,6 +100,9 @@ fn answer(server: *Server, arena: std.mem.Allocator, line: []const u8) Error!voi
         return server.answerResult(id, initializeResult(&request.params));
     }
     if (std.mem.eql(u8, request.method, "ping")) return server.answerResult(id, Empty{});
+    if (std.mem.eql(u8, request.method, "tools/list")) {
+        return server.answerResult(id, RawJson{ .text = tools_list });
+    }
     return server.answerError(id, .method_not_found, "Method not found");
 }
 
@@ -119,6 +123,66 @@ fn initializeResult(params: *const std.json.ObjectMap) InitializeResult {
     };
     return .{ .protocolVersion = version };
 }
+
+/// The `tools/list` result: each tool takes the CLI command's arguments, with its limits. Field
+/// names are MCP's (schema 2025-11-25).
+const tools_list = std.fmt.comptimePrint(
+    \\{{"tools":[
+++
+    \\{{"name":"whoami","description":"Show the signed-in user.",
+++
+    \\"inputSchema":{{"type":"object","properties":{{}},"additionalProperties":false}},
+++
+    \\"annotations":{{"readOnlyHint":true}}}},
+++
+    \\{{"name":"chats","description":"List your newest chats, one per line: a * if unread, the last message's time, the kind, the name and the id.",
+++
+    \\"inputSchema":{{"type":"object","properties":{{"count":{{"type":"integer","minimum":1,"maximum":{[chats_max]d},"description":"How many chats (default {[chats_default]d})."}}}},"additionalProperties":false}},
+++
+    \\"annotations":{{"readOnlyHint":true}}}},
+++
+    \\{{"name":"messages","description":"Show a chat's messages, oldest first, each as its time, sender and text in Markdown.",
+++
+    \\"inputSchema":{{"type":"object","properties":{{"chat":{[chat_schema]s},"count":{{"type":"integer","minimum":1,"maximum":{[messages_max]d},"description":"How many of the newest messages (default {[messages_default]d})."}}}},"required":["chat"],"additionalProperties":false}},
+++
+    \\"annotations":{{"readOnlyHint":true}}}},
+++
+    \\{{"name":"unread","description":"Show what's new since you last read, in up to {[unread_max]d} of your {[chats_default]d} newest chats.",
+++
+    \\"inputSchema":{{"type":"object","properties":{{}},"additionalProperties":false}},
+++
+    \\"annotations":{{"readOnlyHint":true}}}},
+++
+    \\{{"name":"send","description":"Send one message, written in Markdown, to a chat. Never retried: after a failure, check the chat before sending again.",
+++
+    \\"inputSchema":{{"type":"object","properties":{{"chat":{[chat_schema]s},"text":{{"type":"string","minLength":1,"maxLength":{[text_max]d},"description":"The message in Markdown, at most {[text_max_kib]d} KiB."}}}},"required":["chat","text"],"additionalProperties":false}},
+++
+    \\"annotations":{{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}}}
+++
+    \\]}}
+, .{
+    .chats_max = commands.conversation_count_limit,
+    .chats_default = commands.conversation_count_default,
+    .messages_max = commands.message_count_limit,
+    .messages_default = commands.message_count_default,
+    .unread_max = commands.unread_read_count_limit,
+    .text_max = commands.send_text_size_max,
+    .text_max_kib = commands.send_text_size_max / 1024,
+    .chat_schema =
+    \\{"type":"string","minLength":1,"description":"The chat's exact name as chats shows it, or its id."}
+    ,
+});
+
+/// JSON written as it is, for answers fixed at comptime.
+const RawJson = struct {
+    text: []const u8,
+
+    pub fn jsonStringify(raw: RawJson, writer: *std.json.Stringify) std.json.Stringify.Error!void {
+        try writer.beginWriteRaw();
+        try writer.writer.writeAll(raw.text);
+        writer.endWriteRaw();
+    }
+};
 
 /// An empty JSON object. (An empty `.{}` is a tuple, which std.json writes as `[]`.)
 const Empty = struct {};
@@ -339,6 +403,48 @@ test "ping gets an empty result, and notifications/initialized no answer" {
         \\
     ,
         \\{"jsonrpc":"2.0","id":"fake-ping","result":{}}
+        \\
+    );
+}
+
+test "tools/list lists the five tools with their arguments and hints" {
+    try expectAnswers(
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":1,"result":{"tools":[
+    ++
+        \\{"name":"whoami","description":"Show the signed-in user.",
+    ++
+        \\"inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+    ++
+        \\"annotations":{"readOnlyHint":true}},
+    ++
+        \\{"name":"chats","description":"List your newest chats, one per line: a * if unread, the last message's time, the kind, the name and the id.",
+    ++
+        \\"inputSchema":{"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100,"description":"How many chats (default 50)."}},"additionalProperties":false},
+    ++
+        \\"annotations":{"readOnlyHint":true}},
+    ++
+        \\{"name":"messages","description":"Show a chat's messages, oldest first, each as its time, sender and text in Markdown.",
+    ++
+        \\"inputSchema":{"type":"object","properties":{"chat":{"type":"string","minLength":1,"description":"The chat's exact name as chats shows it, or its id."},"count":{"type":"integer","minimum":1,"maximum":12800,"description":"How many of the newest messages (default 50)."}},"required":["chat"],"additionalProperties":false},
+    ++
+        \\"annotations":{"readOnlyHint":true}},
+    ++
+        \\{"name":"unread","description":"Show what's new since you last read, in up to 10 of your 50 newest chats.",
+    ++
+        \\"inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+    ++
+        \\"annotations":{"readOnlyHint":true}},
+    ++
+        \\{"name":"send","description":"Send one message, written in Markdown, to a chat. Never retried: after a failure, check the chat before sending again.",
+    ++
+        \\"inputSchema":{"type":"object","properties":{"chat":{"type":"string","minLength":1,"description":"The chat's exact name as chats shows it, or its id."},"text":{"type":"string","minLength":1,"maxLength":16384,"description":"The message in Markdown, at most 16 KiB."}},"required":["chat","text"],"additionalProperties":false},
+    ++
+        \\"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}
+    ++
+        \\]}}
         \\
     );
 }
