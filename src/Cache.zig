@@ -191,6 +191,14 @@ pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
     };
 }
 
+/// Forgets your user, as when a new token may be another account; the next command asks the
+/// service once.
+pub fn forgetSelf(cache: *Cache) void {
+    if (cache.self_user == null) return;
+    cache.self_user = null;
+    cache.changed = true;
+}
+
 /// Whether `user` is the `known` one, field for field.
 fn putSelfUnchanged(known: *const User, user: *const User) bool {
     if (!std.mem.eql(u8, known.mri, user.mri)) return false;
@@ -429,5 +437,18 @@ test "clearChats forgets every chat name" {
     cache.changed = false;
     cache.clearChats();
     try std.testing.expectEqual(null, cache.chatId("fake standup"));
+    try std.testing.expect(cache.changed);
+}
+
+test "forgetSelf drops your user, and marks the cache changed only if there was one" {
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    cache.forgetSelf();
+    try std.testing.expect(!cache.changed);
+
+    try cache.putSelf(&.{ .mri = "8:orgid:fake-self", .name = "Fake Self", .upn = "fake@x" });
+    cache.changed = false;
+    cache.forgetSelf();
+    try std.testing.expectEqual(null, cache.self_user);
     try std.testing.expect(cache.changed);
 }

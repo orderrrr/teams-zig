@@ -197,6 +197,8 @@ const McpRunner = struct {
                 if (sendsFresh(now_seconds, kept.used_at_seconds)) runner.dropClient();
             }
         }
+        // A new client reads the keychain again, and its token may be another account's.
+        const client_new = runner.kept == null;
         const client = runner.connected(now_seconds) catch |err| {
             return .{ .err = err, .status = null };
         };
@@ -212,6 +214,8 @@ const McpRunner = struct {
         };
         defer cache.deinit();
         defer saveCache(&cache, runner.io, home);
+        // The cached user may be the old token's, after a sign-in to another account.
+        if (client_new) cache.forgetSelf();
 
         var clock: Clock = .{
             .zone = runner.zone,
