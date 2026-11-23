@@ -2,13 +2,51 @@
 
 A Microsoft Teams client in Zig, with no third-party dependencies.
 
-## Build
+## Install
+
+The releases page has a binary for Apple silicon Macs (macOS 15 or later). Replace `0.11.0` with the release you want.
+
+1. Download the binary and its checksum:
+
+   ```sh
+   curl -LO https://github.com/orderrrr/teams-zig/releases/download/v0.11.0/teams-zig-0.11.0-aarch64-macos.tar.gz
+   curl -LO https://github.com/orderrrr/teams-zig/releases/download/v0.11.0/SHA256SUMS
+   ```
+
+2. Check the download:
+
+   ```sh
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+3. Unpack it:
+
+   ```sh
+   tar -xzf teams-zig-0.11.0-aarch64-macos.tar.gz
+   ```
+
+4. If you downloaded the file with a browser, remove the quarantine attribute. The binary is not signed by an Apple developer, so macOS stops it otherwise:
+
+   ```sh
+   xattr -d com.apple.quarantine teams-zig
+   ```
+
+5. Put the binary on your `PATH`, for example:
+
+   ```sh
+   mkdir -p ~/.local/bin
+   mv teams-zig ~/.local/bin/
+   ```
+
+## Build from source
 
 ```sh
 zig build
 ```
 
-The binary is `zig-out/bin/teams-zig`.
+The binary is `zig-out/bin/teams-zig`. It needs Zig 0.17 and the Xcode Command Line Tools.
+
+`zig build release` builds the release binary, `zig-out/release/teams-zig-aarch64-macos`.
 
 ## Sign in
 
@@ -22,11 +60,11 @@ teams-zig keeps a cache in `~/Library/Caches/teams-zig/cache.txt`: your user, th
 
 ## Use it as an MCP server in Claude Code
 
-1. Build with `zig build`.
-2. Register the server at user scope. Replace `<repo>` with the path to this repo:
+1. Install the binary, or build it with `zig build`.
+2. Register the server at user scope. Use the binary's full path, for example `~/.local/bin/teams-zig` or `<repo>/zig-out/bin/teams-zig`:
 
    ```sh
-   claude mcp add --scope user teams-zig -- <repo>/zig-out/bin/teams-zig mcp
+   claude mcp add --scope user teams-zig -- ~/.local/bin/teams-zig mcp
    ```
 
 The server has five tools: `whoami`, `chats`, `messages`, `unread` and `send`.
