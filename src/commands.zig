@@ -7,18 +7,7 @@ const Seen = @import("Seen.zig");
 const short_time = @import("short_time.zig");
 const core_foundation = teams.macos.core_foundation;
 const Cache = @import("Cache.zig");
-
-/// Shared with scripts/teams-token.fish, which writes these items.
-const keychain_service = "teams-zig";
-
-/// Apple's keychain tool, which reads the items without an access prompt (see `readKeychain`).
-const security_path = "/usr/bin/security";
-
-/// security exits with the low byte of the OSStatus: errSecItemNotFound (-25300) becomes 44.
-const security_exit_item_not_found = 44;
-
-/// Far larger than any token; a bigger value means something else is stored there.
-const keychain_value_size_max = 64 * 1024;
+const keychain = @import("keychain.zig");
 
 /// Test mode: set these to skip the keychain. See `usage`.
 const token_variable = "TEAMS_ZIG_SKYPE_TOKEN";
@@ -120,10 +109,7 @@ pub const Clock = struct {
 };
 
 /// Failures reading the keychain or starting the client.
-const ConnectError = KeychainReadError || error{ UnknownRegion, InvalidToken };
-
-/// Failures reading a keychain item through `security`.
-const KeychainReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory };
+const ConnectError = keychain.ReadError || error{ UnknownRegion, InvalidToken };
 
 /// Failures running a command: the Chat Service's, writing the output, or a chat name that
 /// picks no chat or several.
@@ -437,7 +423,7 @@ pub fn readCredentials(
         }
     }
 
-    const token = try readKeychain(gpa, io, "skype-token");
+    const token = try keychain.read(gpa, io, keychain.service, "skype-token");
     errdefer {
         std.crypto.secureZero(u8, token);
         gpa.free(token);
@@ -446,7 +432,7 @@ pub fn readCredentials(
     // An empty item means the script never stored a real token.
     if (token.len == 0) return error.ItemNotFound;
 
-    const region_name = readKeychain(gpa, io, "region") catch |err| switch (err) {
+    const region_name = keychain.read(gpa, io, keychain.service, "region") catch |err| switch (err) {
         // The token is there but the region isn't: say so, not "no token".
         error.ItemNotFound => return error.UnknownRegion,
         else => |other| return other,
@@ -469,52 +455,6 @@ pub fn connect(
     defer credentials.deinit();
 
     try client.init(gpa, io, credentials.region, credentials.token);
-}
-
-/// Reads one teams-zig keychain item through `/usr/bin/security`, which the token script also
-/// writes with. Items made by `security` trust it, so no build of teams-zig gets an access
-/// prompt, as it would reading through Security.framework itself. Owned by the caller.
-fn readKeychain(
-    gpa: std.mem.Allocator,
-    io: Io,
-    account: []const u8,
-) KeychainReadError![]u8 {
-    std.debug.assert(account.len > 0);
-    const result = std.process.run(gpa, io, .{
-        .exe = .detect,
-        .argv = &.{
-            security_path, "find-generic-password", "-s", keychain_service, "-a", account, "-w",
-        },
-        .stderr_limit = .limited(keychain_value_size_max),
-        .stdout_limit = .limited(keychain_value_size_max),
-        .reserve_amount = 64,
-        .cwd = .inherit,
-        .environ_map = null,
-        .expand_arg0 = .no_expand,
-        .progress_node = .none,
-        .create_no_window = true,
-        .timeout = .none,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.KeychainReadFailed,
-    };
-    gpa.free(result.stderr);
-    defer {
-        std.crypto.secureZero(u8, result.stdout);
-        gpa.free(result.stdout);
-    }
-
-    switch (result.term) {
-        .exited => |code| switch (code) {
-            0 => {},
-            security_exit_item_not_found => return error.ItemNotFound,
-            else => return error.KeychainReadFailed,
-        },
-        else => return error.KeychainReadFailed,
-    }
-    // security ends the value with a newline.
-    const value = std.mem.trimEnd(u8, result.stdout, "\n");
-    return gpa.dupe(u8, value);
 }
 
 /// The token goes into a request header, where a line break would end the header early.
@@ -1050,7 +990,7 @@ pub fn writeErrorHint(
         error.InvalidToken => "the token contains a line break; " ++ rerun_script,
         error.UnknownRegion => "the region is missing or unknown; " ++ rerun_script ++
             " (in test mode, set " ++ region_variable ++ ")",
-        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++ security_path ++
+        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++ keychain.security_path ++
             "; is the keychain locked?",
         error.OutOfMemory => "out of memory",
         error.TokenExpired => "the skype token has expired; " ++ rerun_script,

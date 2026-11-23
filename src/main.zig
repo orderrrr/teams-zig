@@ -437,6 +437,7 @@ test {
     _ = Server;
     _ = @import("Cache.zig");
     _ = @import("login.zig");
+    _ = @import("keychain.zig");
     // Tests don't call `main`; this compiles the MCP path, which nothing else in them reaches.
     _ = &serveMcp;
 }
