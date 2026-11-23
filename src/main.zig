@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
     if (servesMcp(arguments)) return serveMcp(init, stderr);
-    if (isLogin(arguments)) return runLogin(init, stderr);
+    if (isLogin(arguments)) return runLogin(&init, stderr);
     const command = Command.parse(arguments) orelse {
         try stderr.writeAll(usage);
         try stderr.flush();
@@ -90,7 +90,7 @@ fn isLogin(arguments: []const []const u8) bool {
 /// Signs in through agent-browser and stores the token and region in the login keychain. No
 /// watchdog: the wait for the user to sign in is a poll count, and each agent-browser run has
 /// its own time limit.
-fn runLogin(init: std.process.Init, stderr: *Io.Writer) !u8 {
+fn runLogin(init: *const std.process.Init, stderr: *Io.Writer) !u8 {
     const home = openHome(init.io, init.environ_map) orelse {
         try stderr.writeAll("teams-zig: login needs HOME, for the browser profile\n");
         try stderr.flush();

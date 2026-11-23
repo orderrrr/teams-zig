@@ -674,3 +674,6 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
   - mr-review: the "too much output" test shared the 1 s runner, so on a busy machine the deadline could come before 64 MiB arrived; it now has its own runner with 30 s. `login` and `signIn` take their options as `*const`, as `ItemName` does (Tiger: more than 16 bytes).
   - STYLE: no new findings.
   - Tiger Style: `ChildAgentBrowser.run` asserts `run_seconds_max > 0`, since 0 would make every run look stuck.
+- **Round 4** (the same three reviews of `f813733`).
+  - mr-review: `runLogin` takes `*const std.process.Init`, like the options below it (Tiger: more than 16 bytes); `serveMcp` keeps its M6 shape, outside M8. In the runner test, every run that should end on its own uses the 30 s runner; only the two that should hit the limit use the 1 s one.
+  - STYLE and Tiger Style: no new findings.

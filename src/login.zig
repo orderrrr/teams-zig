@@ -556,28 +556,31 @@ test "ChildAgentBrowser tells a missing program, a failed run and too much outpu
     const not_found = missing.interface().run(gpa, &.{"open"});
     try std.testing.expectError(error.AgentBrowserMissing, not_found);
 
-    var shell: ChildAgentBrowser = .{
-        .io = std.testing.io,
-        .program = "/bin/sh",
-        .run_seconds_max = 1,
-    };
-    const said = try shell.interface().run(gpa, &.{ "-c", "printf fake-output; echo note >&2" });
-    defer gpa.free(said);
-    try std.testing.expectEqualStrings("fake-output", said);
-
-    const failed = shell.interface().run(gpa, &.{ "-c", "exit 3" });
-    try std.testing.expectError(error.AgentBrowserFailed, failed);
-    // 64 MiB must arrive within the limit, so this run gets more time than the others.
+    // Runs that should end on their own get ample time, so a busy machine can't fail them.
     var roomy_shell: ChildAgentBrowser = .{
         .io = std.testing.io,
         .program = "/bin/sh",
         .run_seconds_max = 30,
     };
+    const said_script = "printf fake-output; echo note >&2";
+    const said = try roomy_shell.interface().run(gpa, &.{ "-c", said_script });
+    defer gpa.free(said);
+    try std.testing.expectEqualStrings("fake-output", said);
+
+    const failed = roomy_shell.interface().run(gpa, &.{ "-c", "exit 3" });
+    try std.testing.expectError(error.AgentBrowserFailed, failed);
     const too_much = std.fmt.comptimePrint("head -c {d} /dev/zero", .{output_size_max + 1});
     try std.testing.expectError(
         error.AgentBrowserOutputTooLarge,
         roomy_shell.interface().run(gpa, &.{ "-c", too_much }),
     );
+
+    // Runs that should hit the limit get a short one.
+    var shell: ChildAgentBrowser = .{
+        .io = std.testing.io,
+        .program = "/bin/sh",
+        .run_seconds_max = 1,
+    };
     const stuck = shell.interface().run(gpa, &.{ "-c", "sleep 5" });
     try std.testing.expectError(error.AgentBrowserTimedOut, stuck);
     // Output now and then doesn't extend the limit: it is on the whole run.
