@@ -436,6 +436,7 @@ test {
     _ = commands;
     _ = Server;
     _ = @import("Cache.zig");
+    _ = @import("login.zig");
     // Tests don't call `main`; this compiles the MCP path, which nothing else in them reaches.
     _ = &serveMcp;
 }
