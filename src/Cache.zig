@@ -18,15 +18,27 @@ chats: std.StringArrayHashMapUnmanaged([]const u8) = .empty,
 changed: bool = false,
 
 /// The most `person` entries kept; past it, new ones are dropped.
-pub const person_count_max = 1024;
+pub const person_count_max: u32 = 1024;
 /// The most `chat` entries kept; past it, new ones are dropped.
-pub const chat_count_max = 1024;
-/// The largest cache file read; a larger one counts as empty.
-pub const file_size_max = 256 * 1024;
+pub const chat_count_max: u32 = 1024;
+/// The longest id, name or upn stored; a longer one isn't cached.
+pub const value_size_max: u32 = 256;
+
+/// The longest line of each kind: its word, its values at their longest, tabs and a newline.
+const self_line_size_max = "self".len + 3 * (1 + value_size_max) + 1;
+const person_line_size_max = "person".len + 2 * (1 + value_size_max) + 1;
+const chat_line_size_max = "chat".len + 2 * (1 + value_size_max) + 1;
+
+/// The largest cache file read; a larger one counts as empty. A full cache at its longest lines
+/// is exactly this size, so a saved cache always loads (about 1 MiB).
+pub const file_size_max: u32 = self_line_size_max + person_count_max * person_line_size_max +
+    chat_count_max * chat_line_size_max;
 
 comptime {
-    // A full cache, at its longest lines, still has to fit the file a load reads.
-    std.debug.assert(file_size_max >= 64 * 1024);
+    std.debug.assert(self_line_size_max == 776);
+    std.debug.assert(person_line_size_max == 521);
+    std.debug.assert(chat_line_size_max == 519);
+    std.debug.assert(file_size_max < 2 * 1024 * 1024);
 }
 
 /// Your user, as `whoami` gives it. Borrowed from the cache.
@@ -150,9 +162,14 @@ pub fn write(cache: *const Cache, writer: *std.Io.Writer) std.Io.Writer.Error!vo
         }
     }
     for (cache.persons.keys(), cache.persons.values()) |id, name| {
+        // `putEntry` stores only what `storable` passes.
+        std.debug.assert(storable(id));
+        std.debug.assert(storable(name));
         try writer.print("person\t{s}\t{s}\n", .{ id, name });
     }
     for (cache.chats.keys(), cache.chats.values()) |name, id| {
+        std.debug.assert(storable(name));
+        std.debug.assert(storable(id));
         try writer.print("chat\t{s}\t{s}\n", .{ name, id });
     }
 }
@@ -160,6 +177,12 @@ pub fn write(cache: *const Cache, writer: *std.Io.Writer) std.Io.Writer.Error!vo
 /// Remembers your user. One that can't go on a line (see `storable`) is kept for this run, but
 /// not written.
 pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
+    if (cache.self_user) |known| {
+        const same_mri = std.mem.eql(u8, known.mri, user.mri);
+        const same_name = std.mem.eql(u8, known.name, user.name);
+        // A user who hasn't changed leaves the file as it is.
+        if (same_mri and same_name and std.mem.eql(u8, known.upn, user.upn)) return;
+    }
     const arena = cache.arena.allocator();
     cache.changed = true;
     cache.self_user = .{
@@ -178,23 +201,31 @@ pub fn putPerson(cache: *Cache, id: []const u8, name: []const u8) error{OutOfMem
 /// Remembers that `name` (any case) picks the chat `id`. Dropped past `chat_count_max`, or if
 /// either can't be stored.
 pub fn putChat(cache: *Cache, name: []const u8, id: []const u8) error{OutOfMemory}!void {
-    var name_buffer: [256]u8 = undefined;
+    var name_buffer: [value_size_max]u8 = undefined;
     if (name.len > name_buffer.len) return;
     try cache.putEntry(&cache.chats, chat_count_max, std.ascii.lowerString(&name_buffer, name), id);
 }
 
 /// Forgets `name` (any case), as when its chat id answers 404.
 pub fn removeChat(cache: *Cache, name: []const u8) void {
-    var name_buffer: [256]u8 = undefined;
+    var name_buffer: [value_size_max]u8 = undefined;
     if (name.len > name_buffer.len) return;
     if (cache.chats.orderedRemove(std.ascii.lowerString(&name_buffer, name))) cache.changed = true;
 }
 
 /// The chat id `name` (any case) picks, if remembered. Borrowed from the cache.
 pub fn chatId(cache: *const Cache, name: []const u8) ?[]const u8 {
-    var name_buffer: [256]u8 = undefined;
+    var name_buffer: [value_size_max]u8 = undefined;
     if (name.len > name_buffer.len) return null;
     return cache.chats.get(std.ascii.lowerString(&name_buffer, name));
+}
+
+/// Forgets every chat name, before a full listing caches its names again, so a name that now
+/// picks several chats, or none, is gone.
+pub fn clearChats(cache: *Cache) void {
+    if (cache.chats.count() == 0) return;
+    cache.chats.clearRetainingCapacity();
+    cache.changed = true;
 }
 
 /// The other person's name in the 1:1 chat `id`, if remembered. Borrowed from the cache.
@@ -209,7 +240,10 @@ fn putEntry(
     key: []const u8,
     value: []const u8,
 ) error{OutOfMemory}!void {
-    if (!storable(key) or !storable(value)) return;
+    std.debug.assert(map.count() <= count_max);
+    defer std.debug.assert(map.count() <= count_max);
+    if (!storable(key)) return;
+    if (!storable(value)) return;
     const arena = cache.arena.allocator();
     if (map.getPtr(key)) |existing| {
         if (std.mem.eql(u8, existing.*, value)) return;
@@ -217,21 +251,29 @@ fn putEntry(
         cache.changed = true;
         return;
     }
-    if (map.count() >= count_max) return;
-    try map.put(arena, try arena.dupe(u8, key), try arena.dupe(u8, value));
-    cache.changed = true;
+    if (map.count() < count_max) {
+        try map.put(arena, try arena.dupe(u8, key), try arena.dupe(u8, value));
+        cache.changed = true;
+    }
 }
 
-/// Whether `value` fits on a cache line: not empty, at most 256 bytes, and no tab, newline or
-/// other control byte, which would break the line apart.
+/// Whether `value` fits on a cache line: not empty, at most `value_size_max` bytes, and no tab,
+/// newline or other control byte, which would break the line apart.
 fn storable(value: []const u8) bool {
     if (value.len == 0) return false;
-    if (value.len > 256) return false;
+    if (value.len > value_size_max) return false;
     for (value) |byte| {
         if (std.ascii.isControl(byte)) return false;
     }
     return true;
 }
+
+/// Options for the tests' temporary directories, spelled out.
+const tmp_options: std.Io.Dir.OpenOptions = .{
+    .access_sub_paths = true,
+    .iterate = false,
+    .follow_symlinks = true,
+};
 
 test "a cache writes what it parses" {
     const text = "self\t8:orgid:fake-self\tFake Self\tfake@example.com\n" ++
@@ -291,7 +333,7 @@ test "values that would break a line, and entries past the limit, are not stored
 }
 
 test "load gives an empty cache when the file is missing or too large" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(tmp_options);
     defer tmp.cleanup();
 
     var missing = try load(std.testing.allocator, std.testing.io, tmp.dir);
@@ -310,7 +352,7 @@ test "load gives an empty cache when the file is missing or too large" {
 }
 
 test "save writes a file only you can read, and load reads it back" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(tmp_options);
     defer tmp.cleanup();
 
     var cache: Cache = .init(std.testing.allocator);
@@ -318,10 +360,65 @@ test "save writes a file only you can read, and load reads it back" {
     try cache.putChat("Fake Standup", "19:fake-group@thread.v2");
     try cache.save(std.testing.io, tmp.dir);
 
-    const stat = try tmp.dir.statFile(std.testing.io, sub_path, .{});
+    const stat = try tmp.dir.statFile(std.testing.io, sub_path, .{ .follow_symlinks = true });
     try std.testing.expectEqual(0o600, stat.permissions.toMode() & 0o777);
 
     var loaded = try load(std.testing.allocator, std.testing.io, tmp.dir);
     defer loaded.deinit();
     try std.testing.expectEqualStrings("19:fake-group@thread.v2", loaded.chatId("fake standup").?);
+}
+
+test "values up to value_size_max are stored, and one byte more is not" {
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    const longest: [value_size_max]u8 = @splat('a');
+    const too_long: [value_size_max + 1]u8 = @splat('b');
+
+    try cache.putPerson(&longest, "Fake A");
+    try cache.putPerson(&too_long, "Fake B");
+    try cache.putChat(&longest, "19:fake-a");
+    try cache.putChat(&too_long, "19:fake-b");
+    try cache.putChat("fake", &too_long);
+    try std.testing.expectEqualStrings("Fake A", cache.personName(&longest).?);
+    try std.testing.expectEqual(null, cache.personName(&too_long));
+    try std.testing.expectEqualStrings("19:fake-a", cache.chatId(&longest).?);
+    try std.testing.expectEqual(null, cache.chatId(&too_long));
+    try std.testing.expectEqual(null, cache.chatId("fake"));
+}
+
+test "a full cache at its longest lines is file_size_max, and saves and loads whole" {
+    var tmp = std.testing.tmpDir(tmp_options);
+    defer tmp.cleanup();
+
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    const longest: [value_size_max]u8 = @splat('v');
+    try cache.putSelf(&.{ .mri = &longest, .name = &longest, .upn = &longest });
+    for (0..chat_count_max) |index| {
+        // Each key is the longest value, made unique by its last bytes.
+        var key: [value_size_max]u8 = longest;
+        _ = std.fmt.bufPrint(key[value_size_max - 8 ..], "{d:0>8}", .{index}) catch unreachable;
+        try cache.putPerson(&key, &longest);
+        try cache.putChat(&key, &longest);
+    }
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try cache.write(&out.writer);
+    try std.testing.expectEqual(file_size_max, out.written().len);
+
+    try cache.save(std.testing.io, tmp.dir);
+    var loaded = try load(std.testing.allocator, std.testing.io, tmp.dir);
+    defer loaded.deinit();
+    try std.testing.expectEqual(person_count_max, loaded.persons.count());
+    try std.testing.expectEqual(chat_count_max, loaded.chats.count());
+}
+
+test "clearChats forgets every chat name" {
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.putChat("Fake Standup", "19:fake-group");
+    cache.changed = false;
+    cache.clearChats();
+    try std.testing.expectEqual(null, cache.chatId("fake standup"));
+    try std.testing.expect(cache.changed);
 }
