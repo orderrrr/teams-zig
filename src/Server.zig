@@ -233,7 +233,7 @@ const Tool = enum {
             ),
             .send => std.fmt.comptimePrint(
                 "chat: its exact name or id; text: Markdown, at most {d} KiB of UTF-8, " ++
-                    "not only whitespace, with no control bytes but tab and newline",
+                    "not only whitespace, with no control characters but tab and newline",
                 .{@divExact(commands.send_text_size_max, 1024)},
             ),
         };
@@ -985,7 +985,7 @@ test "tools/call answers bad arguments with isError and the usage, a bad call wi
     ++
         \\ text: Markdown, at most 16 KiB of UTF-8, not only whitespace,
     ++
-        \\ with no control bytes but tab and newline"}],"isError":true}}
+        \\ with no control characters but tab and newline"}],"isError":true}}
         \\
     );
 }

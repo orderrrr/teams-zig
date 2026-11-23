@@ -27,8 +27,9 @@ pub fn writeVisible(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Err
 
 /// How many bytes of control character `rest` starts with: 0 for none, 1 for C0 or DEL, 2 for a
 /// UTF-8-encoded C1 control. A `C2` with nothing after it counts as 1: whatever follows in the
-/// output (say, after a dropped HTML tag) could complete it into a C1 control.
-fn controlLenAt(rest: []const u8) u8 {
+/// output (say, after a dropped HTML tag) could complete it into a C1 control. Tab and newline
+/// are not control characters here.
+pub fn controlLenAt(rest: []const u8) u8 {
     std.debug.assert(rest.len > 0);
     if (!isVisible(rest[0])) return 1;
     if (rest[0] != 0xc2) return 0;

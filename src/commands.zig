@@ -235,16 +235,15 @@ pub const Command = union(enum) {
     }
 
     /// `send` of `text` to the chat typed as `chat_text`, or null if the chat is empty, or the
-    /// text holds only whitespace or a control byte other than tab and newline (JSON can carry
-    /// a NUL, which argv can't). Borrows both. The size checks come later, in `runSend`.
+    /// text holds only whitespace or a control character other than tab and newline: C0, DEL
+    /// or a UTF-8 C1, as `messages` shows them (`chat.text.controlLenAt`). Borrows both. The
+    /// size checks come later, in `runSend`.
     pub fn initSend(chat_text: []const u8, text: []const u8) ?Command {
         if (chat_text.len == 0) return null;
         if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) return null;
-        for (text) |byte| {
-            switch (byte) {
-                '\t', '\n' => {},
-                else => if (std.ascii.isControl(byte)) return null,
-            }
+        // Every offset is checked; one inside a multi-byte character never starts a control.
+        for (0..text.len) |index| {
+            if (chat.text.controlLenAt(text[index..]) > 0) return null;
         }
         return .{ .send = .{ .chat = .parse(chat_text), .text = text } };
     }
@@ -1306,8 +1305,8 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     try std.testing.expectEqualStrings("fake", send.text);
     try std.testing.expectEqual(null, Command.initSend("", "fake"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", " \n"));
-    // Tab and newline stay; every other control byte (below space, and DEL) is refused, from
-    // argv or JSON. Printable ASCII and UTF-8 pass.
+    // Tab and newline stay; every other C0 control and DEL is refused, from argv or JSON.
+    // Printable ASCII and UTF-8 pass.
     try std.testing.expect(Command.initSend("48:notes", "fake\tone\nfake two") != null);
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x00"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\r\n"));
@@ -1315,4 +1314,9 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x7f"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x1f"));
     try std.testing.expect(Command.initSend("48:notes", "fake ~ é") != null);
+    // UTF-8 C1 controls (U+0080 to U+009F) are refused too, as `messages` shows them escaped;
+    // U+00A0, the first character after them, passes.
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x9b31m"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x80"));
+    try std.testing.expect(Command.initSend("48:notes", "fake\xc2\xa0") != null);
 }
