@@ -1068,7 +1068,7 @@ test "a line of the skip limit is skipped, and a longer one stops the server wit
         \\
     );
 
-    // A fresh reader: the first run used up `source` and left bytes in the buffer.
+    // Reset the reader: the first run used up `source` and moved the buffer's `seek` and `end`.
     source[skipped_line_size_max] = 'x';
     reader.source = source;
     reader.interface.seek = 0;
