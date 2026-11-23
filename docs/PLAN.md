@@ -405,3 +405,5 @@ Owner's answers to the round-6 report (2026-11-23):
 - **Round 8** (reviews of `089353a..3525520`). mr-review and Tiger Style: the test comment said every byte from space up passes, but DEL is refused; it now says printable ASCII and UTF-8 pass, and the test's printable case is `~` rather than a second space. STYLE: nothing new.
 - **Round 9:** all three reviews found nothing new. Gate passed again. Two owner questions from round 7 are open (the CLI's usage line for a refused send; C1 control characters in `initSend`), and the M6.12 live send waits for the owner's go-ahead in the work session.
 
+Owner's answers to the round-7 questions (2026-11-23): the CLI's usage line for `send` gives its rules (at most 16 KiB of UTF-8, with no control characters but tab and newline); `Command.initSend` uses `chat.text.controlLenAt`, now pub, so UTF-8 C1 controls are refused too.
+
