@@ -200,6 +200,106 @@ pub const ChildAgentBrowser = struct {
     const stderr_size_max = 64 * 1024;
 };
 
+/// A sign-in's result. `token` is owned and zeroed by `deinit`.
+pub const SignedIn = struct {
+    token: []u8,
+    region: Region,
+
+    pub fn deinit(signed_in: *SignedIn, gpa: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, signed_in.token);
+        gpa.free(signed_in.token);
+        signed_in.* = undefined;
+    }
+};
+
+pub const SignInError = RunError || FindErrorKind || std.Io.Writer.Error || std.Io.Cancelable ||
+    error{
+        /// `open` failed.
+        BrowserOpenFailed,
+        /// A later run failed: usually the user closed the window.
+        BrowserStopped,
+        NoTokenSeen,
+        NoRegionSeen,
+    };
+
+/// `find`'s failures, by what they mean to the user.
+const FindErrorKind = error{ UnexpectedOutput, TokenTooLong };
+
+pub const SignInOptions = struct {
+    /// agent-browser's Chrome profile, so a sign-in lasts between runs.
+    profile_path: []const u8,
+    poll_interval: std.Io.Duration,
+    poll_count_max: u32,
+    /// Where to tell the user to sign in.
+    note: *std.Io.Writer,
+};
+
+/// What the script used: a 2 s poll for up to 300 s.
+pub const poll_interval_default: std.Io.Duration = .fromSeconds(2);
+pub const poll_count_default: u32 = 150;
+
+const session = "teams-zig";
+const requests_arguments = [_][]const u8{ "--session", session, "network", "requests", "--json" };
+const teams_url = "https://teams.microsoft.com";
+
+/// Opens Teams in agent-browser's own session and profile, waits for the user to sign in, and
+/// reads the token and region from the requests the web client makes. Always closes the browser.
+pub fn signIn(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    agent_browser: AgentBrowser,
+    options: SignInOptions,
+) SignInError!SignedIn {
+    std.debug.assert(options.poll_count_max > 0);
+    const opened = agent_browser.run(&.{
+        "--session", session, "--headed", "--profile", options.profile_path, "open", teams_url,
+    }) catch |err| switch (err) {
+        error.AgentBrowserFailed => return error.BrowserOpenFailed,
+        else => |other| return other,
+    };
+    gpa.free(opened);
+    defer closeBrowser(gpa, agent_browser);
+
+    try options.note.print(
+        "Sign in to Teams in the browser window if asked. Waiting up to {d} seconds...\n",
+        .{options.poll_interval.toSeconds() * options.poll_count_max},
+    );
+    try options.note.flush();
+
+    var token_seen = false;
+    for (0..options.poll_count_max) |_| {
+        try io.sleep(options.poll_interval, .awake);
+        const output = agent_browser.run(&requests_arguments) catch |err| switch (err) {
+            error.AgentBrowserFailed => return error.BrowserStopped,
+            else => |other| return other,
+        };
+        defer {
+            // The output holds the token, and `find`'s strings point into it.
+            std.crypto.secureZero(u8, output);
+            gpa.free(output);
+        }
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const found = find(arena.allocator(), output) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TokenTooLong => return error.TokenTooLong,
+            else => return error.UnexpectedOutput,
+        };
+        const token = found.token orelse continue;
+        token_seen = true;
+        const region = found.region orelse continue;
+        return .{ .token = try gpa.dupe(u8, token), .region = region };
+    }
+    if (!token_seen) return error.NoTokenSeen;
+    return error.NoRegionSeen;
+}
+
+/// The window stays open if this fails; it's not worth hiding the sign-in's own result for.
+fn closeBrowser(gpa: std.mem.Allocator, agent_browser: AgentBrowser) void {
+    const output = agent_browser.run(&.{ "--session", session, "close" }) catch return;
+    gpa.free(output);
+}
+
 test "find takes the token from the skypetokenauth POST and the region from a Chat Service host" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -336,4 +436,132 @@ test "ChildAgentBrowser tells a missing program, a failed run and too much outpu
         error.AgentBrowserOutputTooLarge,
         shell.interface().run(&.{ "-c", too_much }),
     );
+}
+
+/// Gives scripted outputs, one per run, and records each run's arguments.
+const FakeAgentBrowser = struct {
+    outputs: []const Step,
+    runs: std.ArrayList([]const u8) = .empty,
+    run_count: u32 = 0,
+
+    const Step = union(enum) { text: []const u8, err: RunError };
+
+    fn interface(fake: *FakeAgentBrowser) AgentBrowser {
+        return .{ .context = fake, .run_fn = run };
+    }
+
+    fn run(context: *anyopaque, arguments: []const []const u8) RunError![]u8 {
+        const fake: *FakeAgentBrowser = @ptrCast(@alignCast(context));
+        const joined = try std.mem.join(std.testing.allocator, " ", arguments);
+        try fake.runs.append(std.testing.allocator, joined);
+        // `close` always succeeds; the rest follow the script, then the last one repeats.
+        if (std.mem.endsWith(u8, joined, " close")) return std.testing.allocator.dupe(u8, "");
+        const index = @min(fake.run_count, fake.outputs.len - 1);
+        fake.run_count += 1;
+        return switch (fake.outputs[index]) {
+            .text => |text| std.testing.allocator.dupe(u8, text),
+            .err => |err| err,
+        };
+    }
+
+    fn deinit(fake: *FakeAgentBrowser) void {
+        for (fake.runs.items) |joined| std.testing.allocator.free(joined);
+        fake.runs.deinit(std.testing.allocator);
+    }
+};
+
+const fake_found =
+    \\{"data":{"requests":[
+    \\{"method":"POST","url":"https://teams.microsoft.com/v1/skypetokenauth",
+    \\ "postData":"skypetoken=FAKE-SIGNED-IN"},
+    \\{"method":"GET","url":"https://emea.ng.msg.teams.microsoft.com/v1/users/ME"}
+    \\]}}
+;
+const fake_nothing = "{\"data\":{\"requests\":[]}}";
+
+fn testSignIn(fake: *FakeAgentBrowser, note: *std.Io.Writer) SignInError!SignedIn {
+    return signIn(std.testing.allocator, std.testing.io, fake.interface(), .{
+        .profile_path = "/fake/profile",
+        .poll_interval = .zero,
+        .poll_count_max = 3,
+        .note = note,
+    });
+}
+
+test "signIn opens Teams, polls until the token and region show, then closes" {
+    var fake: FakeAgentBrowser = .{
+        .outputs = &.{
+            .{ .text = "" }, // open
+            .{ .text = fake_nothing },
+            .{ .text = fake_found },
+        },
+    };
+    defer fake.deinit();
+    var note_buffer: [256]u8 = undefined;
+    var note: std.Io.Writer = .fixed(&note_buffer);
+
+    var signed_in = try testSignIn(&fake, &note);
+    defer signed_in.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("FAKE-SIGNED-IN", signed_in.token);
+    try std.testing.expectEqual(Region.emea, signed_in.region);
+    try std.testing.expectEqual(4, fake.runs.items.len);
+    try std.testing.expectEqualStrings(
+        "--session teams-zig --headed --profile /fake/profile open https://teams.microsoft.com",
+        fake.runs.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "--session teams-zig network requests --json",
+        fake.runs.items[1],
+    );
+    try std.testing.expectEqualStrings("--session teams-zig close", fake.runs.items[3]);
+    try std.testing.expect(std.mem.indexOf(u8, note.buffered(), "Sign in") != null);
+}
+
+test "signIn says which value never showed, and still closes the browser" {
+    var nothing: FakeAgentBrowser = .{ .outputs = &.{
+        .{ .text = "" },
+        .{ .text = fake_nothing },
+    } };
+    defer nothing.deinit();
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+    try std.testing.expectError(error.NoTokenSeen, testSignIn(&nothing, &discard.writer));
+    try std.testing.expectEqual(5, nothing.runs.items.len);
+    try std.testing.expectEqualStrings("--session teams-zig close", nothing.runs.items[4]);
+
+    const token_only =
+        \\{"data":{"requests":[{"method":"GET","url":"https://example.com/",
+        \\ "headers":{"x-skypetoken":"FAKE-NO-REGION"}}]}}
+    ;
+    var no_region: FakeAgentBrowser = .{ .outputs = &.{
+        .{ .text = "" },
+        .{ .text = token_only },
+    } };
+    defer no_region.deinit();
+    try std.testing.expectError(error.NoRegionSeen, testSignIn(&no_region, &discard.writer));
+}
+
+test "signIn reports a failed open, a closed window and output it can't read" {
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+
+    var missing: FakeAgentBrowser = .{ .outputs = &.{.{ .err = error.AgentBrowserMissing }} };
+    defer missing.deinit();
+    try std.testing.expectError(error.AgentBrowserMissing, testSignIn(&missing, &discard.writer));
+
+    var open_failed: FakeAgentBrowser = .{ .outputs = &.{.{ .err = error.AgentBrowserFailed }} };
+    defer open_failed.deinit();
+    try std.testing.expectError(error.BrowserOpenFailed, testSignIn(&open_failed, &discard.writer));
+
+    var stopped: FakeAgentBrowser = .{ .outputs = &.{
+        .{ .text = "" },
+        .{ .err = error.AgentBrowserFailed },
+    } };
+    defer stopped.deinit();
+    try std.testing.expectError(error.BrowserStopped, testSignIn(&stopped, &discard.writer));
+    try std.testing.expectEqualStrings("--session teams-zig close", stopped.runs.items[2]);
+
+    var garbled: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = "not json" } } };
+    defer garbled.deinit();
+    try std.testing.expectError(error.UnexpectedOutput, testSignIn(&garbled, &discard.writer));
+    try std.testing.expectEqualStrings("--session teams-zig close", garbled.runs.items[2]);
 }
