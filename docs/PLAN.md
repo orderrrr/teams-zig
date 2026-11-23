@@ -356,7 +356,7 @@ Plan decisions:
 
 ### Chunks
 
-1. **M6.1 commands in their own file.** Move `Command`, `Clock`, the `run…` functions and their helpers from `main.zig` to `src/commands.zig`. `main.zig` keeps `main`, `usage`, `connect` and the watchdog. The existing tests move with the code and pass unchanged.
+1. **M6.1 commands in their own file.** Move `Command`, `Clock`, the `run…` functions and their helpers from `main.zig` to `src/commands.zig`. `main.zig` keeps `main`, `usage` and the watchdog. The existing tests move with the code and pass unchanged.
 2. **M6.2 error hints as text.** Split `reportError` into `writeErrorHint(writer, err, status)`, which writes only the hint, and the CLI's line around it. Tests for the hint of each error kind (one per `switch` group), and for the CLI's line staying as it was.
 3. **M6.3 shared argument checks.** Move the count and chat checks out of `Command.parse` into functions that the JSON parser can call too. `Command.parse`'s tests pass unchanged.
 4. **M6.4 request lines.** `Server` reads one line up to 256 KiB and parses the JSON-RPC envelope: `jsonrpc` is `"2.0"`, `id` is a number, a string or missing (a notification), `method` is a string, `params` is optional. Tests for a good request, a notification, bad JSON (`-32700`), a batch and a missing method (`-32600`), and an overlong line skipped up to its newline.
