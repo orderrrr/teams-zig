@@ -35,7 +35,7 @@ pub const Region = enum {
         };
     }
 
-    /// The Chat Service's own host, which paging links may still name. `frontDoorUrl` moves
+    /// The Chat Service's own host, which paging links may still name. `getUrlFrontDoor` moves
     /// them to `baseUrl`; nothing is sent here.
     fn oldBaseUrl(region: Region) []const u8 {
         return switch (region) {
@@ -46,7 +46,7 @@ pub const Region = enum {
 
 /// `url`, owned by the caller, with a link under the region's old host moved to the front door
 /// (same path and query). Any other link is copied as it is, for `checkLink` to judge.
-fn frontDoorUrl(
+fn getUrlFrontDoor(
     gpa: std.mem.Allocator,
     region: Region,
     url: []const u8,
@@ -186,7 +186,7 @@ pub fn get(client: *Client, path: []const u8) Error![]const u8 {
 pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     // Cleared first, so a status only ever describes this request.
     client.response_status = null;
-    const moved = try frontDoorUrl(client.gpa, client.region, url);
+    const moved = try getUrlFrontDoor(client.gpa, client.region, url);
     defer client.gpa.free(moved);
     const uri = try checkLink(client.region, moved);
     return client.fetch(uri, &.none);
@@ -216,34 +216,15 @@ fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u
             .none => .{ .GET, .default },
             .json => .{ .POST, .{ .override = "application/json" } },
         };
-    var request = client.http.request(method, uri, .{
-        .version = .@"HTTP/1.1",
-        .handle_continue = true,
-        .keep_alive = true,
-        // Redirects are refused so the token never leaves the Chat Service host. std would keep
-        // extra headers across a cross-domain redirect, and in 0.17 it never sends
-        // privileged_headers at all, so those can't carry the token instead.
-        .redirect_behavior = .not_allowed,
-        .connection = null,
-        .headers = .{
-            .host = .default,
-            .authorization = .default,
-            .user_agent = .default,
-            .connection = .default,
-            // Written out: std 0.17 writes a list of one encoding as a bare "accept-encoding" line
-            // with no colon (it undoes the ", " of a list it never wrote), which gets a 400.
-            .accept_encoding = .{ .override = "gzip, identity" },
-            .content_type = content_type,
-        },
-        .extra_headers = &.{
-            .{ .name = "Authentication", .value = client.authentication },
-            .{ .name = "Accept", .value = "application/json" },
-        },
-        .privileged_headers = &.{},
-    }) catch |err| return requestError(err);
+    const extra_headers = [_]std.http.Header{
+        .{ .name = "Authentication", .value = client.authentication },
+        .{ .name = "Accept", .value = "application/json" },
+    };
+    const options = fetchOptions(content_type, &extra_headers);
+    var request = client.http.request(method, uri, options) catch |err| return requestError(err);
     defer request.deinit();
 
-    // gzip or none: receiveHead refuses any encoding not listed here, so `readBody` sees only
+    // gzip or none: receiveHead refuses any encoding not listed here, so `fetchBody` sees only
     // these two (std's zstd path would need a bigger window than the client keeps).
     request.accept_encoding = @splat(false);
     request.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
@@ -272,7 +253,7 @@ fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u
     const transfer = response.reader(&transfer_buffer);
     // Read here rather than through fetch: fetch unwraps bodyErr() on ReadFailed, which is null
     // when the connection drops mid-body, and crashes.
-    readBody(transfer, encoding, client.decompress_window, &body) catch |err| switch (err) {
+    fetchBody(transfer, encoding, client.decompress_window, &body) catch |err| switch (err) {
         error.ReadFailed => return bodyError(error.ReadFailed, response.bodyErr()),
         else => |other| return other,
     };
@@ -281,20 +262,51 @@ fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u
     return body.buffered();
 }
 
+/// Every request's options, spelled out. Borrows `extra_headers`, which carry the token.
+fn fetchOptions(
+    content_type: std.http.Client.Request.Headers.Value,
+    extra_headers: []const std.http.Header,
+) std.http.Client.RequestOptions {
+    return .{
+        .version = .@"HTTP/1.1",
+        .handle_continue = true,
+        .keep_alive = true,
+        // Redirects are refused so the token never leaves the Chat Service host. std would keep
+        // extra headers across a cross-domain redirect, and in 0.17 it never sends
+        // privileged_headers at all, so those can't carry the token instead.
+        .redirect_behavior = .not_allowed,
+        .connection = null,
+        .headers = .{
+            .host = .default,
+            .authorization = .default,
+            .user_agent = .default,
+            .connection = .default,
+            // Written out: std 0.17 writes a list of one encoding as a bare "accept-encoding" line
+            // with no colon (it undoes the ", " of a list it never wrote), which gets a 400.
+            .accept_encoding = .{ .override = "gzip, identity" },
+            .content_type = content_type,
+        },
+        .extra_headers = extra_headers,
+        .privileged_headers = &.{},
+    };
+}
+
 /// How reading a body fails. ReadFailed is the transfer's own failure, which `bodyError` sorts
 /// out from the response.
-const ReadBodyError = error{ ResponseTooLarge, BadResponse, ConnectionDropped, ReadFailed };
+const FetchBodyError = error{ ResponseTooLarge, BadResponse, ConnectionDropped, ReadFailed };
 
 /// Reads the whole body from `transfer` into `body`, decompressing a gzip body through `window`.
 /// The limit is `body`'s size, on the decompressed bytes.
-fn readBody(
+fn fetchBody(
     transfer: *std.Io.Reader,
     encoding: std.http.ContentEncoding,
     window: []u8,
     body: *std.Io.Writer,
-) ReadBodyError!void {
+) FetchBodyError!void {
     std.debug.assert(encoding == .identity or encoding == .gzip);
     std.debug.assert(window.len >= std.compress.flate.max_window_len);
+    // The limit is `body`'s size, so it starts empty.
+    std.debug.assert(body.end == 0);
     var decompress: std.http.Decompress = undefined;
     const reader = decompress.init(transfer, window, encoding);
     _ = reader.streamRemaining(body) catch |err| switch (err) {
@@ -311,12 +323,15 @@ fn readBody(
             };
         },
     };
-    // The decompressor stops at the end of the gzip data, before its footer and a chunked body's
-    // last chunk. Reading the rest leaves the connection ready for the next request.
+    // The decompressor ends after the gzip footer, before the transfer does: a chunked body's
+    // last chunk is still unread. One more read takes it, leaving the connection ready for the
+    // next request. Anything else after the gzip data (a second gzip member, junk) is refused.
     if (decompress == .flate) {
-        _ = transfer.discardRemaining() catch |err| switch (err) {
+        const left = transfer.discard(.limited(1)) catch |err| switch (err) {
+            error.EndOfStream => return,
             error.ReadFailed => return error.ReadFailed,
         };
+        if (left > 0) return error.BadResponse;
     }
 }
 
@@ -610,16 +625,16 @@ test "baseUrl is the front door, with the region in the path" {
     try std.testing.expectEqualStrings(expected, Region.emea.baseUrl());
 }
 
-test "frontDoorUrl moves a link under the old host to the front door, and keeps others" {
+test "getUrlFrontDoor moves a link under the old host to the front door, and keeps others" {
     const old = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/x?startTime=1&pageSize=5";
-    const moved = try frontDoorUrl(std.testing.allocator, .emea, old);
+    const moved = try getUrlFrontDoor(std.testing.allocator, .emea, old);
     defer std.testing.allocator.free(moved);
     const expected = "https://teams.microsoft.com/api/chatsvc/emea/v1" ++
         "/users/ME/x?startTime=1&pageSize=5";
     try std.testing.expectEqualStrings(expected, moved);
 
     const other = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME";
-    const kept = try frontDoorUrl(std.testing.allocator, .emea, other);
+    const kept = try getUrlFrontDoor(std.testing.allocator, .emea, other);
     defer std.testing.allocator.free(kept);
     try std.testing.expectEqualStrings(other, kept);
 }
@@ -834,12 +849,12 @@ const fake_gzip_body =
     "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\xab\x56\x4a\x4b\xcc\x4e\x55\xb2\x52\x4a\xaf\xca" ++
     "\x2c\x50\x48\xca\x4f\xa9\x54\xaa\x05\x00\x07\xd3\x31\x79\x14\x00\x00\x00";
 
-/// Runs `readBody` over `transfer_bytes` into a body buffer of `body_size` bytes.
-fn expectReadBody(
+/// Runs `fetchBody` over `transfer_bytes` into a body buffer of `body_size` bytes.
+fn expectFetchBody(
     transfer_bytes: []const u8,
     encoding: std.http.ContentEncoding,
     body_size: u32,
-    expected: ReadBodyError![]const u8,
+    expected: FetchBodyError![]const u8,
 ) !void {
     var transfer: std.Io.Reader = .fixed(transfer_bytes);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
@@ -847,7 +862,7 @@ fn expectReadBody(
     defer std.testing.allocator.free(body_buffer);
     var body: std.Io.Writer = .fixed(body_buffer);
 
-    const result = readBody(&transfer, encoding, &window, &body);
+    const result = fetchBody(&transfer, encoding, &window, &body);
     const expected_body = expected catch |expected_err| {
         return std.testing.expectError(expected_err, result);
     };
@@ -855,26 +870,33 @@ fn expectReadBody(
     try std.testing.expectEqualStrings(expected_body, body.buffered());
 }
 
-test "readBody decompresses gzip and passes identity through" {
-    try expectReadBody(fake_gzip_body, .gzip, 64, "{\"fake\":\"gzip body\"}");
-    try expectReadBody("{\"fake\":1}", .identity, 64, "{\"fake\":1}");
+test "fetchBody decompresses gzip and passes identity through" {
+    try expectFetchBody(fake_gzip_body, .gzip, 64, "{\"fake\":\"gzip body\"}");
+    try expectFetchBody("{\"fake\":1}", .identity, 64, "{\"fake\":1}");
 }
 
-test "readBody refuses a body larger than the buffer once decompressed" {
-    try expectReadBody(fake_gzip_body, .gzip, 8, error.ResponseTooLarge);
-    try expectReadBody("{\"fake\":1}", .identity, 4, error.ResponseTooLarge);
+test "fetchBody takes a body of exactly the buffer's size, and refuses one byte more" {
+    // `{"fake":"gzip body"}` is 20 bytes; `{"fake":1}` is 10.
+    try expectFetchBody(fake_gzip_body, .gzip, 20, "{\"fake\":\"gzip body\"}");
+    try expectFetchBody(fake_gzip_body, .gzip, 19, error.ResponseTooLarge);
+    try expectFetchBody("{\"fake\":1}", .identity, 10, "{\"fake\":1}");
+    try expectFetchBody("{\"fake\":1}", .identity, 9, error.ResponseTooLarge);
 }
 
-test "readBody calls a bad gzip header bad, and a cut body dropped" {
+test "fetchBody refuses data after the gzip stream" {
+    try expectFetchBody(fake_gzip_body ++ "fake", .gzip, 64, error.BadResponse);
+}
+
+test "fetchBody calls a bad gzip header bad, and a cut body dropped" {
     // A wrong magic number in the header. (std 0.17 doesn't check the footer's checksum; TLS
     // already guards the bytes on the way.)
     var wrong_header = fake_gzip_body.*;
     wrong_header[0] ^= 0xff;
-    try expectReadBody(&wrong_header, .gzip, 64, error.BadResponse);
-    try expectReadBody(fake_gzip_body[0..20], .gzip, 64, error.ConnectionDropped);
+    try expectFetchBody(&wrong_header, .gzip, 64, error.BadResponse);
+    try expectFetchBody(fake_gzip_body[0..20], .gzip, 64, error.ConnectionDropped);
 }
 
-test "readBody reads a chunked gzip body to its end, so the connection is ready again" {
+test "fetchBody reads a chunked gzip body to its end, so the connection is ready again" {
     // As the Chat Service sends it: one chunk of gzip, then the last, empty chunk.
     const chunked = std.fmt.comptimePrint("{x}\r\n", .{fake_gzip_body.len}) ++ fake_gzip_body ++
         "\r\n0\r\n\r\n";
@@ -892,7 +914,7 @@ test "readBody reads a chunked gzip body to its end, so the connection is ready 
     var body_buffer: [64]u8 = undefined;
     var body: std.Io.Writer = .fixed(&body_buffer);
 
-    try readBody(transfer, .gzip, &window, &body);
+    try fetchBody(transfer, .gzip, &window, &body);
     try std.testing.expectEqualStrings("{\"fake\":\"gzip body\"}", body.buffered());
     try std.testing.expectEqual(.ready, http_reader.state);
 }
