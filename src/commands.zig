@@ -743,10 +743,10 @@ const FoundChat = union(enum) {
 };
 
 /// The chat `name` picks: from the cache's name map, or else the one chat among your newest
-/// `conversation_count_limit` named `name`, its id and name owned by `arena`. In the listing, known names
-/// are tried first; the per-chat lookups run only if none of them match. The listing's names
-/// that pick one chat are cached. Several matches are listed on `stdout`, with their ids, before
-/// ChatNameAmbiguous.
+/// `conversation_count_limit` named `name`. Its id and name are owned by `arena`. In the
+/// listing, known names are tried first; the per-chat lookups run only if none of them match.
+/// The listing's names that pick one chat are cached. Several matches are listed on `stdout`,
+/// with their ids, before ChatNameAmbiguous.
 fn findChat(
     client: *chat.Client,
     cache: *Cache,
