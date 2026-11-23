@@ -882,13 +882,27 @@ fn printMessage(
     try stdout.writeByte('\n');
 }
 
-/// Prints a one-line hint for every way a command can fail. The switch is exhaustive, so a new
-/// error in the client or keychain doesn't compile until it has a hint.
+/// Prints `err`'s hint as one `teams-zig:` line on `stderr`, and returns the exit code.
 pub fn reportError(
     stderr: *Io.Writer,
     err: CommandError,
     response_status: ?std.http.Status,
 ) Io.Writer.Error!u8 {
+    try stderr.writeAll("teams-zig: ");
+    try writeErrorHint(stderr, err, response_status);
+    try stderr.writeByte('\n');
+    try stderr.flush();
+    return 1;
+}
+
+/// Writes a one-line hint, with no line break, for every way a command can fail. The switch is
+/// exhaustive, so a new error in the client or keychain doesn't compile until it has a hint.
+/// `response_status` is the response's, set whenever the error is UnexpectedStatus.
+pub fn writeErrorHint(
+    writer: *Io.Writer,
+    err: CommandError,
+    response_status: ?std.http.Status,
+) Io.Writer.Error!void {
     const rerun_script = "run scripts/teams-token.fish";
     const hint = switch (err) {
         error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
@@ -912,12 +926,10 @@ pub fn reportError(
         error.UnexpectedStatus => {
             // Client sets response_status before it returns UnexpectedStatus.
             std.debug.assert(response_status != null);
-            try stderr.print(
-                "teams-zig: the Chat Service answered HTTP {d}\n",
+            return writer.print(
+                "the Chat Service answered HTTP {d}",
                 .{@backingInt(response_status.?)},
             );
-            try stderr.flush();
-            return 1;
         },
         error.ForeignLink => "the Chat Service sent a link teams-zig won't follow",
         error.Redirected => "the Chat Service redirected; not following, so the token stays there",
@@ -933,9 +945,7 @@ pub fn reportError(
         // Only writes to stdout return WriteFailed here, as when a pipe reader like `head` exits.
         error.WriteFailed => "couldn't write the output; was the pipe closed?",
     };
-    try stderr.print("teams-zig: {s}\n", .{hint});
-    try stderr.flush();
-    return 1;
+    try writer.writeAll(hint);
 }
 
 test {
@@ -1220,4 +1230,33 @@ test "runSend refuses text too long to send before any request" {
     try std.testing.expectError(error.SendTextTooLong, quoted_result);
     try std.testing.expectEqual(null, client.response_status);
     try std.testing.expectEqualStrings("", out.written());
+}
+
+test "writeErrorHint writes one hint per error, with the status for an unexpected one" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeErrorHint(&out.writer, error.TokenExpired, .unauthorized);
+    try out.writer.writeByte('\n');
+    try writeErrorHint(&out.writer, error.UnexpectedStatus, .service_unavailable);
+    try out.writer.writeByte('\n');
+    try writeErrorHint(&out.writer, error.ChatNameAmbiguous, null);
+    try std.testing.expectEqualStrings(
+        \\the skype token has expired; run scripts/teams-token.fish
+        \\the Chat Service answered HTTP 503
+        \\several chats have that name; use one of the ids above
+    , out.written());
+}
+
+test "reportError writes the hint as one teams-zig line and exits 1" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try std.testing.expectEqual(1, try reportError(&out.writer, error.ConnectFailed, null));
+    try std.testing.expectEqual(1, try reportError(&out.writer, error.UnexpectedStatus, .forbidden));
+    try std.testing.expectEqualStrings(
+        \\teams-zig: couldn't reach the Chat Service; check the network
+        \\teams-zig: the Chat Service answered HTTP 403
+        \\
+    , out.written());
 }
