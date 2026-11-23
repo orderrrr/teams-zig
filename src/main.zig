@@ -88,7 +88,8 @@ fn isLogin(arguments: []const []const u8) bool {
 }
 
 /// Signs in through agent-browser and stores the token and region in the login keychain. No
-/// watchdog: the wait for the user to sign in has its own limit.
+/// watchdog: the wait for the user to sign in is a poll count, and each agent-browser run has
+/// its own time limit.
 fn runLogin(init: std.process.Init, stderr: *Io.Writer) !u8 {
     const home = openHome(init.io, init.environ_map) orelse {
         try stderr.writeAll("teams-zig: login needs HOME, for the browser profile\n");
@@ -97,11 +98,17 @@ fn runLogin(init: std.process.Init, stderr: *Io.Writer) !u8 {
     };
     defer home.close(init.io);
 
-    var agent_browser: login.ChildAgentBrowser = .{ .gpa = init.gpa, .io = init.io };
+    var agent_browser: login.ChildAgentBrowser = .{
+        .io = init.io,
+        .program = "agent-browser",
+        .run_seconds_max = login.ChildAgentBrowser.run_seconds_default,
+    };
     login.login(init.gpa, init.io, agent_browser.interface(), .{
         .home = home,
         .service_name = keychain.service,
         .note = stderr,
+        .poll_interval = login.poll_interval_default,
+        .poll_count_max = login.poll_count_default,
     }) catch |err| {
         try stderr.writeAll("teams-zig: ");
         try login.writeHint(stderr, err);
@@ -484,6 +491,13 @@ test "servesMcp takes mcp alone" {
     try std.testing.expect(!servesMcp(&.{ "teams-zig", "mcp", "fake" }));
     try std.testing.expect(!servesMcp(&.{ "teams-zig", "whoami" }));
     try std.testing.expect(!servesMcp(&.{"teams-zig"}));
+}
+
+test "isLogin takes login alone" {
+    try std.testing.expect(isLogin(&.{ "teams-zig", "login" }));
+    try std.testing.expect(!isLogin(&.{ "teams-zig", "login", "fake" }));
+    try std.testing.expect(!isLogin(&.{ "teams-zig", "whoami" }));
+    try std.testing.expect(!isLogin(&.{"teams-zig"}));
 }
 
 test "McpRunner drops its client after a token or connection failure, and keeps it otherwise" {

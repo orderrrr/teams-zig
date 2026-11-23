@@ -7,6 +7,304 @@ const Region = teams.chat.Client.Region;
 const keychain = @import("keychain.zig");
 const Cache = @import("Cache.zig");
 
+/// agent-browser's Chrome profile for teams-zig, under your home directory: the script's, so a
+/// profile that is already signed in keeps working.
+pub const profile_sub_path = "Library/Application Support/teams-zig/browser";
+
+pub const LoginError = SignInError || keychain.WriteError || error{
+    ProfileDirFailed,
+    CacheDeleteFailed,
+};
+
+pub const LoginOptions = struct {
+    home: std.Io.Dir,
+    /// `keychain.service`; tests use a throwaway one.
+    service_name: []const u8,
+    /// Where the sign-in note and the result go: stderr, as the script did.
+    note: *std.Io.Writer,
+    poll_interval: std.Io.Duration,
+    poll_count_max: u32,
+};
+
+/// `teams-zig login`: signs in through agent-browser, stores the skype token and region in the
+/// login keychain, and deletes the cache, since the new token may be another account's.
+pub fn login(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    agent_browser: AgentBrowser,
+    options: LoginOptions,
+) LoginError!void {
+    options.home.createDirPath(io, profile_sub_path) catch return error.ProfileDirFailed;
+    const profile_path = options.home.realPathFileAlloc(io, profile_sub_path, gpa) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ProfileDirFailed,
+        };
+    };
+    defer gpa.free(profile_path);
+
+    var signed_in = try signIn(gpa, io, agent_browser, .{
+        .profile_path = profile_path,
+        .poll_interval = options.poll_interval,
+        .poll_count_max = options.poll_count_max,
+        .note = options.note,
+    });
+    defer signed_in.deinit();
+
+    try keychain.write(gpa, io, options.service_name, &.{
+        .{ .account = "skype-token", .value = signed_in.token },
+        .{ .account = "region", .value = @tagName(signed_in.region) },
+    });
+    Cache.delete(io, options.home) catch return error.CacheDeleteFailed;
+
+    try options.note.print(
+        "Stored the skype token and region {t} in the login keychain.\n",
+        .{signed_in.region},
+    );
+    try options.note.flush();
+}
+
+/// A one-line hint, with no line break, for every way `login` can fail. No hint holds a value
+/// agent-browser gave, since its output holds the token.
+pub fn writeHint(writer: *std.Io.Writer, err: LoginError) std.Io.Writer.Error!void {
+    const seconds = std.fmt.comptimePrint("{d}", .{wait_seconds_default});
+    const run_seconds = std.fmt.comptimePrint("{d}", .{ChildAgentBrowser.run_seconds_default});
+    const hint = switch (err) {
+        error.AgentBrowserMissing => "agent-browser isn't on PATH; install it with " ++
+            "`brew install agent-browser`, then run `agent-browser install`",
+        error.BrowserOpenFailed => "agent-browser couldn't open the browser; try " ++
+            "`agent-browser doctor`",
+        error.BrowserStopped => "agent-browser stopped answering; was the browser window closed?",
+        error.AgentBrowserFailed => "agent-browser failed",
+        error.AgentBrowserTimedOut => "agent-browser didn't answer in " ++ run_seconds ++
+            " seconds; try `agent-browser doctor`",
+        error.AgentBrowserOutputTooLarge => "agent-browser's request list was larger than " ++
+            "teams-zig reads",
+        error.UnexpectedOutput => "agent-browser's request list had an unexpected shape; " ++
+            "teams-zig is tested with agent-browser 0.43.0 (see `agent-browser --version`)",
+        error.TokenTooLong => "the skype token was longer than teams-zig accepts",
+        error.NoTokenSeen => "no skype token seen in " ++ seconds ++
+            " seconds; did sign-in finish?",
+        error.NoRegionSeen => "no Chat Service region seen in " ++ seconds ++ " seconds",
+        error.UnstorableValue => "the skype token has characters the keychain tool can't take",
+        error.ItemNotFound, error.KeychainReadFailed, error.KeychainWriteFailed => "couldn't " ++
+            "write the teams-zig items to the login keychain; is it locked?",
+        error.ProfileDirFailed => "couldn't make the browser profile folder ~/" ++ profile_sub_path,
+        error.CacheDeleteFailed => "stored the token, but couldn't delete ~/" ++ Cache.sub_path ++
+            "; delete it before the next command",
+        error.OutOfMemory => "out of memory",
+        error.Canceled => "canceled",
+        error.WriteFailed => "couldn't write to stderr",
+    };
+    try writer.writeAll(hint);
+}
+
+/// A sign-in's result. `token` is owned and zeroed by `deinit`.
+pub const SignedIn = struct {
+    gpa: std.mem.Allocator,
+    token: []u8,
+    region: Region,
+
+    pub fn deinit(signed_in: *SignedIn) void {
+        std.crypto.secureZero(u8, signed_in.token);
+        signed_in.gpa.free(signed_in.token);
+        signed_in.* = undefined;
+    }
+};
+
+pub const SignInError = RunError || OutputError || std.Io.Writer.Error || std.Io.Cancelable ||
+    error{
+        /// `open` failed.
+        BrowserOpenFailed,
+        /// A later run failed: usually the user closed the window.
+        BrowserStopped,
+        NoTokenSeen,
+        NoRegionSeen,
+    };
+
+/// `find`'s failures, by what they mean to the user.
+const OutputError = error{ UnexpectedOutput, TokenTooLong };
+
+pub const SignInOptions = struct {
+    /// agent-browser's Chrome profile, so a sign-in lasts between runs.
+    profile_path: []const u8,
+    poll_interval: std.Io.Duration,
+    poll_count_max: u32,
+    /// Where to tell the user to sign in.
+    note: *std.Io.Writer,
+};
+
+/// What the script used: a 2 s poll for up to 300 s.
+const poll_seconds_default: u32 = 2;
+const wait_seconds_default: u32 = 300;
+pub const poll_interval_default: std.Io.Duration = .fromSeconds(poll_seconds_default);
+pub const poll_count_default: u32 = @divExact(wait_seconds_default, poll_seconds_default);
+
+const session = "teams-zig";
+const requests_arguments = [_][]const u8{ "--session", session, "network", "requests", "--json" };
+const close_arguments = [_][]const u8{ "--session", session, "close" };
+const teams_url = "https://teams.microsoft.com";
+
+/// Opens Teams in agent-browser's own session and profile, waits for the user to sign in, and
+/// reads the token and region from the requests the web client makes. Always closes the browser.
+pub fn signIn(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    agent_browser: AgentBrowser,
+    options: SignInOptions,
+) SignInError!SignedIn {
+    std.debug.assert(options.poll_count_max > 0);
+    // Registered first: a failed `open` may still have started the window.
+    defer signInClose(gpa, agent_browser);
+    const opened = agent_browser.run(gpa, &.{
+        "--session", session, "--headed", "--profile", options.profile_path, "open", teams_url,
+    }) catch |err| switch (err) {
+        error.AgentBrowserFailed => return error.BrowserOpenFailed,
+        else => |other| return other,
+    };
+    gpa.free(opened);
+
+    try options.note.print(
+        "Sign in to Teams in the browser window if asked. Waiting up to {d} seconds...\n",
+        .{options.poll_interval.toSeconds() * options.poll_count_max},
+    );
+    try options.note.flush();
+
+    var token_seen = false;
+    for (0..options.poll_count_max) |_| {
+        try io.sleep(options.poll_interval, .awake);
+        const output = agent_browser.run(gpa, &requests_arguments) catch |err| switch (err) {
+            error.AgentBrowserFailed => return error.BrowserStopped,
+            else => |other| return other,
+        };
+        defer {
+            // The output holds the token, and `find`'s strings point into it.
+            std.crypto.secureZero(u8, output);
+            gpa.free(output);
+        }
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const found = find(arena.allocator(), output) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TokenTooLong => return error.TokenTooLong,
+            else => return error.UnexpectedOutput,
+        };
+        const token = found.token orelse continue;
+        token_seen = true;
+        const region = found.region orelse continue;
+        // `find` gives no empty token and none over the limit.
+        std.debug.assert(token.len > 0);
+        std.debug.assert(token.len <= token_size_max);
+        return .{ .gpa = gpa, .token = try gpa.dupe(u8, token), .region = region };
+    }
+    if (!token_seen) return error.NoTokenSeen;
+    return error.NoRegionSeen;
+}
+
+/// The window stays open if this fails; it's not worth hiding the sign-in's own result for, so
+/// the error is dropped on purpose.
+fn signInClose(gpa: std.mem.Allocator, agent_browser: AgentBrowser) void {
+    const output = agent_browser.run(gpa, &close_arguments) catch return;
+    gpa.free(output);
+}
+
+/// Runs agent-browser with some arguments and gives its stdout, allocated with `gpa` and owned
+/// by the caller. The seam tests replace.
+pub const AgentBrowser = struct {
+    context: *anyopaque,
+    run_fn: *const fn (
+        context: *anyopaque,
+        gpa: std.mem.Allocator,
+        arguments: []const []const u8,
+    ) RunError![]u8,
+
+    fn run(
+        agent_browser: AgentBrowser,
+        gpa: std.mem.Allocator,
+        arguments: []const []const u8,
+    ) RunError![]u8 {
+        std.debug.assert(arguments.len > 0);
+        return agent_browser.run_fn(agent_browser.context, gpa, arguments);
+    }
+};
+
+pub const RunError = error{
+    AgentBrowserMissing,
+    AgentBrowserFailed,
+    AgentBrowserTimedOut,
+    AgentBrowserOutputTooLarge,
+    OutOfMemory,
+};
+
+/// The largest output read from one run: Teams makes a few thousand requests while it loads.
+pub const output_size_max: u32 = 64 * 1024 * 1024;
+
+/// agent-browser as a child process, found on PATH.
+pub const ChildAgentBrowser = struct {
+    io: std.Io,
+    /// Tests run other programs in its place.
+    program: []const u8,
+    /// How long one run may take; past it, the daemon is stuck (say, on a locked profile).
+    run_seconds_max: u32,
+
+    /// The most arguments one run takes (`open` with its options is the longest).
+    const argument_count_max: u32 = 8;
+    const stderr_size_max: u32 = 64 * 1024;
+    /// `open` waits for Teams to load, which can take a while on a slow network.
+    pub const run_seconds_default: u32 = 60;
+
+    pub fn interface(child: *ChildAgentBrowser) AgentBrowser {
+        return .{ .context = child, .run_fn = run };
+    }
+
+    fn run(
+        context: *anyopaque,
+        gpa: std.mem.Allocator,
+        arguments: []const []const u8,
+    ) RunError![]u8 {
+        const child: *ChildAgentBrowser = @ptrCast(@alignCast(context));
+        var argv_buffer: [argument_count_max + 1][]const u8 = undefined;
+        std.debug.assert(arguments.len <= argument_count_max);
+        argv_buffer[0] = child.program;
+        @memcpy(argv_buffer[1..][0..arguments.len], arguments);
+
+        const result = std.process.run(gpa, child.io, .{
+            .exe = .detect,
+            .argv = argv_buffer[0 .. arguments.len + 1],
+            .stderr_limit = .limited(stderr_size_max),
+            .stdout_limit = .limited(output_size_max),
+            .reserve_amount = 64 * 1024,
+            .cwd = .inherit,
+            .environ_map = null,
+            .expand_arg0 = .no_expand,
+            .progress_node = .none,
+            .create_no_window = true,
+            .timeout = .{ .duration = .{
+                .raw = .fromSeconds(child.run_seconds_max),
+                .clock = .awake,
+            } },
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound => return error.AgentBrowserMissing,
+            error.StreamTooLong => return error.AgentBrowserOutputTooLarge,
+            error.Timeout => return error.AgentBrowserTimedOut,
+            else => return error.AgentBrowserFailed,
+        };
+        // Its notes, such as an out-of-date browser, aren't shown: `login` says what failed.
+        gpa.free(result.stderr);
+        errdefer {
+            std.crypto.secureZero(u8, result.stdout);
+            gpa.free(result.stdout);
+        }
+
+        switch (result.term) {
+            .exited => |code| if (code != 0) return error.AgentBrowserFailed,
+            else => return error.AgentBrowserFailed,
+        }
+        return result.stdout;
+    }
+};
+
 /// What one `agent-browser network requests --json` output shows. Each is null until a request
 /// carries it. `token` borrows the output, or the arena when JSON escapes made a copy.
 pub const Found = struct {
@@ -17,7 +315,12 @@ pub const Found = struct {
 pub const FindError = std.json.ParseError(std.json.Scanner) || error{TokenTooLong};
 
 /// The longest skype token taken; they run to about 2 KiB.
-pub const token_size_max = 16 * 1024;
+pub const token_size_max: u32 = 16 * 1024;
+
+comptime {
+    // Every token `find` takes must fit the keychain.
+    std.debug.assert(token_size_max <= keychain.value_size_max);
+}
 
 /// The part of agent-browser 0.43.0's output read here (see docs/PLAN.md M8.1).
 const Output = struct {
@@ -35,11 +338,12 @@ const Request = struct {
 };
 
 /// Strings point into `output` where they can, so the caller zeroes one buffer to wipe the
-/// token; agent-browser's output holds no JSON escapes in a token.
+/// token; agent-browser's output holds no JSON escapes in a token. A string with escapes is
+/// copied into the arena, which is freed without zeroing: a short-lived process accepts that.
 const parse_options: std.json.ParseOptions = .{
     .duplicate_field_behavior = .use_last,
     .ignore_unknown_fields = true,
-    .max_value_len = null,
+    .max_value_len = output_size_max,
     .allocate = .alloc_if_needed,
 };
 
@@ -95,7 +399,7 @@ fn findHeaderToken(requests: []const Request) ?[]const u8 {
 /// `/api/mt/{region}/`). The first URL with a known region wins; other names are passed over.
 fn findRegion(requests: []const Request) ?Region {
     for (requests) |request| {
-        const name = urlRegionName(request.url) orelse continue;
+        const name = findRegionName(request.url) orelse continue;
         if (std.meta.stringToEnum(Region, name)) |region| return region;
     }
     return null;
@@ -107,7 +411,7 @@ const web_region_prefixes = [_][]const u8{
     "teams.cloud.microsoft/api/mt/",
 };
 
-fn urlRegionName(url: []const u8) ?[]const u8 {
+fn findRegionName(url: []const u8) ?[]const u8 {
     const https = "https://";
     const host_suffix = ".ng.msg.teams.microsoft.com/";
     if (!std.mem.startsWith(u8, url, https)) return null;
@@ -123,274 +427,6 @@ fn urlRegionName(url: []const u8) ?[]const u8 {
         return path[0..end];
     }
     return null;
-}
-
-/// agent-browser's Chrome profile for teams-zig, under your home directory: the script's, so a
-/// profile that is already signed in keeps working.
-pub const profile_sub_path = "Library/Application Support/teams-zig/browser";
-
-pub const LoginError = SignInError || keychain.WriteError || error{
-    ProfileDirFailed,
-    CacheDeleteFailed,
-};
-
-pub const LoginOptions = struct {
-    home: std.Io.Dir,
-    /// `keychain.service`; tests use a throwaway one.
-    service_name: []const u8,
-    /// Where the sign-in note and the result go: stderr, as the script did.
-    note: *std.Io.Writer,
-    poll_interval: std.Io.Duration = poll_interval_default,
-    poll_count_max: u32 = poll_count_default,
-};
-
-/// `teams-zig login`: signs in through agent-browser, stores the skype token and region in the
-/// login keychain, and deletes the cache, since the new token may be another account's.
-pub fn login(
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    agent_browser: AgentBrowser,
-    options: LoginOptions,
-) LoginError!void {
-    options.home.createDirPath(io, profile_sub_path) catch return error.ProfileDirFailed;
-    const profile_path = options.home.realPathFileAlloc(io, profile_sub_path, gpa) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.ProfileDirFailed,
-        };
-    };
-    defer gpa.free(profile_path);
-
-    var signed_in = try signIn(gpa, io, agent_browser, .{
-        .profile_path = profile_path,
-        .poll_interval = options.poll_interval,
-        .poll_count_max = options.poll_count_max,
-        .note = options.note,
-    });
-    defer signed_in.deinit(gpa);
-
-    try keychain.write(gpa, io, options.service_name, &.{
-        .{ .account = "skype-token", .value = signed_in.token },
-        .{ .account = "region", .value = @tagName(signed_in.region) },
-    });
-    Cache.delete(io, options.home) catch return error.CacheDeleteFailed;
-
-    try options.note.print(
-        "Stored the skype token and region {t} in the login keychain.\n",
-        .{signed_in.region},
-    );
-    try options.note.flush();
-}
-
-/// A one-line hint, with no line break, for every way `login` can fail. No hint holds a value
-/// agent-browser gave, since its output holds the token.
-pub fn writeHint(writer: *std.Io.Writer, err: LoginError) std.Io.Writer.Error!void {
-    const seconds = std.fmt.comptimePrint("{d}", .{wait_seconds_default});
-    const hint = switch (err) {
-        error.AgentBrowserMissing => "agent-browser isn't on PATH; install it with " ++
-            "`brew install agent-browser`, then run `agent-browser install`",
-        error.BrowserOpenFailed => "agent-browser couldn't open the browser; try " ++
-            "`agent-browser doctor`",
-        error.BrowserStopped => "agent-browser stopped answering; was the browser window closed?",
-        error.AgentBrowserFailed => "agent-browser failed",
-        error.AgentBrowserOutputTooLarge => "agent-browser's request list was larger than " ++
-            "teams-zig reads",
-        error.UnexpectedOutput => "agent-browser's request list had an unexpected shape; " ++
-            "teams-zig is tested with agent-browser 0.43.0 (see `agent-browser --version`)",
-        error.TokenTooLong => "the skype token was longer than teams-zig accepts",
-        error.NoTokenSeen => "no skype token seen in " ++ seconds ++
-            " seconds; did sign-in finish?",
-        error.NoRegionSeen => "no Chat Service region seen in " ++ seconds ++ " seconds",
-        error.UnstorableValue => "the skype token has characters the keychain tool can't take",
-        error.ItemNotFound, error.KeychainReadFailed, error.KeychainWriteFailed => "couldn't " ++
-            "write the teams-zig items to the login keychain; is it locked?",
-        error.ProfileDirFailed => "couldn't make the browser profile folder ~/" ++ profile_sub_path,
-        error.CacheDeleteFailed => "stored the token, but couldn't delete ~/" ++ Cache.sub_path ++
-            "; delete it before the next command",
-        error.OutOfMemory => "out of memory",
-        error.Canceled => "canceled",
-        error.WriteFailed => "couldn't write to stderr",
-    };
-    try writer.writeAll(hint);
-}
-
-/// Runs agent-browser with some arguments and gives its stdout, owned by the caller. The seam
-/// tests replace.
-pub const AgentBrowser = struct {
-    context: *anyopaque,
-    run_fn: *const fn (context: *anyopaque, arguments: []const []const u8) RunError![]u8,
-
-    fn run(agent_browser: AgentBrowser, arguments: []const []const u8) RunError![]u8 {
-        std.debug.assert(arguments.len > 0);
-        return agent_browser.run_fn(agent_browser.context, arguments);
-    }
-};
-
-pub const RunError = error{
-    AgentBrowserMissing,
-    AgentBrowserFailed,
-    AgentBrowserOutputTooLarge,
-    OutOfMemory,
-};
-
-/// The largest output read from one run: Teams makes a few thousand requests while it loads.
-pub const output_size_max = 64 * 1024 * 1024;
-
-/// agent-browser as a child process, found on PATH.
-pub const ChildAgentBrowser = struct {
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    /// Tests run other programs in its place.
-    program: []const u8 = "agent-browser",
-
-    pub fn interface(child: *ChildAgentBrowser) AgentBrowser {
-        return .{ .context = child, .run_fn = run };
-    }
-
-    fn run(context: *anyopaque, arguments: []const []const u8) RunError![]u8 {
-        const child: *ChildAgentBrowser = @ptrCast(@alignCast(context));
-        var argv_buffer: [argument_count_max + 1][]const u8 = undefined;
-        std.debug.assert(arguments.len <= argument_count_max);
-        argv_buffer[0] = child.program;
-        @memcpy(argv_buffer[1..][0..arguments.len], arguments);
-
-        const result = std.process.run(child.gpa, child.io, .{
-            .exe = .detect,
-            .argv = argv_buffer[0 .. arguments.len + 1],
-            .stderr_limit = .limited(stderr_size_max),
-            .stdout_limit = .limited(output_size_max),
-            .reserve_amount = 64 * 1024,
-            .cwd = .inherit,
-            .environ_map = null,
-            .expand_arg0 = .no_expand,
-            .progress_node = .none,
-            .create_no_window = true,
-            .timeout = .none,
-        }) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.FileNotFound => return error.AgentBrowserMissing,
-            error.StreamTooLong => return error.AgentBrowserOutputTooLarge,
-            else => return error.AgentBrowserFailed,
-        };
-        // Its notes, such as an out-of-date browser, aren't shown: `login` says what failed.
-        child.gpa.free(result.stderr);
-        errdefer {
-            std.crypto.secureZero(u8, result.stdout);
-            child.gpa.free(result.stdout);
-        }
-
-        switch (result.term) {
-            .exited => |code| if (code != 0) return error.AgentBrowserFailed,
-            else => return error.AgentBrowserFailed,
-        }
-        return result.stdout;
-    }
-
-    /// The most arguments one run takes (`open` with its options is the longest).
-    const argument_count_max = 8;
-    const stderr_size_max = 64 * 1024;
-};
-
-/// A sign-in's result. `token` is owned and zeroed by `deinit`.
-pub const SignedIn = struct {
-    token: []u8,
-    region: Region,
-
-    pub fn deinit(signed_in: *SignedIn, gpa: std.mem.Allocator) void {
-        std.crypto.secureZero(u8, signed_in.token);
-        gpa.free(signed_in.token);
-        signed_in.* = undefined;
-    }
-};
-
-pub const SignInError = RunError || FindErrorKind || std.Io.Writer.Error || std.Io.Cancelable ||
-    error{
-        /// `open` failed.
-        BrowserOpenFailed,
-        /// A later run failed: usually the user closed the window.
-        BrowserStopped,
-        NoTokenSeen,
-        NoRegionSeen,
-    };
-
-/// `find`'s failures, by what they mean to the user.
-const FindErrorKind = error{ UnexpectedOutput, TokenTooLong };
-
-pub const SignInOptions = struct {
-    /// agent-browser's Chrome profile, so a sign-in lasts between runs.
-    profile_path: []const u8,
-    poll_interval: std.Io.Duration,
-    poll_count_max: u32,
-    /// Where to tell the user to sign in.
-    note: *std.Io.Writer,
-};
-
-/// What the script used: a 2 s poll for up to 300 s.
-const poll_seconds_default = 2;
-const wait_seconds_default = 300;
-pub const poll_interval_default: std.Io.Duration = .fromSeconds(poll_seconds_default);
-pub const poll_count_default: u32 = wait_seconds_default / poll_seconds_default;
-
-const session = "teams-zig";
-const requests_arguments = [_][]const u8{ "--session", session, "network", "requests", "--json" };
-const teams_url = "https://teams.microsoft.com";
-
-/// Opens Teams in agent-browser's own session and profile, waits for the user to sign in, and
-/// reads the token and region from the requests the web client makes. Always closes the browser.
-pub fn signIn(
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    agent_browser: AgentBrowser,
-    options: SignInOptions,
-) SignInError!SignedIn {
-    std.debug.assert(options.poll_count_max > 0);
-    const opened = agent_browser.run(&.{
-        "--session", session, "--headed", "--profile", options.profile_path, "open", teams_url,
-    }) catch |err| switch (err) {
-        error.AgentBrowserFailed => return error.BrowserOpenFailed,
-        else => |other| return other,
-    };
-    gpa.free(opened);
-    defer closeBrowser(gpa, agent_browser);
-
-    try options.note.print(
-        "Sign in to Teams in the browser window if asked. Waiting up to {d} seconds...\n",
-        .{options.poll_interval.toSeconds() * options.poll_count_max},
-    );
-    try options.note.flush();
-
-    var token_seen = false;
-    for (0..options.poll_count_max) |_| {
-        try io.sleep(options.poll_interval, .awake);
-        const output = agent_browser.run(&requests_arguments) catch |err| switch (err) {
-            error.AgentBrowserFailed => return error.BrowserStopped,
-            else => |other| return other,
-        };
-        defer {
-            // The output holds the token, and `find`'s strings point into it.
-            std.crypto.secureZero(u8, output);
-            gpa.free(output);
-        }
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        const found = find(arena.allocator(), output) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.TokenTooLong => return error.TokenTooLong,
-            else => return error.UnexpectedOutput,
-        };
-        const token = found.token orelse continue;
-        token_seen = true;
-        const region = found.region orelse continue;
-        return .{ .token = try gpa.dupe(u8, token), .region = region };
-    }
-    if (!token_seen) return error.NoTokenSeen;
-    return error.NoRegionSeen;
-}
-
-/// The window stays open if this fails; it's not worth hiding the sign-in's own result for.
-fn closeBrowser(gpa: std.mem.Allocator, agent_browser: AgentBrowser) void {
-    const output = agent_browser.run(&.{ "--session", session, "close" }) catch return;
-    gpa.free(output);
 }
 
 test "find takes the token from the skypetokenauth POST and the region from a Chat Service host" {
@@ -506,29 +542,33 @@ test "find refuses output that isn't agent-browser's, and a token over the limit
 }
 
 test "ChildAgentBrowser tells a missing program, a failed run and too much output apart" {
+    const gpa = std.testing.allocator;
     var missing: ChildAgentBrowser = .{
-        .gpa = std.testing.allocator,
         .io = std.testing.io,
         .program = "teams-zig-no-such-program",
+        .run_seconds_max = 5,
     };
-    try std.testing.expectError(error.AgentBrowserMissing, missing.interface().run(&.{"open"}));
+    const not_found = missing.interface().run(gpa, &.{"open"});
+    try std.testing.expectError(error.AgentBrowserMissing, not_found);
 
     var shell: ChildAgentBrowser = .{
-        .gpa = std.testing.allocator,
         .io = std.testing.io,
         .program = "/bin/sh",
+        .run_seconds_max = 1,
     };
-    const said = try shell.interface().run(&.{ "-c", "printf fake-output; echo note >&2" });
-    defer std.testing.allocator.free(said);
+    const said = try shell.interface().run(gpa, &.{ "-c", "printf fake-output; echo note >&2" });
+    defer gpa.free(said);
     try std.testing.expectEqualStrings("fake-output", said);
 
-    const failed = shell.interface().run(&.{ "-c", "exit 3" });
+    const failed = shell.interface().run(gpa, &.{ "-c", "exit 3" });
     try std.testing.expectError(error.AgentBrowserFailed, failed);
     const too_much = std.fmt.comptimePrint("head -c {d} /dev/zero", .{output_size_max + 1});
     try std.testing.expectError(
         error.AgentBrowserOutputTooLarge,
-        shell.interface().run(&.{ "-c", too_much }),
+        shell.interface().run(gpa, &.{ "-c", too_much }),
     );
+    const stuck = shell.interface().run(gpa, &.{ "-c", "sleep 5" });
+    try std.testing.expectError(error.AgentBrowserTimedOut, stuck);
 }
 
 /// Gives scripted outputs, one per run, and records each run's arguments.
@@ -543,16 +583,20 @@ const FakeAgentBrowser = struct {
         return .{ .context = fake, .run_fn = run };
     }
 
-    fn run(context: *anyopaque, arguments: []const []const u8) RunError![]u8 {
+    fn run(
+        context: *anyopaque,
+        gpa: std.mem.Allocator,
+        arguments: []const []const u8,
+    ) RunError![]u8 {
         const fake: *FakeAgentBrowser = @ptrCast(@alignCast(context));
         const joined = try std.mem.join(std.testing.allocator, " ", arguments);
         try fake.runs.append(std.testing.allocator, joined);
-        // `close` always succeeds; the rest follow the script, then the last one repeats.
-        if (std.mem.endsWith(u8, joined, " close")) return std.testing.allocator.dupe(u8, "");
+        // `close` always succeeds; the rest follow the steps, then the last one repeats.
+        if (std.mem.endsWith(u8, joined, " close")) return gpa.dupe(u8, "");
         const index = @min(fake.run_count, fake.outputs.len - 1);
         fake.run_count += 1;
         return switch (fake.outputs[index]) {
-            .text => |text| std.testing.allocator.dupe(u8, text),
+            .text => |text| gpa.dupe(u8, text),
             .err => |err| err,
         };
     }
@@ -594,7 +638,7 @@ test "signIn opens Teams, polls until the token and region show, then closes" {
     var note: std.Io.Writer = .fixed(&note_buffer);
 
     var signed_in = try testSignIn(&fake, &note);
-    defer signed_in.deinit(std.testing.allocator);
+    defer signed_in.deinit();
 
     try std.testing.expectEqualStrings("FAKE-SIGNED-IN", signed_in.token);
     try std.testing.expectEqual(Region.emea, signed_in.region);
@@ -644,6 +688,9 @@ test "signIn reports a failed open, a closed window and output it can't read" {
     var open_failed: FakeAgentBrowser = .{ .outputs = &.{.{ .err = error.AgentBrowserFailed }} };
     defer open_failed.deinit();
     try std.testing.expectError(error.BrowserOpenFailed, testSignIn(&open_failed, &discard.writer));
+    // A failed open may still have started the window, so it is closed too.
+    try std.testing.expectEqual(2, open_failed.runs.items.len);
+    try std.testing.expectEqualStrings("--session teams-zig close", open_failed.runs.items[1]);
 
     var stopped: FakeAgentBrowser = .{ .outputs = &.{
         .{ .text = "" },
@@ -670,18 +717,21 @@ test "login signs in, stores the token and region, deletes the cache and says so
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = Cache.sub_path,
         .data = "chat\tfake\t19:x\n",
+        .flags = .{
+            .read = false,
+            .truncate = true,
+            .exclusive = false,
+            .lock = .none,
+            .lock_nonblocking = false,
+            .permissions = .default_file,
+            .resolve_beneath = false,
+        },
     });
 
-    var random_bytes: [6]u8 = undefined;
-    std.testing.io.random(&random_bytes);
     var service_buffer: [64]u8 = undefined;
-    const service_name = try std.fmt.bufPrint(
-        &service_buffer,
-        "teams-zig-test-{x}",
-        .{random_bytes},
-    );
-    defer testDelete(service_name, "skype-token");
-    defer testDelete(service_name, "region");
+    const service_name = keychain.testServiceName(&service_buffer);
+    defer keychain.testDelete(.{ .service_name = service_name, .account = "skype-token" });
+    defer keychain.testDelete(.{ .service_name = service_name, .account = "region" });
 
     var fake: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = fake_found } } };
     defer fake.deinit();
@@ -696,11 +746,16 @@ test "login signs in, stores the token and region, deletes the cache and says so
         .poll_count_max = 3,
     });
 
-    const gpa = std.testing.allocator;
-    const token = try keychain.read(gpa, std.testing.io, service_name, "skype-token");
+    const token = try keychain.read(std.testing.allocator, std.testing.io, .{
+        .service_name = service_name,
+        .account = "skype-token",
+    });
     defer std.testing.allocator.free(token);
     try std.testing.expectEqualStrings("FAKE-SIGNED-IN", token);
-    const region = try keychain.read(std.testing.allocator, std.testing.io, service_name, "region");
+    const region = try keychain.read(std.testing.allocator, std.testing.io, .{
+        .service_name = service_name,
+        .account = "region",
+    });
     defer std.testing.allocator.free(region);
     try std.testing.expectEqualStrings("emea", region);
 
@@ -716,16 +771,6 @@ test "login signs in, stores the token and region, deletes the cache and says so
         note.buffered(),
         "Stored the skype token and region emea in the login keychain.\n",
     ));
-}
-
-fn testDelete(service_name: []const u8, account: []const u8) void {
-    const result = std.process.run(std.testing.allocator, std.testing.io, .{
-        .argv = &.{
-            keychain.security_path, "delete-generic-password", "-s", service_name, "-a", account,
-        },
-    }) catch return;
-    std.testing.allocator.free(result.stdout);
-    std.testing.allocator.free(result.stderr);
 }
 
 test "writeHint names the fix and never a value agent-browser gave" {
@@ -744,4 +789,17 @@ test "writeHint names the fix and never a value agent-browser gave" {
             "then run `agent-browser install`",
         writer.buffered(),
     );
+}
+
+test "signIn stops at the first poll that shows both values" {
+    var fake: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = fake_found } } };
+    defer fake.deinit();
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+
+    var signed_in = try testSignIn(&fake, &discard.writer);
+    defer signed_in.deinit();
+
+    try std.testing.expectEqualStrings("FAKE-SIGNED-IN", signed_in.token);
+    // open, one poll, close.
+    try std.testing.expectEqual(3, fake.runs.items.len);
 }

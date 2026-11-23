@@ -12,23 +12,27 @@ pub const service = "teams-zig";
 pub const security_path = "/usr/bin/security";
 
 /// security exits with the low byte of the OSStatus: errSecItemNotFound (-25300) becomes 44.
-const security_exit_item_not_found = 44;
+const security_exit_item_not_found: u8 = 44;
 
 /// Far larger than any token; a bigger value means something else is stored there.
-const value_size_max = 64 * 1024;
+pub const value_size_max: u32 = 64 * 1024;
 
 /// Failures reading a keychain item through `security`.
 pub const ReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory };
 
-/// Reads one item of `service_name`. Owned by the caller.
-pub fn read(
-    gpa: std.mem.Allocator,
-    io: Io,
+/// One keychain item's name. A struct, so a service and an account can't swap places.
+pub const ItemName = struct {
     service_name: []const u8,
     account: []const u8,
-) ReadError![]u8 {
-    std.debug.assert(service_name.len > 0);
-    std.debug.assert(account.len > 0);
+};
+
+/// Reads one item. Owned by the caller. No time limit: when the keychain is locked, `security`
+/// waits for the user to unlock it in a dialog.
+pub fn read(gpa: std.mem.Allocator, io: Io, name: ItemName) ReadError![]u8 {
+    std.debug.assert(name.service_name.len > 0);
+    std.debug.assert(name.account.len > 0);
+    const service_name = name.service_name;
+    const account = name.account;
     const result = std.process.run(gpa, io, .{
         .exe = .detect,
         .argv = &.{
@@ -85,9 +89,10 @@ pub fn write(
     items: []const Item,
 ) WriteError!void {
     std.debug.assert(items.len > 0);
+    std.debug.assert(writeStorable(service_name));
     for (items) |item| {
-        std.debug.assert(storable(item.account));
-        if (!storable(item.value)) return error.UnstorableValue;
+        std.debug.assert(writeStorable(item.account));
+        if (!writeStorable(item.value)) return error.UnstorableValue;
     }
 
     var child = std.process.spawn(io, .{
@@ -117,7 +122,8 @@ pub fn write(
     child.stdin.?.close(io);
     child.stdin = null;
 
-    // security -i exits 1 when a command fails; the read-back below catches anything else.
+    // security -i exits 1 when a command fails; the read-back below catches anything else. No
+    // time limit, as for `read`: a locked keychain waits for the user's unlock dialog.
     const term = child.wait(io) catch return error.KeychainWriteFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.KeychainWriteFailed,
@@ -125,7 +131,10 @@ pub fn write(
     }
 
     for (items) |item| {
-        const stored = try read(gpa, io, service_name, item.account);
+        const stored = try read(gpa, io, .{
+            .service_name = service_name,
+            .account = item.account,
+        });
         defer {
             std.crypto.secureZero(u8, stored);
             gpa.free(stored);
@@ -158,36 +167,68 @@ fn writeCommands(
 
 /// `security -i` splits its lines on spaces and reads quotes and backslashes, and an empty
 /// `-w` makes it prompt; tokens and regions are printable ASCII with none of those.
-fn storable(value: []const u8) bool {
+fn writeStorable(value: []const u8) bool {
     if (value.len == 0) return false;
     if (value.len > value_size_max) return false;
     for (value) |byte| {
-        if (byte <= ' ' or byte >= 0x7f) return false;
-        if (byte == '"' or byte == '\'' or byte == '\\') return false;
+        switch (byte) {
+            0...' ', 0x7f...0xff => return false,
+            '"', '\'', '\\' => return false,
+            else => {},
+        }
     }
     return true;
 }
 
 /// A throwaway service per test run, so tests never touch the real items.
-fn testServiceName(buffer: *[64]u8) []const u8 {
+pub fn testServiceName(buffer: *[64]u8) []const u8 {
     var random_bytes: [6]u8 = undefined;
     std.testing.io.random(&random_bytes);
+    // "teams-zig-test-" and 12 hex digits always fit 64 bytes.
     return std.fmt.bufPrint(buffer, "teams-zig-test-{x}", .{random_bytes}) catch unreachable;
 }
 
-fn testDelete(service_name: []const u8, account: []const u8) void {
+/// Deletes a test item. A failure is only warned about, so it can't hide the test's own result,
+/// but the leftover item is named so it can be deleted by hand.
+pub fn testDelete(name: ItemName) void {
     const result = std.process.run(std.testing.allocator, std.testing.io, .{
-        .argv = &.{ security_path, "delete-generic-password", "-s", service_name, "-a", account },
-    }) catch return;
+        .exe = .detect,
+        .argv = &.{
+            security_path, "delete-generic-password", "-s", name.service_name, "-a", name.account,
+        },
+        .stderr_limit = .limited(value_size_max),
+        .stdout_limit = .limited(value_size_max),
+        .reserve_amount = 64,
+        .cwd = .inherit,
+        .environ_map = null,
+        .expand_arg0 = .no_expand,
+        .progress_node = .none,
+        .create_no_window = true,
+        .timeout = .none,
+    }) catch |err| {
+        std.log.warn("couldn't delete test item {s}/{s}: {t}", .{
+            name.service_name,
+            name.account,
+            err,
+        });
+        return;
+    };
     std.testing.allocator.free(result.stdout);
     std.testing.allocator.free(result.stderr);
+    const deleted = switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!deleted) {
+        std.log.warn("couldn't delete test item {s}/{s}", .{ name.service_name, name.account });
+    }
 }
 
 test "write stores each item, replacing an older value, and read gives it back" {
     var buffer: [64]u8 = undefined;
     const service_name = testServiceName(&buffer);
-    defer testDelete(service_name, "fake-token");
-    defer testDelete(service_name, "fake-region");
+    defer testDelete(.{ .service_name = service_name, .account = "fake-token" });
+    defer testDelete(.{ .service_name = service_name, .account = "fake-region" });
 
     try write(std.testing.allocator, std.testing.io, service_name, &.{
         .{ .account = "fake-token", .value = "FAKE.old-1" },
@@ -197,10 +238,16 @@ test "write stores each item, replacing an older value, and read gives it back" 
         .{ .account = "fake-region", .value = "emea" },
     });
 
-    const token = try read(std.testing.allocator, std.testing.io, service_name, "fake-token");
+    const token = try read(std.testing.allocator, std.testing.io, .{
+        .service_name = service_name,
+        .account = "fake-token",
+    });
     defer std.testing.allocator.free(token);
     try std.testing.expectEqualStrings("FAKE.new-2_=+/%", token);
-    const region = try read(std.testing.allocator, std.testing.io, service_name, "fake-region");
+    const region = try read(std.testing.allocator, std.testing.io, .{
+        .service_name = service_name,
+        .account = "fake-region",
+    });
     defer std.testing.allocator.free(region);
     try std.testing.expectEqualStrings("emea", region);
 }

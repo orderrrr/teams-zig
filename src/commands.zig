@@ -423,17 +423,22 @@ pub fn readCredentials(
         }
     }
 
-    const token = try keychain.read(gpa, io, keychain.service, "skype-token");
+    const token = try keychain.read(gpa, io, .{
+        .service_name = keychain.service,
+        .account = "skype-token",
+    });
     errdefer {
         std.crypto.secureZero(u8, token);
         gpa.free(token);
     }
 
-    // An empty item means the script never stored a real token.
+    // An empty item means no real token was ever stored.
     if (token.len == 0) return error.ItemNotFound;
 
-    const region_read = keychain.read(gpa, io, keychain.service, "region");
-    const region_name = region_read catch |err| switch (err) {
+    const region_name = keychain.read(gpa, io, .{
+        .service_name = keychain.service,
+        .account = "region",
+    }) catch |err| switch (err) {
         // The token is there but the region isn't: say so, not "no token".
         error.ItemNotFound => return error.UnknownRegion,
         else => |other| return other,
