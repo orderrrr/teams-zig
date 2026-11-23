@@ -288,7 +288,7 @@ pub const Command = union(enum) {
                 defer id_arena.deinit();
 
                 const found: FoundChat = switch (messages.chat) {
-                    .id => |id| .{ .id = id, .from_cache = false },
+                    .id => |id| .{ .given = id },
                     .name => |name| try findChat(
                         client,
                         cache,
@@ -299,8 +299,8 @@ pub const Command = union(enum) {
                         started_at,
                     ),
                 };
-                const list = client.messages(found.id, messages.count) catch |err| {
-                    return forgetStaleChat(cache, &messages.chat, &found, err);
+                const list = client.messages(found.id(), messages.count) catch |err| {
+                    return forgetStaleChat(cache, &found, err);
                 };
                 defer list.deinit();
 
@@ -335,7 +335,7 @@ fn runSend(
 
     const arena = send_arena.allocator();
     const found: FoundChat = switch (send.chat) {
-        .id => |id| .{ .id = id, .from_cache = false },
+        .id => |id| .{ .given = id },
         .name => |name| try findChat(client, cache, arena, name, clock, stdout, started_at),
     };
 
@@ -349,10 +349,10 @@ fn runSend(
     const user = try selfUser(client, cache);
     // Never retried: a cached id that answers 404 is forgotten, and the command fails. A 404
     // means nothing was posted.
-    const message_id = client.send(found.id, &.{
+    const message_id = client.send(found.id(), &.{
         .content = html.written(),
         .display_name = user.name,
-    }) catch |err| return forgetStaleChat(cache, &send.chat, &found, err);
+    }) catch |err| return forgetStaleChat(cache, &found, err);
     started_at.store(requests_idle, .release);
 
     var time_buffer: [short_time.width_max]u8 = undefined;
@@ -719,10 +719,21 @@ fn watchErrorRetries(err: RunError, status: ?std.http.Status) bool {
     };
 }
 
-/// A chat picked for `messages` or `send`, and whether its id came from the cache.
-const FoundChat = struct {
-    id: []const u8,
-    from_cache: bool,
+/// A chat picked for `messages` or `send`, by where its id came from.
+const FoundChat = union(enum) {
+    /// The id as typed.
+    given: []const u8,
+    /// From a listing of your newest chats, by name.
+    listed: []const u8,
+    /// From the cache's name map, with the name that picked it, to forget if it answers 404.
+    cached: struct { id: []const u8, name: []const u8 },
+
+    fn id(found: *const FoundChat) []const u8 {
+        return switch (found.*) {
+            .given, .listed => |given_or_listed| given_or_listed,
+            .cached => |cached| cached.id,
+        };
+    }
 };
 
 /// The chat `name` picks: from the cache's name map, or else the one chat among your newest
@@ -740,7 +751,9 @@ fn findChat(
     started_at: *std.atomic.Value(i64),
 ) RunError!FoundChat {
     std.debug.assert(name.len > 0);
-    if (cache.chatId(name)) |id| return .{ .id = try arena.dupe(u8, id), .from_cache = true };
+    if (cache.chatId(name)) |id| {
+        return .{ .cached = .{ .id = try arena.dupe(u8, id), .name = name } };
+    }
     const user = try selfUser(client, cache);
 
     const list = try client.conversations(conversation_count_limit);
@@ -762,14 +775,11 @@ fn findChat(
         names = try otherPersonNames(client, cache, arena, list.items, user.mri);
         match = matchChat(list.items, names, name);
     }
-    try cacheChatNames(cache, list.items, names);
+    try findChatCacheNames(cache, list.items, names);
 
     switch (match) {
         .none => return error.ChatNameNotFound,
-        .one => |index| return .{
-            .id = try arena.dupe(u8, list.items[index].id),
-            .from_cache = false,
-        },
+        .one => |index| return .{ .listed = try arena.dupe(u8, list.items[index].id) },
         .several => {
             started_at.store(requests_idle, .release);
             for (list.items, names) |*conversation, other_name| {
@@ -783,16 +793,17 @@ fn findChat(
     }
 }
 
-/// Caches each name in `conversations` (as `chats` shows it) that picks exactly one of them, so
-/// an ambiguous name is never cached. `other_names` holds the other person's name for each, or
-/// null.
-fn cacheChatNames(
+/// Rewrites the cache's name map from a full listing: each name in `conversations` (as `chats`
+/// shows it) that picks exactly one of them, so a name that is ambiguous now, or gone, is
+/// forgotten. `other_names` holds the other person's name for each, or null.
+fn findChatCacheNames(
     cache: *Cache,
     conversations: []const chat.Conversation,
     other_names: []const ?[]const u8,
 ) error{OutOfMemory}!void {
     std.debug.assert(conversations.len == other_names.len);
     std.debug.assert(conversations.len <= conversation_count_limit);
+    cache.clearChats();
     for (conversations, other_names) |*conversation, other_name| {
         const name = chatName(conversation, other_name) orelse continue;
         if (matchChat(conversations, other_names, name) != .one) continue;
@@ -802,17 +813,12 @@ fn cacheChatNames(
 
 /// Passes on `err` from a request to `found`'s chat, first forgetting the name that picked it
 /// if the cache gave a chat that answers 404. Nothing is retried; a rerun looks the name up.
-fn forgetStaleChat(
-    cache: *Cache,
-    typed: *const Command.Chat,
-    found: *const FoundChat,
-    err: RunError,
-) RunError {
+fn forgetStaleChat(cache: *Cache, found: *const FoundChat, err: RunError) RunError {
     if (err != error.NotFound) return err;
-    if (!found.from_cache) return err;
-    // Only a typed name is looked up in the cache.
-    std.debug.assert(typed.* == .name);
-    cache.removeChat(typed.name);
+    switch (found.*) {
+        .given, .listed => {},
+        .cached => |cached| cache.removeChat(cached.name),
+    }
     return err;
 }
 
@@ -1468,14 +1474,17 @@ test "findChat takes a cached name's id without a request" {
     const arena = arena_state.allocator();
     const name = "fake STANDUP";
     const found = try findChat(&client, &cache, arena, name, &clock, &out.writer, &started_at);
-    try std.testing.expectEqualStrings("19:fake-group@thread.v2", found.id);
-    try std.testing.expect(found.from_cache);
+    try std.testing.expectEqualStrings("19:fake-group@thread.v2", found.cached.id);
+    try std.testing.expectEqualStrings(name, found.cached.name);
     try std.testing.expectEqual(null, client.response_status);
 }
 
-test "cacheChatNames keeps only names that pick one chat" {
+test "findChatCacheNames rewrites the map with only names that pick one chat" {
     var cache: Cache = .init(std.testing.allocator);
     defer cache.deinit();
+    // Cached earlier, when it picked one chat; the listing below shows two.
+    try cache.putChat("Fake Standup", "19:fake-old@thread.v2");
+    try cache.putChat("Fake Gone", "19:fake-gone@thread.v2");
     const template: chat.Conversation = .{
         .id = "19:fake-a@thread.v2",
         .kind = .chat,
@@ -1493,8 +1502,9 @@ test "cacheChatNames keeps only names that pick one chat" {
     conversations[2].topic = "Fake Retro";
     const other_names = [_]?[]const u8{ null, null, null };
 
-    try cacheChatNames(&cache, &conversations, &other_names);
+    try findChatCacheNames(&cache, &conversations, &other_names);
     try std.testing.expectEqual(null, cache.chatId("fake standup"));
+    try std.testing.expectEqual(null, cache.chatId("fake gone"));
     try std.testing.expectEqualStrings("19:fake-c@thread.v2", cache.chatId("fake retro").?);
 }
 
@@ -1502,18 +1512,18 @@ test "forgetStaleChat drops a cached name whose chat answers 404, and nothing el
     var cache: Cache = .init(std.testing.allocator);
     defer cache.deinit();
     try cache.putChat("Fake Standup", "19:fake-group@thread.v2");
-    const named: Command.Chat = .{ .name = "fake standup" };
-
-    const typed: FoundChat = .{ .id = "19:fake-group@thread.v2", .from_cache = false };
-    const kept = forgetStaleChat(&cache, &named, &typed, error.NotFound);
+    const listed: FoundChat = .{ .listed = "19:fake-group@thread.v2" };
+    const kept = forgetStaleChat(&cache, &listed, error.NotFound);
     try std.testing.expectEqual(error.NotFound, kept);
     try std.testing.expect(cache.chatId("fake standup") != null);
 
-    const cached: FoundChat = .{ .id = "19:fake-group@thread.v2", .from_cache = true };
-    const dropped = forgetStaleChat(&cache, &named, &cached, error.ConnectFailed);
-    try std.testing.expectEqual(error.ConnectFailed, dropped);
+    const cached: FoundChat = .{
+        .cached = .{ .id = "19:fake-group@thread.v2", .name = "Fake STANDUP" },
+    };
+    const failed = forgetStaleChat(&cache, &cached, error.ConnectFailed);
+    try std.testing.expectEqual(error.ConnectFailed, failed);
     try std.testing.expect(cache.chatId("fake standup") != null);
-    const forgotten = forgetStaleChat(&cache, &named, &cached, error.NotFound);
+    const forgotten = forgetStaleChat(&cache, &cached, error.NotFound);
     try std.testing.expectEqual(error.NotFound, forgotten);
     try std.testing.expectEqual(null, cache.chatId("fake standup"));
 }
