@@ -216,17 +216,7 @@ const McpRunner = struct {
             return .{ .err = err, .status = null };
         };
         defer cache.deinit();
-        defer {
-            // The server says nothing about a failed save: its stderr carries only the
-            // watchdog's line and a failure that ends it. A failed save costs requests later,
-            // and leaves the cached user marked stale, to forget again.
-            if (saveCache(&cache, runner.io, home)) {
-                // Without a home nothing was written, so the file may still hold the old user.
-                if (home != null) {
-                    if (runner.kept) |*kept| kept.cached_self_stale = false;
-                }
-            } else |_| {}
-        }
+        defer runner.runOnceSave(&cache, home);
         // The cached user may be the old token's, after a sign-in to another account.
         if (runner.kept.?.cached_self_stale) cache.forgetSelf();
 
@@ -253,6 +243,17 @@ const McpRunner = struct {
             return failure;
         };
         return null;
+    }
+
+    /// Saves `cache` under `home` and, once the file is written, clears the stale-user mark. The
+    /// server says nothing about a failed save: its stderr carries only the watchdog's line and
+    /// a failure that ends it. A failed save, or no home, costs requests later and leaves the
+    /// cached user marked stale, to forget again.
+    fn runOnceSave(runner: *McpRunner, cache: *const Cache, home: ?Io.Dir) void {
+        // Without a home nothing is written, so the file may still hold the old user.
+        const dir = home orelse return;
+        saveCache(cache, runner.io, dir) catch return;
+        if (runner.kept) |*kept| kept.cached_self_stale = false;
     }
 
     /// Whether a send at `now_seconds` should start on a fresh connection, the kept one last
@@ -296,17 +297,18 @@ fn loadCache(gpa: std.mem.Allocator, io: Io, home: ?Io.Dir) error{OutOfMemory}!C
     return Cache.load(gpa, io, dir);
 }
 
-/// Saves `cache` under `home` if it changed; without a home there is nothing to save.
-fn saveCache(cache: *const Cache, io: Io, home: ?Io.Dir) Cache.SaveError!void {
-    const dir = home orelse return;
+/// Saves `cache` under `home` if it changed.
+fn saveCache(cache: *const Cache, io: Io, home: Io.Dir) Cache.SaveError!void {
     if (!cache.changed) return;
-    try cache.save(io, dir);
+    try cache.save(io, home);
 }
 
 /// The CLI's save: a failed save only costs requests next time, so the command goes on, and one
 /// line on `stderr` says why.
 fn saveCacheOrSay(cache: *const Cache, io: Io, home: ?Io.Dir, stderr: *Io.Writer) void {
-    saveCache(cache, io, home) catch |err| {
+    // Without a home there is nothing to save.
+    const dir = home orelse return;
+    saveCache(cache, io, dir) catch |err| {
         // stderr is the last place to report anything; if writing there fails, nothing is left.
         stderr.print("teams-zig: couldn't save the cache: {t}\n", .{err}) catch return;
         stderr.flush() catch return;
