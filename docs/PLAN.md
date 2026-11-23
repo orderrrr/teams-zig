@@ -418,7 +418,7 @@ Owner decisions (2026-11-23):
 
 - **Front door.** Requests go to `https://teams.microsoft.com/api/chatsvc/{region}/v1`, whose edge is 25–45 ms away. First one authenticated `whoami` GET checks that the skype token works there; the switch happens only if it does. The owner knows the check sends the token to `teams.microsoft.com`.
 - **Disk cache** of three kinds of entry: your own user (the `whoami` result), the other person's name in 1:1 chats, and a map from chat name to chat id. `messages <name>` and `send <name>` use the map. The owner knows a stale entry can make `send` post to the wrong chat.
-- **MCP keeps one client** and its connection across tool calls, and reads the keychain again only after the token expires. A read call may reconnect once; a send call never retries.
+- **MCP keeps one client** and its connection across tool calls, and reads the keychain again only after the token expires. A read call may reconnect once; a send call never retries. (Changed at the gate, Q6: the token and region are read for every call and compared with the kept client's in memory.)
 - **gzip.** Requests ask for gzip bodies, decompressed with `std.compress.flate`.
 
 Expected gains (from the speed report):
@@ -610,4 +610,9 @@ Owner's answers to the round-1 questions (2026-11-23):
 - **Round 7** (reviews of `d931dc5..0acc78b`). mr-review: a failed read of the home folder or cache file came back as an empty cache, so the stale mark was cleared while the file still held the old user; `forgetSelf` now always marks the cache to be rewritten, and the mark clears only when a home exists and the save worked. STYLE 5.1: the test's file options are inline. Tiger Style: nothing new. To the owner: a running MCP server with the old token can still write the old user back after a sign-in, which the CLI would then read.
 - **Round 8** (reviews of `0acc78b..47f3440`). STYLE 5.4 and 5.2: the MCP save moved into `McpRunner.runOnceSave`, which returns early without a home or on a failed save, so `home` is unwrapped once; `saveCache` takes a home that is there. mr-review and Tiger Style: nothing new. To the owner (with Q5): Q6, a running MCP server with the old token writing the old user back after a sign-in.
 - **Round 9:** all three reviews found nothing new. Gate passed. Q5 and Q6 wait for the owner; M7 resolves at 0.10.0 once they are answered (and any fix they bring passes the gate).
+
+Owner's answers to Q5 and Q6 (2026-11-23):
+
+- Q5, the extra user check on most MCP sends (about 0.2 s, from the 30 s rule and Q1): accepted, no change.
+- Q6, a running MCP server writing the old account's user after a sign-in: before each call the server reads the token and region and compares them with its kept client's, in memory only; a difference drops the client, and the new one forgets the cached user. No token or hash is written to disk or printed. Reviewed before building: no flaw found; costs are two keychain reads per call, a prompt on every MCP call while the keychain is locked, and one narrow race (a call already running during a sign-in may save its old user once). Built in f02d980 and the next commit.
 
