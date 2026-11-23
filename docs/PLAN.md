@@ -320,3 +320,60 @@ The owner sent a snippet wrapped in ``` on one line (fish had joined the lines) 
 - **Round 3:** all three reviews found nothing new in the code. Gate passed.
 
 Also in this pass: CLAUDE.md's zero-writes section now says `send` may write, and agents' live sends stay on `48:notes` with the owner's go-ahead each time.
+
+## M6: MCP server
+
+Asked for by the owner on 2026-11-23: an MCP server, so an agent can read Teams and send through teams-zig. Plan approved by the owner on 2026-11-23, with the answers below.
+
+Protocol: MCP over stdio. Each message is one line of JSON-RPC 2.0 on stdin or stdout. The server answers `initialize`, `ping`, `tools/list` and `tools/call`, and ignores every notification.
+
+Owner decisions (2026-11-23):
+
+- A new `teams-zig mcp` subcommand speaks MCP. It reuses the CLI's code and uses only `std`, so `build.zig.zon` keeps `.dependencies = .{}`.
+- Five tools: `whoami`, `chats`, `messages`, `unread` and `send`. Each takes the CLI command's arguments and returns the text that the CLI command prints. `watch` is not a tool, because it never ends.
+- The `send` tool keeps the CLI's checks: the chat is an exact name or an id, the text is at most 16 KiB, and a send is never retried.
+- The watchdog stays: a Chat Service stall of more than 60 seconds ends the server.
+- Agents call the MCP `send` tool only for a message that the owner requested in that session, and show the owner the chat and the text before each send (M6.10).
+- The owner registers the server at user scope and puts `mcp__teams-zig__send` in the `ask` list, which prompts even in `bypassPermissions` mode.
+
+Plan decisions:
+
+- The commands move out of `main.zig` into `src/Command.zig`, so `main.zig` and the server share one copy. No behaviour changes in that move.
+- The server is `src/Server.zig`. It reads from an `Io.Reader` and writes to an `Io.Writer`, so tests drive it with fixed buffers and no network.
+- Tool arguments are JSON objects with the CLI's names: `chats {count?}`, `messages {chat, count?}`, `send {chat, text}`; `whoami` and `unread` take none. Counts are JSON integers with the CLI's limits (1–100 for `chats`, 1–12800 for `messages`). One parser, shared with `Command.parse`, applies the limits.
+- Each tool call reads the token and region again (keychain, or test mode's environment), as each CLI run does. A token that `scripts/teams-token.fish` stores while the server runs then works with no restart.
+- A failed command gives a tool result with `isError: true`. Its text is what the command printed before it failed (for example, the ids that `ChatNameAmbiguous` lists) and then the CLI's hint for that error. The hint text moves from `reportError` into one function that both use.
+- Bad tool arguments also give `isError: true`, with the tool's usage line, so the agent can correct the call. An unknown tool name or method is a JSON-RPC error (`-32602`, `-32601`), as MCP specifies.
+- `initialize` answers with the client's protocol version if it is `2025-06-18` or `2025-11-25`, and with `2025-11-25` otherwise. Both versions have no JSON-RPC batches, and the server uses no feature that differs between them. A JSON array (a batch) gets `-32600`.
+- The server announces only the `tools` capability. No resources, prompts, logging, progress or cancellation.
+- Tool annotations: the four reads have `readOnlyHint: true`. `send` has `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false` and `openWorldHint: true`, so a client can ask before each send.
+- Limits: a request line is at most 256 KiB (16 KiB of text can grow about six times with JSON escapes). A longer line gets `-32700` and is skipped up to its newline. A tool's text is at most 1 MiB, written into a fixed buffer; more fails the call with a hint to ask for fewer messages.
+- Calls run one at a time, in the order they arrive. End of stdin ends the server with exit code 0.
+- stdout carries only protocol messages. stderr carries only the watchdog's line.
+- The watchdog starts once with the server. It counts only time spent waiting on the Chat Service, so time spent waiting for the next request does not count. A stall past 60 seconds ends the server, as it ends the CLI.
+- The live checks run the server with a script that pipes JSON lines into `zig-out/bin/teams-zig mcp`. No Claude Code config is changed.
+- The version becomes 0.9.0.
+
+### Chunks
+
+1. **M6.1 commands in their own file.** Move `Command`, `Clock`, the `run…` functions and their helpers from `main.zig` to `src/Command.zig`. `main.zig` keeps `main`, `usage`, `connect` and the watchdog. The existing tests move with the code and pass unchanged.
+2. **M6.2 error hints as text.** Split `reportError` into `writeErrorHint(writer, err, status)`, which writes only the hint, and the CLI's line around it. Tests for the hint of each error kind (one per `switch` group), and for the CLI's line staying as it was.
+3. **M6.3 shared argument checks.** Move the count and chat checks out of `Command.parse` into functions that the JSON parser can call too. `Command.parse`'s tests pass unchanged.
+4. **M6.4 request lines.** `Server` reads one line up to 256 KiB and parses the JSON-RPC envelope: `jsonrpc` is `"2.0"`, `id` is a number, a string or missing (a notification), `method` is a string, `params` is optional. Tests for a good request, a notification, bad JSON (`-32700`), a batch and a missing method (`-32600`), and an overlong line skipped up to its newline.
+5. **M6.5 initialize and ping.** The `initialize` answer (protocol version, `tools` capability, `serverInfo` with name `teams-zig` and the version, which `build.zig` reads from `build.zig.zon` and passes in as a build option), `ping`'s empty result, `-32601` for an unknown method, and no answer to a notification. Tests for each, and for both protocol versions and an unknown one.
+6. **M6.6 tools/list.** The five tools with their descriptions (from `usage`), input schemas and annotations. A test compares the whole answer with the expected JSON.
+7. **M6.7 tools/call arguments.** Turn a tool name and its `arguments` object into a `Command`, with the checks of M6.3. Tests for each tool's good arguments, each limit's edges, a wrong type, an unknown field, a missing field and an empty text (all `isError: true` with the usage line), and an unknown tool (`-32602`).
+8. **M6.8 tools/call results.** Run the `Command` with a writer on the 1 MiB buffer, then build the result: the text, or the text and the hint with `isError: true`. The run goes through a function the test can replace, so tests use fake output and fake errors with no network. A test for output over 1 MiB.
+9. **M6.9 `mcp` subcommand.** `teams-zig mcp` in `Command.parse` and `usage`. `main` starts the watchdog, then runs `Server` on stdin and stdout until end of stdin. Each call connects as the CLI does and frees the client after the call. A test runs `Server` over a fixed input holding `initialize`, `tools/list` and end of input.
+10. **M6.10 CLAUDE.md for the `send` tool.** Change "Writes to Teams" so that the MCP `send` tool may post too, with the same rule for agents' live sends (`48:notes` only, kept minimal, each one confirmed at that moment). Add: "Agents call the MCP `send` tool only for a message that the operator requested in that session. Before each send, agents show the operator the chat and the text." This edit is the only change outside the code.
+11. **M6.11 live read check.** Pipe `initialize`, `tools/list`, `whoami`, `chats 5`, `messages 48:notes 1` and `unread` into the built server. Compare each tool's text with the same CLI command's output (the relative times can differ if a minute passes). Counts only in the report; reads only.
+12. **M6.12 one live send.** One `tools/call send` to `48:notes`, only after the owner confirms that send at that moment. Read it back with the `messages` tool. Never retried.
+13. **M6.13 0.9.0 and gate.** Version, CHANGELOG entry, then the milestone gate.
+
+### Owner step: register the server
+
+After the gate, the owner registers the server in Claude Code; agents do not change Claude Code config. For example: `claude mcp add --scope user teams-zig -- <repo>/zig-out/bin/teams-zig mcp`. Claude Code then names the tools `mcp__teams-zig__whoami` and so on. The owner also puts `mcp__teams-zig__send` in the `ask` list in `~/.claude/settings.json`, so Claude Code asks before each send, even in `bypassPermissions` mode.
+
+### Out of M6
+
+`watch` as a tool, and any server-to-client messages (notifications, progress, logging). Resources and prompts. Cancelling a call. Running calls in parallel. HTTP transport. Any write but `send`.
