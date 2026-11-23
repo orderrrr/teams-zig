@@ -606,4 +606,5 @@ Owner's answers to the round-1 questions (2026-11-23):
 2. The silent cache-save failure: the CLI prints one stderr line; the MCP server prints nothing (STYLE 4.3).
 3. The 30 s send idle rule: kept, and recorded as a plan decision above.
 4. The longer parameter lists: no change in M7; STYLE 2.2 warns against a parameter-bag struct.
+- **Round 6** (reviews of `c2812c8..d931dc5`, the owner's answers applied). mr-review: the stale-user mark moved from one call's local value to the kept client (`Kept.cached_self_stale`), cleared only after a save, so a failed load or save can't bring the old account's user back; the CHANGELOG mentions the CLI's stderr line. Tiger Style: `writeFile`'s options spelled out in tests. STYLE: nothing new. To the owner: with the 30 s rule, most MCP sends start on a new client and so ask for your user first (about 0.2 s more).
 
