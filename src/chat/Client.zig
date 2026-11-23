@@ -57,7 +57,7 @@ fn getUrlFrontDoor(
 }
 
 pub const Error = error{
-    /// The skype token was rejected: it expires after about a day, so rerun the token script.
+    /// The skype token was rejected: it expires after about a day, so run `teams-zig login` again.
     TokenExpired,
     /// 404: usually a conversation id that doesn't exist or isn't yours.
     NotFound,

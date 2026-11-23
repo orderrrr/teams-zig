@@ -5,6 +5,8 @@ const chat = teams.chat;
 const core_foundation = teams.macos.core_foundation;
 const commands = @import("commands.zig");
 const Server = @import("Server.zig");
+const login = @import("login.zig");
+const keychain = @import("keychain.zig");
 const Cache = @import("Cache.zig");
 const Command = commands.Command;
 const Clock = commands.Clock;
@@ -20,6 +22,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
     if (servesMcp(arguments)) return serveMcp(init, stderr);
+    if (isLogin(arguments)) return runLogin(init, stderr);
     const command = Command.parse(arguments) orelse {
         try stderr.writeAll(usage);
         try stderr.flush();
@@ -76,6 +79,37 @@ pub fn main(init: std.process.Init) !u8 {
 fn servesMcp(arguments: []const []const u8) bool {
     if (arguments.len != 2) return false;
     return std.mem.eql(u8, arguments[1], "mcp");
+}
+
+/// Whether the arguments ask to sign in, `teams-zig login`.
+fn isLogin(arguments: []const []const u8) bool {
+    if (arguments.len != 2) return false;
+    return std.mem.eql(u8, arguments[1], "login");
+}
+
+/// Signs in through agent-browser and stores the token and region in the login keychain. No
+/// watchdog: the wait for the user to sign in has its own limit.
+fn runLogin(init: std.process.Init, stderr: *Io.Writer) !u8 {
+    const home = openHome(init.io, init.environ_map) orelse {
+        try stderr.writeAll("teams-zig: login needs HOME, for the browser profile\n");
+        try stderr.flush();
+        return 1;
+    };
+    defer home.close(init.io);
+
+    var agent_browser: login.ChildAgentBrowser = .{ .gpa = init.gpa, .io = init.io };
+    login.login(init.gpa, init.io, agent_browser.interface(), .{
+        .home = home,
+        .service_name = keychain.service,
+        .note = stderr,
+    }) catch |err| {
+        try stderr.writeAll("teams-zig: ");
+        try login.writeHint(stderr, err);
+        try stderr.writeByte('\n');
+        try stderr.flush();
+        return 1;
+    };
+    return 0;
 }
 
 /// Serves the tools on stdin and stdout until stdin ends. stdout carries only MCP messages;
@@ -379,8 +413,10 @@ const usage =
     \\                               tab and newline
     \\  mcp                          serve these commands but watch as MCP tools, on stdin and
     \\                               stdout, until stdin ends
+    \\  login                        sign in to Teams in agent-browser and store the skype token
+    \\                               and region in the login keychain
     \\
-    \\Sign in first with scripts/teams-token.fish, which stores the token in the login keychain.
+    \\Sign in first with teams-zig login. It needs agent-browser on PATH.
     \\
     \\Test mode (less secure: the token is in the environment, readable by child processes):
     \\set TEAMS_ZIG_SKYPE_TOKEN and TEAMS_ZIG_REGION to skip the keychain, for example in fish:
@@ -440,6 +476,7 @@ test {
     _ = @import("keychain.zig");
     // Tests don't call `main`; this compiles the MCP path, which nothing else in them reaches.
     _ = &serveMcp;
+    _ = &runLogin;
 }
 
 test "servesMcp takes mcp alone" {

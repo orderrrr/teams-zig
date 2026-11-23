@@ -389,7 +389,7 @@ fn runChats(
 }
 
 /// A token and region for one connection: from the environment (test mode) or, normally, from
-/// the login keychain where the token script stored them. The token is a copy, zeroed by
+/// the login keychain where `teams-zig login` stored them. The token is a copy, zeroed by
 /// `deinit`.
 pub const Credentials = struct {
     gpa: std.mem.Allocator,
@@ -432,7 +432,8 @@ pub fn readCredentials(
     // An empty item means the script never stored a real token.
     if (token.len == 0) return error.ItemNotFound;
 
-    const region_name = keychain.read(gpa, io, keychain.service, "region") catch |err| switch (err) {
+    const region_read = keychain.read(gpa, io, keychain.service, "region");
+    const region_name = region_read catch |err| switch (err) {
         // The token is there but the region isn't: say so, not "no token".
         error.ItemNotFound => return error.UnknownRegion,
         else => |other| return other,
@@ -984,16 +985,17 @@ pub fn writeErrorHint(
     err: CommandError,
     response_status: ?std.http.Status,
 ) Io.Writer.Error!void {
-    const rerun_script = "run scripts/teams-token.fish";
+    const rerun_login = "run teams-zig login";
     const hint = switch (err) {
-        error.ItemNotFound => "no token in the login keychain; " ++ rerun_script,
-        error.InvalidToken => "the token contains a line break; " ++ rerun_script,
-        error.UnknownRegion => "the region is missing or unknown; " ++ rerun_script ++
+        error.ItemNotFound => "no token in the login keychain; " ++ rerun_login,
+        error.InvalidToken => "the token contains a line break; " ++ rerun_login,
+        error.UnknownRegion => "the region is missing or unknown; " ++ rerun_login ++
             " (in test mode, set " ++ region_variable ++ ")",
-        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++ keychain.security_path ++
+        error.KeychainReadFailed => "couldn't read the teams-zig items with " ++
+            keychain.security_path ++
             "; is the keychain locked?",
         error.OutOfMemory => "out of memory",
-        error.TokenExpired => "the skype token has expired; " ++ rerun_script,
+        error.TokenExpired => "the skype token has expired; " ++ rerun_login,
         error.NotFound => "no conversation with that id, or it isn't yours; if you named the " ++
             "chat, run the command again",
         error.ChatNameNotFound => "no chat with exactly that name among your " ++
@@ -1326,7 +1328,7 @@ test "writeErrorHint writes one hint per error, with the status for an unexpecte
     try out.writer.writeByte('\n');
     try writeErrorHint(&out.writer, error.ChatNameAmbiguous, null);
     try std.testing.expectEqualStrings(
-        \\the skype token has expired; run scripts/teams-token.fish
+        \\the skype token has expired; run teams-zig login
         \\the Chat Service answered HTTP 503
         \\several chats have that name; use one of the ids above
     , out.written());

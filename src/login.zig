@@ -4,6 +4,8 @@
 const std = @import("std");
 const teams = @import("teams");
 const Region = teams.chat.Client.Region;
+const keychain = @import("keychain.zig");
+const Cache = @import("Cache.zig");
 
 /// What one `agent-browser network requests --json` output shows. Each is null until a request
 /// carries it. `token` borrows the output, or the arena when JSON escapes made a copy.
@@ -123,6 +125,95 @@ fn urlRegionName(url: []const u8) ?[]const u8 {
     return null;
 }
 
+/// agent-browser's Chrome profile for teams-zig, under your home directory: the script's, so a
+/// profile that is already signed in keeps working.
+pub const profile_sub_path = "Library/Application Support/teams-zig/browser";
+
+pub const LoginError = SignInError || keychain.WriteError || error{
+    ProfileDirFailed,
+    CacheDeleteFailed,
+};
+
+pub const LoginOptions = struct {
+    home: std.Io.Dir,
+    /// `keychain.service`; tests use a throwaway one.
+    service_name: []const u8,
+    /// Where the sign-in note and the result go: stderr, as the script did.
+    note: *std.Io.Writer,
+    poll_interval: std.Io.Duration = poll_interval_default,
+    poll_count_max: u32 = poll_count_default,
+};
+
+/// `teams-zig login`: signs in through agent-browser, stores the skype token and region in the
+/// login keychain, and deletes the cache, since the new token may be another account's.
+pub fn login(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    agent_browser: AgentBrowser,
+    options: LoginOptions,
+) LoginError!void {
+    options.home.createDirPath(io, profile_sub_path) catch return error.ProfileDirFailed;
+    const profile_path = options.home.realPathFileAlloc(io, profile_sub_path, gpa) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ProfileDirFailed,
+        };
+    };
+    defer gpa.free(profile_path);
+
+    var signed_in = try signIn(gpa, io, agent_browser, .{
+        .profile_path = profile_path,
+        .poll_interval = options.poll_interval,
+        .poll_count_max = options.poll_count_max,
+        .note = options.note,
+    });
+    defer signed_in.deinit(gpa);
+
+    try keychain.write(gpa, io, options.service_name, &.{
+        .{ .account = "skype-token", .value = signed_in.token },
+        .{ .account = "region", .value = @tagName(signed_in.region) },
+    });
+    Cache.delete(io, options.home) catch return error.CacheDeleteFailed;
+
+    try options.note.print(
+        "Stored the skype token and region {t} in the login keychain.\n",
+        .{signed_in.region},
+    );
+    try options.note.flush();
+}
+
+/// A one-line hint, with no line break, for every way `login` can fail. No hint holds a value
+/// agent-browser gave, since its output holds the token.
+pub fn writeHint(writer: *std.Io.Writer, err: LoginError) std.Io.Writer.Error!void {
+    const seconds = std.fmt.comptimePrint("{d}", .{wait_seconds_default});
+    const hint = switch (err) {
+        error.AgentBrowserMissing => "agent-browser isn't on PATH; install it with " ++
+            "`brew install agent-browser`, then run `agent-browser install`",
+        error.BrowserOpenFailed => "agent-browser couldn't open the browser; try " ++
+            "`agent-browser doctor`",
+        error.BrowserStopped => "agent-browser stopped answering; was the browser window closed?",
+        error.AgentBrowserFailed => "agent-browser failed",
+        error.AgentBrowserOutputTooLarge => "agent-browser's request list was larger than " ++
+            "teams-zig reads",
+        error.UnexpectedOutput => "agent-browser's request list had an unexpected shape; " ++
+            "teams-zig is tested with agent-browser 0.43.0 (see `agent-browser --version`)",
+        error.TokenTooLong => "the skype token was longer than teams-zig accepts",
+        error.NoTokenSeen => "no skype token seen in " ++ seconds ++
+            " seconds; did sign-in finish?",
+        error.NoRegionSeen => "no Chat Service region seen in " ++ seconds ++ " seconds",
+        error.UnstorableValue => "the skype token has characters the keychain tool can't take",
+        error.ItemNotFound, error.KeychainReadFailed, error.KeychainWriteFailed => "couldn't " ++
+            "write the teams-zig items to the login keychain; is it locked?",
+        error.ProfileDirFailed => "couldn't make the browser profile folder ~/" ++ profile_sub_path,
+        error.CacheDeleteFailed => "stored the token, but couldn't delete ~/" ++ Cache.sub_path ++
+            "; delete it before the next command",
+        error.OutOfMemory => "out of memory",
+        error.Canceled => "canceled",
+        error.WriteFailed => "couldn't write to stderr",
+    };
+    try writer.writeAll(hint);
+}
+
 /// Runs agent-browser with some arguments and gives its stdout, owned by the caller. The seam
 /// tests replace.
 pub const AgentBrowser = struct {
@@ -235,8 +326,10 @@ pub const SignInOptions = struct {
 };
 
 /// What the script used: a 2 s poll for up to 300 s.
-pub const poll_interval_default: std.Io.Duration = .fromSeconds(2);
-pub const poll_count_default: u32 = 150;
+const poll_seconds_default = 2;
+const wait_seconds_default = 300;
+pub const poll_interval_default: std.Io.Duration = .fromSeconds(poll_seconds_default);
+pub const poll_count_default: u32 = wait_seconds_default / poll_seconds_default;
 
 const session = "teams-zig";
 const requests_arguments = [_][]const u8{ "--session", session, "network", "requests", "--json" };
@@ -564,4 +657,91 @@ test "signIn reports a failed open, a closed window and output it can't read" {
     defer garbled.deinit();
     try std.testing.expectError(error.UnexpectedOutput, testSignIn(&garbled, &discard.writer));
     try std.testing.expectEqualStrings("--session teams-zig close", garbled.runs.items[2]);
+}
+
+test "login signs in, stores the token and region, deletes the cache and says so" {
+    var tmp = std.testing.tmpDir(.{
+        .access_sub_paths = true,
+        .iterate = false,
+        .follow_symlinks = true,
+    });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "Library/Caches/teams-zig");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = Cache.sub_path,
+        .data = "chat\tfake\t19:x\n",
+    });
+
+    var random_bytes: [6]u8 = undefined;
+    std.testing.io.random(&random_bytes);
+    var service_buffer: [64]u8 = undefined;
+    const service_name = try std.fmt.bufPrint(
+        &service_buffer,
+        "teams-zig-test-{x}",
+        .{random_bytes},
+    );
+    defer testDelete(service_name, "skype-token");
+    defer testDelete(service_name, "region");
+
+    var fake: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = fake_found } } };
+    defer fake.deinit();
+    var note_buffer: [512]u8 = undefined;
+    var note: std.Io.Writer = .fixed(&note_buffer);
+
+    try login(std.testing.allocator, std.testing.io, fake.interface(), .{
+        .home = tmp.dir,
+        .service_name = service_name,
+        .note = &note,
+        .poll_interval = .zero,
+        .poll_count_max = 3,
+    });
+
+    const gpa = std.testing.allocator;
+    const token = try keychain.read(gpa, std.testing.io, service_name, "skype-token");
+    defer std.testing.allocator.free(token);
+    try std.testing.expectEqualStrings("FAKE-SIGNED-IN", token);
+    const region = try keychain.read(std.testing.allocator, std.testing.io, service_name, "region");
+    defer std.testing.allocator.free(region);
+    try std.testing.expectEqualStrings("emea", region);
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, Cache.sub_path, .{ .follow_symlinks = true }),
+    );
+    _ = try tmp.dir.statFile(std.testing.io, profile_sub_path, .{ .follow_symlinks = true });
+    const profile_argument = "/" ++ profile_sub_path ++ " open";
+    try std.testing.expect(std.mem.indexOf(u8, fake.runs.items[0], profile_argument) != null);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        note.buffered(),
+        "Stored the skype token and region emea in the login keychain.\n",
+    ));
+}
+
+fn testDelete(service_name: []const u8, account: []const u8) void {
+    const result = std.process.run(std.testing.allocator, std.testing.io, .{
+        .argv = &.{
+            keychain.security_path, "delete-generic-password", "-s", service_name, "-a", account,
+        },
+    }) catch return;
+    std.testing.allocator.free(result.stdout);
+    std.testing.allocator.free(result.stderr);
+}
+
+test "writeHint names the fix and never a value agent-browser gave" {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeHint(&writer, error.NoTokenSeen);
+    try std.testing.expectEqualStrings(
+        "no skype token seen in 300 seconds; did sign-in finish?",
+        writer.buffered(),
+    );
+
+    writer = .fixed(&buffer);
+    try writeHint(&writer, error.AgentBrowserMissing);
+    try std.testing.expectEqualStrings(
+        "agent-browser isn't on PATH; install it with `brew install agent-browser`, " ++
+            "then run `agent-browser install`",
+        writer.buffered(),
+    );
 }
