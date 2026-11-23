@@ -50,11 +50,27 @@ The binary is `zig-out/bin/teams-zig`. It needs Zig 0.17 and the Xcode Command L
 
 ## Sign in
 
-```fish
-scripts/teams-token.fish
+`teams-zig login` signs in through agent-browser, tested with version 0.43.0. Install it once:
+
+1. Install agent-browser. Homebrew's formula also installs Node:
+
+   ```sh
+   brew install agent-browser
+   ```
+
+2. Let agent-browser download its browser:
+
+   ```sh
+   agent-browser install
+   ```
+
+Then sign in:
+
+```sh
+teams-zig login
 ```
 
-The script signs in through agent-browser. It stores the skype token and region in the login keychain.
+Teams opens in a browser window. Sign in if Teams asks. `login` stores the skype token and region in the login keychain, then closes the window. The skype token lasts about a day; when a command says it has expired, run `teams-zig login` again.
 
 teams-zig keeps a cache in `~/Library/Caches/teams-zig/cache.txt`: your user, the names in 1:1 chats and which chat each name picks. The cache holds no token. The script deletes it at each sign-in.
 

@@ -1,6 +1,6 @@
 # teams-api
 
-A Microsoft Teams client in Zig with no third-party dependencies: `std` plus Apple system frameworks, no Node, no Java, no browser runtime in the client. `scripts/teams-token.fish` signs in through agent-browser and stores the skype token and region in the login keychain.
+A Microsoft Teams client in Zig with no third-party dependencies: `std` plus Apple system frameworks, no Node, no Java, no browser runtime in the client. `teams-zig login` signs in through agent-browser and stores the skype token and region in the login keychain.
 
 `inspo/` holds a third-party reference project (`teams-api`). Read it for protocol facts only; never copy code from it or add its dependencies.
 
