@@ -160,6 +160,18 @@ pub fn init(
     client.decompress_window = try gpa.alloc(u8, std.compress.flate.max_window_len);
 }
 
+/// Whether `skype_token` is the token this client sends, compared in memory and in constant
+/// time for a given length. Neither token is written anywhere.
+pub fn usesToken(client: *const Client, skype_token: []const u8) bool {
+    const prefix = "skypetoken=";
+    std.debug.assert(std.mem.startsWith(u8, client.authentication, prefix));
+    const current = client.authentication[prefix.len..];
+    if (current.len != skype_token.len) return false;
+    var difference: u8 = 0;
+    for (current, skype_token) |current_byte, token_byte| difference |= current_byte ^ token_byte;
+    return difference == 0;
+}
+
 pub fn deinit(client: *Client) void {
     client.http.deinit();
     // It holds the token: zero our copy. std's connection buffers keep their own until exit.
@@ -917,4 +929,15 @@ test "fetchBody reads a chunked gzip body to its end, so the connection is ready
     try fetchBody(transfer, .gzip, &window, &body);
     try std.testing.expectEqualStrings("{\"fake\":\"gzip body\"}", body.buffered());
     try std.testing.expectEqual(.ready, http_reader.state);
+}
+
+test "usesToken tells the client's own token from any other" {
+    var client: Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .emea, "fake-token");
+    defer client.deinit();
+
+    try std.testing.expect(client.usesToken("fake-token"));
+    try std.testing.expect(!client.usesToken("fake-tokeN"));
+    try std.testing.expect(!client.usesToken("fake-token2"));
+    try std.testing.expect(!client.usesToken("fake"));
 }

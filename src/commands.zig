@@ -402,14 +402,28 @@ fn runChats(
     }
 }
 
-/// Starts a Chat Service client with the token and region from the environment (test mode) or,
-/// normally, from the login keychain where the token script stored them.
-pub fn connect(
-    client: *chat.Client,
+/// A token and region for one connection: from the environment (test mode) or, normally, from
+/// the login keychain where the token script stored them. The token is a copy, zeroed by
+/// `deinit`.
+pub const Credentials = struct {
+    gpa: std.mem.Allocator,
+    token: []u8,
+    region: chat.Client.Region,
+
+    pub fn deinit(credentials: *Credentials) void {
+        // Zeroed so our copy doesn't outlive its use.
+        std.crypto.secureZero(u8, credentials.token);
+        credentials.gpa.free(credentials.token);
+        credentials.* = undefined;
+    }
+};
+
+/// Reads the token and region, from the environment in test mode, else from the keychain.
+pub fn readCredentials(
     gpa: std.mem.Allocator,
     io: Io,
     environment: *const std.process.Environ.Map,
-) ConnectError!void {
+) ConnectError!Credentials {
     // Test mode: less secure, since any child process can read the environment, but it never
     // touches the keychain. An empty token counts as unset.
     if (environment.get(token_variable)) |environment_token| {
@@ -418,14 +432,13 @@ pub fn connect(
                 return error.UnknownRegion;
             };
             try checkToken(environment_token);
-            return client.init(gpa, io, try parseRegion(region_name), environment_token);
+            const region = try parseRegion(region_name);
+            return .{ .gpa = gpa, .token = try gpa.dupe(u8, environment_token), .region = region };
         }
     }
 
     const token = try readKeychain(gpa, io, "skype-token");
-    defer {
-        // Zeroed so our copy doesn't outlive its use. std's connection buffers still hold one
-        // until the process exits.
+    errdefer {
         std.crypto.secureZero(u8, token);
         gpa.free(token);
     }
@@ -441,7 +454,20 @@ pub fn connect(
     defer gpa.free(region_name);
 
     try checkToken(token);
-    try client.init(gpa, io, try parseRegion(region_name), token);
+    return .{ .gpa = gpa, .token = token, .region = try parseRegion(region_name) };
+}
+
+/// Starts a Chat Service client with the token and region `readCredentials` finds.
+pub fn connect(
+    client: *chat.Client,
+    gpa: std.mem.Allocator,
+    io: Io,
+    environment: *const std.process.Environ.Map,
+) ConnectError!void {
+    var credentials = try readCredentials(gpa, io, environment);
+    // std's connection buffers still hold a copy of the token until the process exits.
+    defer credentials.deinit();
+    try client.init(gpa, io, credentials.region, credentials.token);
 }
 
 /// Reads one teams-zig keychain item through `/usr/bin/security`, which the token script also
@@ -1546,4 +1572,20 @@ test "forgetStaleChat drops a cached name whose chat answers 404, and nothing el
     };
     try std.testing.expectEqual(error.NotFound, forgetStaleChat(&cache, &listed, error.NotFound));
     try std.testing.expectEqual(null, cache.chatId("fake retro"));
+}
+
+test "readCredentials takes test mode's token and region, as its own copy" {
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put(token_variable, "fake-token");
+    try environment.put(region_variable, "amer");
+
+    var credentials = try readCredentials(std.testing.allocator, std.testing.io, &environment);
+    defer credentials.deinit();
+    try std.testing.expectEqualStrings("fake-token", credentials.token);
+    try std.testing.expectEqual(chat.Client.Region.amer, credentials.region);
+
+    try environment.put(region_variable, "fake");
+    const unknown = readCredentials(std.testing.allocator, std.testing.io, &environment);
+    try std.testing.expectError(error.UnknownRegion, unknown);
 }
