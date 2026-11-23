@@ -447,6 +447,9 @@ Plan decisions:
 - `person` entries are never stale in practice: a 1:1 chat's other person doesn't change. A cached name is used instead of a lookup; a lookup's result is stored.
 - MCP: `McpRunner` keeps the `Client` between calls. On `TokenExpired` it reads the keychain again, builds a new client and, for a read tool, runs the call once more; `send` reports the error. On `ConnectFailed`, `SendFailed` or `ConnectionDropped` a read tool reconnects and runs once more; `send` reports the error, whose hint already says to check the chat. One retry at most, and the output buffer starts empty for it.
 - gzip: `Accept-Encoding: gzip, identity`. A gzip body is decompressed into the same 8 MiB body buffer, so the limit is on the decompressed size; past it, `ResponseTooLarge` as now. Other encodings are still refused.
+- MCP: a send on a connection idle for more than 30 s starts on a fresh one, since the service may have closed the idle connection and a send can't be retried (added while building M7.11; kept by the owner at the gate).
+- MCP: whenever the runner opens a new client, the cache's `self` is forgotten first, since the new token may be another account's (owner's answer at the gate).
+- CLI: a failed cache save prints one stderr line, "teams-zig: couldn't save the cache: <error>"; the MCP server stays silent (owner's answer at the gate).
 - No change to the watchdog, the request limits or the tools' arguments and text.
 - The version becomes 0.10.0.
 
@@ -596,4 +599,11 @@ Developer ID signing and notarization. Homebrew. A universal (`lipo`) binary. Li
 - **Round 3** (reviews of `cb45033..c6a47e6`). mr-review: `file_size_max`'s comment said about 1 MiB after the chat limit fell to 100; it now says 586,180 bytes and a comptime assert pins that value. STYLE: `putSelf` compares through `putSelfUnchanged`, with guard clauses, instead of a four-deep nest (5.4); `FoundChat.NamedChat` owns both its id and its name in `findChat`'s arena (6.4). Tiger Style: `forgetStaleChat`'s comment covers listed names too; the full-cache test asserts the limits its keys rely on; `Named` is the noun `NamedChat`.
 - **Round 4** (reviews of `c6a47e6..ab930b2`). STYLE 6.4: `findChat`'s comment says both the id and the name are owned by `arena`. mr-review and Tiger Style: nothing new.
 - **Round 5:** all three reviews found nothing new. Gate passed. Four round-1 findings wait for the owner: a running MCP server keeping the old account after a sign-in, the silent cache-save failure, the 30 s send idle rule, and the longer parameter lists. M7 is resolved at 0.10.0 once those are answered (and any fix they bring passes the gate).
+
+Owner's answers to the round-1 questions (2026-11-23):
+
+1. A running MCP server keeping the old account after a sign-in: before the runner opens a new client, the cache's `self` is forgotten (73df194).
+2. The silent cache-save failure: the CLI prints one stderr line; the MCP server prints nothing (STYLE 4.3).
+3. The 30 s send idle rule: kept, and recorded as a plan decision above.
+4. The longer parameter lists: no change in M7; STYLE 2.2 warns against a parameter-bag struct.
 
