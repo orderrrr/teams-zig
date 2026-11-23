@@ -327,11 +327,11 @@ fn fetchBody(
     // last chunk is still unread. One more read takes it, leaving the connection ready for the
     // next request. Anything else after the gzip data (a second gzip member, junk) is refused.
     if (decompress == .flate) {
-        const left = transfer.discard(.limited(1)) catch |err| switch (err) {
+        const left_size = transfer.discard(.limited(1)) catch |err| switch (err) {
             error.EndOfStream => return,
             error.ReadFailed => return error.ReadFailed,
         };
-        if (left > 0) return error.BadResponse;
+        if (left_size > 0) return error.BadResponse;
     }
 }
 

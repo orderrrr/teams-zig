@@ -130,8 +130,9 @@ const McpRunner = struct {
     zone: *const core_foundation.TimeZone,
     /// `Command.run` takes it for `watch`'s notes, which no tool writes.
     stderr: *Io.Writer,
-    /// Null until the first call, and after a failure that drops it. Initialized in place, since
-    /// the client must not move once its connections exist.
+    /// Null until the first call, and after `dropClient`: a token or connection failure, or a
+    /// send after an idle spell. Initialized in place, since the client must not move once its
+    /// connections exist.
     kept: ?Kept = null,
 
     /// The client kept across calls, and when it last finished one.
@@ -192,7 +193,7 @@ const McpRunner = struct {
     fn runOnce(runner: *McpRunner, command: *const Command, output: *Io.Writer) ?Server.Failure {
         const now_seconds = Io.Clock.awake.now(runner.io).toSeconds();
         if (command.* == .send) {
-            if (runner.kept) |kept| {
+            if (runner.kept) |*kept| {
                 if (sendsFresh(now_seconds, kept.used_at_seconds)) runner.dropClient();
             }
         }

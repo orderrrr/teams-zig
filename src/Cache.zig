@@ -19,15 +19,16 @@ changed: bool = false,
 
 /// The most `person` entries kept; past it, new ones are dropped.
 pub const person_count_max: u32 = 1024;
-/// The most `chat` entries kept; past it, new ones are dropped.
-pub const chat_count_max: u32 = 1024;
+/// The most `chat` entries kept: a full listing (100 chats, `conversation_count_limit` in
+/// commands.zig, asserted there) rewrites the map, so it never holds more.
+pub const chat_count_max: u32 = 100;
 /// The longest id, name or upn stored; a longer one isn't cached.
 pub const value_size_max: u32 = 256;
 
 /// The longest line of each kind: its word, its values at their longest, tabs and a newline.
-const self_line_size_max = "self".len + 3 * (1 + value_size_max) + 1;
-const person_line_size_max = "person".len + 2 * (1 + value_size_max) + 1;
-const chat_line_size_max = "chat".len + 2 * (1 + value_size_max) + 1;
+const self_line_size_max: u32 = "self".len + 3 * (1 + value_size_max) + 1;
+const person_line_size_max: u32 = "person".len + 2 * (1 + value_size_max) + 1;
+const chat_line_size_max: u32 = "chat".len + 2 * (1 + value_size_max) + 1;
 
 /// The largest cache file read; a larger one counts as empty. A full cache at its longest lines
 /// is exactly this size, so a saved cache always loads (about 1 MiB).
@@ -177,11 +178,13 @@ pub fn write(cache: *const Cache, writer: *std.Io.Writer) std.Io.Writer.Error!vo
 /// Remembers your user. One that can't go on a line (see `storable`) is kept for this run, but
 /// not written.
 pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
+    // A user who hasn't changed leaves the file as it is.
     if (cache.self_user) |known| {
-        const same_mri = std.mem.eql(u8, known.mri, user.mri);
-        const same_name = std.mem.eql(u8, known.name, user.name);
-        // A user who hasn't changed leaves the file as it is.
-        if (same_mri and same_name and std.mem.eql(u8, known.upn, user.upn)) return;
+        if (std.mem.eql(u8, known.mri, user.mri)) {
+            if (std.mem.eql(u8, known.name, user.name)) {
+                if (std.mem.eql(u8, known.upn, user.upn)) return;
+            }
+        }
     }
     const arena = cache.arena.allocator();
     cache.changed = true;
@@ -251,10 +254,10 @@ fn putEntry(
         cache.changed = true;
         return;
     }
-    if (map.count() < count_max) {
-        try map.put(arena, try arena.dupe(u8, key), try arena.dupe(u8, value));
-        cache.changed = true;
-    }
+    // A full map drops new entries.
+    if (map.count() == count_max) return;
+    try map.put(arena, try arena.dupe(u8, key), try arena.dupe(u8, value));
+    cache.changed = true;
 }
 
 /// Whether `value` fits on a cache line: not empty, at most `value_size_max` bytes, and no tab,
@@ -394,12 +397,13 @@ test "a full cache at its longest lines is file_size_max, and saves and loads wh
     defer cache.deinit();
     const longest: [value_size_max]u8 = @splat('v');
     try cache.putSelf(&.{ .mri = &longest, .name = &longest, .upn = &longest });
-    for (0..chat_count_max) |index| {
-        // Each key is the longest value, made unique by its last bytes.
+    for (0..person_count_max) |index| {
+        // Each key is the longest value, made unique by its last bytes. The index is below
+        // `person_count_max` (1024), at most 4 digits, so its 8 bytes always fit.
         var key: [value_size_max]u8 = longest;
         _ = std.fmt.bufPrint(key[value_size_max - 8 ..], "{d:0>8}", .{index}) catch unreachable;
         try cache.putPerson(&key, &longest);
-        try cache.putChat(&key, &longest);
+        if (index < chat_count_max) try cache.putChat(&key, &longest);
     }
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();

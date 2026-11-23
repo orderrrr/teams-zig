@@ -37,6 +37,8 @@ const name_lookup_count_limit = 40;
 
 comptime {
     std.debug.assert(conversation_count_limit <= std.math.maxInt(u16));
+    // A full listing rewrites the cache's name map, so the map's limit is the listing's size.
+    std.debug.assert(Cache.chat_count_max == conversation_count_limit);
     std.debug.assert(name_lookup_count_limit < requests_seconds_max);
     // Backing off never polls faster than normal, and a poll's reads fit the watchdog's limit.
     std.debug.assert(watch_poll_seconds <= watch_backoff_seconds_max);
@@ -723,15 +725,18 @@ fn watchErrorRetries(err: RunError, status: ?std.http.Status) bool {
 const FoundChat = union(enum) {
     /// The id as typed.
     given: []const u8,
-    /// From a listing of your newest chats, by name.
-    listed: []const u8,
-    /// From the cache's name map, with the name that picked it, to forget if it answers 404.
-    cached: struct { id: []const u8, name: []const u8 },
+    /// By name, from a listing of your newest chats, which just cached the name.
+    listed: Named,
+    /// By name, from the cache's name map.
+    cached: Named,
+
+    /// A chat's id and the name that picked it, to forget if the chat answers 404.
+    const Named = struct { id: []const u8, name: []const u8 };
 
     fn id(found: *const FoundChat) []const u8 {
         return switch (found.*) {
-            .given, .listed => |given_or_listed| given_or_listed,
-            .cached => |cached| cached.id,
+            .given => |given| given,
+            .listed, .cached => |named| named.id,
         };
     }
 };
@@ -779,7 +784,9 @@ fn findChat(
 
     switch (match) {
         .none => return error.ChatNameNotFound,
-        .one => |index| return .{ .listed = try arena.dupe(u8, list.items[index].id) },
+        .one => |index| return .{
+            .listed = .{ .id = try arena.dupe(u8, list.items[index].id), .name = name },
+        },
         .several => {
             started_at.store(requests_idle, .release);
             for (list.items, names) |*conversation, other_name| {
@@ -816,8 +823,9 @@ fn findChatCacheNames(
 fn forgetStaleChat(cache: *Cache, found: *const FoundChat, err: RunError) RunError {
     if (err != error.NotFound) return err;
     switch (found.*) {
-        .given, .listed => {},
-        .cached => |cached| cache.removeChat(cached.name),
+        .given => {},
+        // A listing caches the name too, so one that went stale since is forgotten as well.
+        .listed, .cached => |named| cache.removeChat(named.name),
     }
     return err;
 }
@@ -1512,8 +1520,8 @@ test "forgetStaleChat drops a cached name whose chat answers 404, and nothing el
     var cache: Cache = .init(std.testing.allocator);
     defer cache.deinit();
     try cache.putChat("Fake Standup", "19:fake-group@thread.v2");
-    const listed: FoundChat = .{ .listed = "19:fake-group@thread.v2" };
-    const kept = forgetStaleChat(&cache, &listed, error.NotFound);
+    const given: FoundChat = .{ .given = "19:fake-group@thread.v2" };
+    const kept = forgetStaleChat(&cache, &given, error.NotFound);
     try std.testing.expectEqual(error.NotFound, kept);
     try std.testing.expect(cache.chatId("fake standup") != null);
 
@@ -1526,4 +1534,11 @@ test "forgetStaleChat drops a cached name whose chat answers 404, and nothing el
     const forgotten = forgetStaleChat(&cache, &cached, error.NotFound);
     try std.testing.expectEqual(error.NotFound, forgotten);
     try std.testing.expectEqual(null, cache.chatId("fake standup"));
+
+    try cache.putChat("Fake Retro", "19:fake-retro@thread.v2");
+    const listed: FoundChat = .{
+        .listed = .{ .id = "19:fake-retro@thread.v2", .name = "fake retro" },
+    };
+    try std.testing.expectEqual(error.NotFound, forgetStaleChat(&cache, &listed, error.NotFound));
+    try std.testing.expectEqual(null, cache.chatId("fake retro"));
 }
