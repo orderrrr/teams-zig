@@ -31,7 +31,7 @@ const person_line_size_max: u32 = "person".len + 2 * (1 + value_size_max) + 1;
 const chat_line_size_max: u32 = "chat".len + 2 * (1 + value_size_max) + 1;
 
 /// The largest cache file read; a larger one counts as empty. A full cache at its longest lines
-/// is exactly this size, so a saved cache always loads (about 1 MiB).
+/// is exactly this size, so a saved cache always loads (586,180 bytes, about 572 KiB).
 pub const file_size_max: u32 = self_line_size_max + person_count_max * person_line_size_max +
     chat_count_max * chat_line_size_max;
 
@@ -39,7 +39,7 @@ comptime {
     std.debug.assert(self_line_size_max == 776);
     std.debug.assert(person_line_size_max == 521);
     std.debug.assert(chat_line_size_max == 519);
-    std.debug.assert(file_size_max < 2 * 1024 * 1024);
+    std.debug.assert(file_size_max == 586_180);
 }
 
 /// Your user, as `whoami` gives it. Borrowed from the cache.
@@ -179,12 +179,8 @@ pub fn write(cache: *const Cache, writer: *std.Io.Writer) std.Io.Writer.Error!vo
 /// not written.
 pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
     // A user who hasn't changed leaves the file as it is.
-    if (cache.self_user) |known| {
-        if (std.mem.eql(u8, known.mri, user.mri)) {
-            if (std.mem.eql(u8, known.name, user.name)) {
-                if (std.mem.eql(u8, known.upn, user.upn)) return;
-            }
-        }
+    if (cache.self_user) |*known| {
+        if (putSelfUnchanged(known, user)) return;
     }
     const arena = cache.arena.allocator();
     cache.changed = true;
@@ -193,6 +189,13 @@ pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
         .name = try arena.dupe(u8, user.name),
         .upn = try arena.dupe(u8, user.upn),
     };
+}
+
+/// Whether `user` is the `known` one, field for field.
+fn putSelfUnchanged(known: *const User, user: *const User) bool {
+    if (!std.mem.eql(u8, known.mri, user.mri)) return false;
+    if (!std.mem.eql(u8, known.name, user.name)) return false;
+    return std.mem.eql(u8, known.upn, user.upn);
 }
 
 /// Remembers the other person's name in the 1:1 chat `id`. Dropped past `person_count_max`, or
@@ -397,9 +400,11 @@ test "a full cache at its longest lines is file_size_max, and saves and loads wh
     defer cache.deinit();
     const longest: [value_size_max]u8 = @splat('v');
     try cache.putSelf(&.{ .mri = &longest, .name = &longest, .upn = &longest });
+    // Each key below is the longest value, made unique by an index in its last 8 bytes.
+    comptime std.debug.assert(value_size_max >= 8);
+    comptime std.debug.assert(person_count_max <= 99_999_999);
     for (0..person_count_max) |index| {
-        // Each key is the longest value, made unique by its last bytes. The index is below
-        // `person_count_max` (1024), at most 4 digits, so its 8 bytes always fit.
+        // The index fits its 8 bytes (asserted above).
         var key: [value_size_max]u8 = longest;
         _ = std.fmt.bufPrint(key[value_size_max - 8 ..], "{d:0>8}", .{index}) catch unreachable;
         try cache.putPerson(&key, &longest);

@@ -726,12 +726,13 @@ const FoundChat = union(enum) {
     /// The id as typed.
     given: []const u8,
     /// By name, from a listing of your newest chats, which just cached the name.
-    listed: Named,
+    listed: NamedChat,
     /// By name, from the cache's name map.
-    cached: Named,
+    cached: NamedChat,
 
-    /// A chat's id and the name that picked it, to forget if the chat answers 404.
-    const Named = struct { id: []const u8, name: []const u8 };
+    /// A chat's id and the name that picked it, to forget if the chat answers 404. Both are
+    /// owned by `findChat`'s arena.
+    const NamedChat = struct { id: []const u8, name: []const u8 };
 
     fn id(found: *const FoundChat) []const u8 {
         return switch (found.*) {
@@ -757,7 +758,7 @@ fn findChat(
 ) RunError!FoundChat {
     std.debug.assert(name.len > 0);
     if (cache.chatId(name)) |id| {
-        return .{ .cached = .{ .id = try arena.dupe(u8, id), .name = name } };
+        return .{ .cached = .{ .id = try arena.dupe(u8, id), .name = try arena.dupe(u8, name) } };
     }
     const user = try selfUser(client, cache);
 
@@ -785,7 +786,10 @@ fn findChat(
     switch (match) {
         .none => return error.ChatNameNotFound,
         .one => |index| return .{
-            .listed = .{ .id = try arena.dupe(u8, list.items[index].id), .name = name },
+            .listed = .{
+                .id = try arena.dupe(u8, list.items[index].id),
+                .name = try arena.dupe(u8, name),
+            },
         },
         .several => {
             started_at.store(requests_idle, .release);
@@ -819,7 +823,8 @@ fn findChatCacheNames(
 }
 
 /// Passes on `err` from a request to `found`'s chat, first forgetting the name that picked it
-/// if the cache gave a chat that answers 404. Nothing is retried; a rerun looks the name up.
+/// (from the cache or a listing, which cached it) if that chat answers 404. Nothing is retried;
+/// a rerun looks the name up.
 fn forgetStaleChat(cache: *Cache, found: *const FoundChat, err: RunError) RunError {
     if (err != error.NotFound) return err;
     switch (found.*) {
