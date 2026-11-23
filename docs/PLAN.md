@@ -471,14 +471,22 @@ Plan decisions:
 
 Parallel lookups. Paging sizes. A cache age limit. Caching message content. Any write but `send`.
 
-## M8: sign-in in the binary, and a release on GitHub (draft, not approved)
+## M8: sign-in in the binary, and a release on GitHub
 
 Asked for by the owner on 2026-11-23. Two goals:
 
 1. `teams-zig login` replaces `scripts/teams-token.fish`. A user then needs no fish, agent-browser or jq.
 2. A standalone binary on the GitHub releases page of `orderrrr/teams-zig`. A user downloads it and runs `login`, the CLI and `mcp` with no Zig compiler.
 
-This plan waits for the owner's approval. The questions at the end need answers first.
+Plan approved by the owner on 2026-11-23, with the answers below. M8 starts after M7 is resolved. The live sign-ins (M8.1, M8.10) and the push, tag and release (M8.15) each wait for the owner's go-ahead at that moment in the work session.
+
+Owner decisions (2026-11-23):
+
+- **Client id.** Sign in as the Teams desktop client, `1fec8e78-bce4-4aaf-ab1b-5451cc387264`. The owner knows security tools may flag these sign-ins.
+- **No automatic renewal in M8.** On `TokenExpired`, the CLI and the MCP server report the error as now; `teams-zig login` renews.
+- **Targets.** `aarch64-macos` only.
+- **Publish.** A local build plus `gh release create`, run by the owner. No GitHub Actions workflow.
+- **The script.** M8.11 deletes `scripts/teams-token.fish` and changes the line about it in `CLAUDE.md`.
 
 ### Protocol facts
 
@@ -519,9 +527,9 @@ From a copy of `HEAD` in a scratch directory; the repo was not changed.
 - **Hosts.** The Bearer token goes only to `teams.microsoft.com` (authz). The refresh token and the code go only to `login.microsoftonline.com`. Redirects are refused, as in M1.8.
 - **No secret is printed**: no token, code, verifier or refresh token in output, logs, errors, tests or chat. Microsoft's `error` and `error_description` (which hold `AADSTS` codes) are printed, since they hold no secret. Tests use fake values only.
 - **The cache file** (`~/Library/Caches/teams-zig/cache.txt`, M7) is deleted after each sign-in that stores a new token, as the script does after M7.10.
-- **Release targets.** `aarch64-macos` only, unless the owner wants Intel too (question 3). Minimum macOS is Zig 0.17's default, 15.0.
+- **Release targets.** `aarch64-macos` only (the owner's answer). Minimum macOS is Zig 0.17's default, 15.0.
 - **Release build.** A new `zig build release` step builds each release target with `-Doptimize=ReleaseSafe` into `zig-out/release/teams-zig-<target>`. When the target is macOS and not native, `build.zig` adds the SDK search paths from `std.zig.system.darwin.getSdk`. Plain `zig build` stays as now. The build machine needs Xcode or the Command Line Tools, as today.
-- **Publish.** A local build plus `gh release create`, run by the owner (question 4). Each release has one `teams-zig-<version>-<target>.tar.gz` per target (tar keeps the execute bit, which a raw browser download loses) and a `SHA256SUMS` file.
+- **Publish.** A local build plus `gh release create`, run by the owner (the owner's answer). Each release has one `teams-zig-<version>-<target>.tar.gz` per target (tar keeps the execute bit, which a raw browser download loses) and a `SHA256SUMS` file.
 - **Gatekeeper.** No Developer ID signing and no notarization in M8: both need a paid Apple Developer account. The README tells users to run `xattr -d com.apple.quarantine` on a browser download, or to use `curl`. *Not checked:* that a file from `curl` or `gh release download` gets no quarantine attribute.
 - The version becomes 0.11.0. M8 comes after M7 is resolved.
 
@@ -537,7 +545,7 @@ From a copy of `HEAD` in a scratch directory; the repo was not changed.
 8. **M8.8 keychain write on stdin.** Write items through `/usr/bin/security -i`. Tests use a throwaway service name and fake values, and delete what they write, as M1.4 does.
 9. **M8.9 `login` command.** Refresh token first, then the browser flow, or the device flow with `--device`. Store the three items, delete the cache file, and print "Signed in; region <region>; the skype token lasts <hours> hours." `usage` and the error hints name `teams-zig login` instead of the script. Tests of each path with fakes.
 10. **M8.10 live sign-in.** *Needs the owner's go-ahead in the work session; it writes the real keychain items.* `teams-zig login` (browser), then `whoami`; `teams-zig login` again (refresh token, no browser); then `teams-zig login --device`. If the org blocks a flow, record the `AADSTS` code. Report no token values.
-11. **M8.11 retire the script.** Delete `scripts/teams-token.fish`. README "Sign in" becomes `teams-zig login`. The first paragraph of `CLAUDE.md` names `teams-zig login` instead of the script (question 5).
+11. **M8.11 retire the script.** Delete `scripts/teams-token.fish`. README "Sign in" becomes `teams-zig login`. The first paragraph of `CLAUDE.md` names `teams-zig login` instead of the script (the owner's answer).
 12. **M8.12 release step.** `zig build release` as above. Check each binary with `file`, `codesign -dv` and `otool -L`, and run the native one.
 13. **M8.13 README install.** Download, check `SHA256SUMS`, `tar -xzf`, `xattr -d com.apple.quarantine`, put the binary on `PATH`, `teams-zig login`, and `claude mcp add` with the installed path.
 14. **M8.14 0.11.0 and gate.** Version, CHANGELOG, then the milestone gate.
@@ -553,12 +561,4 @@ From a copy of `HEAD` in a scratch directory; the repo was not changed.
 
 ### Out of M8
 
-Developer ID signing and notarization. Homebrew. A universal (`lipo`) binary. Linux or Windows. A GitHub Actions workflow. Renewal inside the CLI or MCP server on `TokenExpired` (question 2). Bearer-token APIs (search, profiles). Personal Microsoft accounts. Any write to Teams.
-
-### Questions for the owner
-
-1. **Client id.** Sign in as the Teams desktop client (`1fec8e78-…`), which security tools may flag as unusual? Recommended: yes. No own app registration can get an `api.spaces.skype.com` token without the org's admin consent (*not checked*), and the script already acts as the Teams web client. Cost: the org's security team may ask about the sign-ins.
-2. **Automatic renewal.** On `TokenExpired`, should the CLI and the MCP server renew with the refresh token and run a read once more? Recommended: not in M8. `login` renews in one command with no browser, and the MCP server already reads the keychain again after expiry (M7). Cost: one `teams-zig login` a day.
-3. **Intel Macs.** Ship `x86_64-macos` too? Recommended: no. It cannot be run on this Mac without installing Rosetta, so it would ship untested. Cost: Intel Mac users build from source.
-4. **Publish.** Local build and `gh release create`, or a GitHub Actions workflow on a tag? Recommended: local. This Mac already has Zig 0.17.1, the SDK and `gh`; releases are rare and each needs the owner anyway; a workflow needs a Zig download in CI and a `.github/` file to keep up. Cost: a release depends on the owner's Mac, and the build is not reproduced by a clean machine.
-5. **The script.** Delete `scripts/teams-token.fish` once `login` works, and change the `CLAUDE.md` line about it? Recommended: yes, so there is one way to sign in. Cost: no fallback if Microsoft's sign-in changes; it stays in git history.
+Developer ID signing and notarization. Homebrew. A universal (`lipo`) binary. Linux or Windows. A GitHub Actions workflow. Renewal inside the CLI or MCP server on `TokenExpired` (the owner's answer). Bearer-token APIs (search, profiles). Personal Microsoft accounts. Any write to Teams.
