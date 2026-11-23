@@ -10,7 +10,8 @@ const commands = @import("commands.zig");
 
 const Server = @This();
 
-/// Its buffer's size is the longest request line taken (see `request_size_max`).
+/// A request line must be shorter than its buffer (see `request_size_max`), which also holds
+/// the newline.
 reader: *Io.Reader,
 writer: *Io.Writer,
 /// Holds one request while it is answered, so nothing is allocated while serving; its size is
@@ -20,7 +21,7 @@ request_memory: []u8,
 output_buffer: []u8,
 runner: Runner,
 
-/// The longest request line, the size `main` gives the stdin reader's buffer.
+/// The size `main` gives the stdin reader's buffer: a request line and its newline.
 pub const request_size_max = 256 * 1024;
 
 /// What one request may use while it is parsed and answered. Requests are small objects; one
@@ -312,9 +313,9 @@ const tools_list = std.fmt.comptimePrint(
 ++
     \\"inputSchema":{{"type":"object","properties":{{"chat":{[chat_schema]s},
 ++
-    \\"text":{{"type":"string","minLength":1,"maxLength":{[text_size_max]d},
+    \\"text":{{"type":"string","minLength":1,"maxLength":{[send_text_size_max]d},
 ++
-    \\"description":"The message in Markdown, at most {[text_kib_max]d} KiB."}}
+    \\"description":"The message in Markdown, at most {[send_text_kib_max]d} KiB."}}
 ++
     \\}},"required":["chat","text"],"additionalProperties":false}},
 ++
@@ -329,8 +330,8 @@ const tools_list = std.fmt.comptimePrint(
     .messages_max = commands.message_count_limit,
     .messages_default = commands.message_count_default,
     .unread_max = commands.unread_read_count_limit,
-    .text_size_max = commands.send_text_size_max,
-    .text_kib_max = @divExact(commands.send_text_size_max, 1024),
+    .send_text_size_max = commands.send_text_size_max,
+    .send_text_kib_max = @divExact(commands.send_text_size_max, 1024),
     .chat_schema =
     \\{"type":"string","minLength":1,
     ++
@@ -350,7 +351,6 @@ pub fn serve(server: *Server) Error!void {
     // The server's event loop: it runs once per request line, for as long as the client keeps
     // stdin open, so it has no bound of its own. It ends when the reader ends or fails.
     while (true) {
-        var request_allocator: std.heap.FixedBufferAllocator = .init(server.request_memory);
         const line = server.reader.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => return error.ReadFailed,
             error.StreamTooLong => {
@@ -358,6 +358,7 @@ pub fn serve(server: *Server) Error!void {
                 continue;
             },
         } orelse return;
+        var request_allocator: std.heap.FixedBufferAllocator = .init(server.request_memory);
         try server.answer(request_allocator.allocator(), line);
     }
 }
@@ -365,28 +366,36 @@ pub fn serve(server: *Server) Error!void {
 /// Drops the rest of a line too long for the reader's buffer, and answers it as unreadable. A
 /// line past `skipped_line_size_max` ends the server: its input is not MCP.
 fn serveLongLine(server: *Server) Error!void {
-    const reader = server.reader;
-    _ = reader.discardDelimiterLimit('\n', .limited(skipped_line_size_max)) catch |err| {
+    const skip_limit: Io.Limit = .limited(skipped_line_size_max);
+    _ = server.reader.discardDelimiterLimit('\n', skip_limit) catch |err| {
         return switch (err) {
             error.ReadFailed => error.ReadFailed,
             error.StreamTooLong => error.RequestLineTooLong,
         };
     };
     // The newline, unless the input ended first; the last line still gets its answer.
-    if (reader.bufferedLen() > 0) reader.toss(1);
+    if (server.reader.bufferedLen() > 0) {
+        std.debug.assert(server.reader.buffered()[0] == '\n');
+        server.reader.toss(1);
+    }
     try server.answerError(null, .parse_error, "Parse error: the request line is too long");
 }
+
+/// Every option spelled out, for requests. Numbers are parsed, so a count or id is an integer
+/// only when written as one.
+const parse_options: std.json.ParseOptions = .{
+    .duplicate_field_behavior = .@"error",
+    .ignore_unknown_fields = true,
+    .max_value_len = null,
+    .allocate = .alloc_always,
+    .parse_numbers = true,
+};
 
 /// Answers one request line. `arena` holds what parsing it needs; running out of it fails only
 /// this request.
 fn answer(server: *Server, arena: std.mem.Allocator, line: []const u8) Error!void {
-    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, line, .{
-        .duplicate_field_behavior = .@"error",
-        .ignore_unknown_fields = true,
-        .max_value_len = null,
-        .allocate = .alloc_always,
-        .parse_numbers = true,
-    }) catch |err| switch (err) {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, line, parse_options);
+    const value = parsed catch |err| switch (err) {
         error.OutOfMemory => return server.answerOutOfMemory(null),
         else => return server.answerError(null, .parse_error, "Parse error"),
     };
@@ -412,11 +421,10 @@ fn answer(server: *Server, arena: std.mem.Allocator, line: []const u8) Error!voi
 /// (the client then decides whether to go on), and the tools capability.
 fn answerInitialize(params: *const std.json.ObjectMap) InitializeResult {
     const version: []const u8 = version: {
-        const asked = objectString(params, "protocolVersion") orelse {
-            break :version protocol_versions[0];
-        };
-        for (protocol_versions) |served| {
-            if (std.mem.eql(u8, asked, served)) break :version served;
+        if (objectString(params, "protocolVersion")) |asked| {
+            for (protocol_versions) |served| {
+                if (std.mem.eql(u8, asked, served)) break :version served;
+            }
         }
         break :version protocol_versions[0];
     };
@@ -459,8 +467,8 @@ fn answerCall(
 /// Runs `command`, and gives its text as the result, or on failure its text and then its hint.
 /// The result borrows `output_buffer`.
 fn answerCallRun(server: *Server, command: *const commands.Command) CallResult {
-    const text_size_max = server.output_buffer.len - hint_size_max;
-    var output: Io.Writer = .fixed(server.output_buffer[0..text_size_max]);
+    const output_text_size_max = server.output_buffer.len - hint_size_max;
+    var output: Io.Writer = .fixed(server.output_buffer[0..output_text_size_max]);
     const failure = server.runner.run(command, &output) orelse {
         return .{ .text = output.buffered(), .is_error = false };
     };
@@ -471,7 +479,7 @@ fn answerCallRun(server: *Server, command: *const commands.Command) CallResult {
         var too_large: Io.Writer = .fixed(server.output_buffer[0..hint_size_max]);
         too_large.print(
             "the output is larger than teams-zig returns ({d} bytes); ask for fewer",
-            .{text_size_max},
+            .{output_text_size_max},
         ) catch unreachable;
         return .{ .text = too_large.buffered(), .is_error = true };
     }
@@ -714,9 +722,9 @@ test "a line longer than the reader's buffer gets -32700 and is skipped to its n
 }
 
 test "a request that needs more than the request memory gets -32603" {
-    const many_items: [test_request_memory_size / 2]u8 = @splat('1');
-    var items: [many_items.len * 2]u8 = undefined;
-    for (0..many_items.len) |index| {
+    const item_count = test_request_memory_size / 2;
+    var items: [item_count * 2]u8 = undefined;
+    for (0..item_count) |index| {
         items[index * 2] = '1';
         items[index * 2 + 1] = ',';
     }
@@ -863,13 +871,7 @@ fn parseToolCommand(tool: Tool, arguments_json: []const u8) !?commands.Command {
         std.json.Value,
         arena_state.allocator(),
         arguments_json,
-        .{
-            .duplicate_field_behavior = .@"error",
-            .ignore_unknown_fields = true,
-            .max_value_len = null,
-            .allocate = .alloc_always,
-            .parse_numbers = true,
-        },
+        parse_options,
     );
     const command = tool.command(&value.object) orelse return null;
     return switch (command) {
@@ -1032,4 +1034,24 @@ test "every command error's hint fits in the room kept for it" {
         try commands.writeErrorHint(&hint, @errorCast(err), .forbidden);
         try std.testing.expect(hint.buffered().len > 0);
     }
+}
+
+test "a line longer than the skip limit stops the server, with no answer" {
+    const source = try std.testing.allocator.alloc(u8, skipped_line_size_max + 1);
+    defer std.testing.allocator.free(source);
+    @memset(source, 'x');
+
+    var buffer: [64]u8 = undefined;
+    var reader: SliceReader = .{
+        .source = source,
+        .interface = .{
+            .vtable = &.{ .stream = SliceReader.stream },
+            .buffer = &buffer,
+            .seek = 0,
+            .end = 0,
+        },
+    };
+    var runner: FakeRunner = .{ .output = "", .failure = null, .runs_allowed = false };
+    const result = expectServed(&reader.interface, &runner, 64, "");
+    try std.testing.expectError(error.RequestLineTooLong, result);
 }

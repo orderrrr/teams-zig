@@ -134,8 +134,14 @@ const McpRunner = struct {
         requests_started_at.store(Io.Clock.awake.now(runner.io).toSeconds(), .release);
         // A failed command leaves the clock running; the server waits next, which mustn't count.
         defer requests_started_at.store(requests_idle, .release);
-        const started_at = &requests_started_at;
-        command.run(&client, runner.io, &clock, output, runner.stderr, started_at) catch |err| {
+        command.run(
+            &client,
+            runner.io,
+            &clock,
+            output,
+            runner.stderr,
+            &requests_started_at,
+        ) catch |err| {
             // Client sets response_status before it returns UnexpectedStatus.
             if (err == error.UnexpectedStatus) std.debug.assert(client.response_status != null);
             return .{ .err = err, .status = client.response_status };
