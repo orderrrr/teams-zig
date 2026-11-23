@@ -67,7 +67,7 @@ pub fn login(
 /// A one-line hint, with no line break, for every way `login` can fail. No hint holds a value
 /// agent-browser gave, since its output holds the token.
 pub fn writeHint(writer: *std.Io.Writer, err: LoginError) std.Io.Writer.Error!void {
-    const seconds = std.fmt.comptimePrint("{d}", .{wait_seconds_default});
+    const wait_seconds = std.fmt.comptimePrint("{d}", .{wait_seconds_default});
     const run_seconds = std.fmt.comptimePrint("{d}", .{ChildAgentBrowser.run_seconds_default});
     const hint = switch (err) {
         error.AgentBrowserMissing => "agent-browser isn't on PATH; install it with " ++
@@ -83,9 +83,9 @@ pub fn writeHint(writer: *std.Io.Writer, err: LoginError) std.Io.Writer.Error!vo
         error.UnexpectedOutput => "agent-browser's request list had an unexpected shape; " ++
             "teams-zig is tested with agent-browser 0.43.0 (see `agent-browser --version`)",
         error.TokenTooLong => "the skype token was longer than teams-zig accepts",
-        error.NoTokenSeen => "no skype token seen in " ++ seconds ++
+        error.NoTokenSeen => "no skype token seen in " ++ wait_seconds ++
             " seconds; did sign-in finish?",
-        error.NoRegionSeen => "no Chat Service region seen in " ++ seconds ++ " seconds",
+        error.NoRegionSeen => "no Chat Service region seen in " ++ wait_seconds ++ " seconds",
         error.UnstorableValue => "the skype token has characters the keychain tool can't take",
         error.ItemNotFound, error.KeychainReadFailed, error.KeychainWriteFailed => "couldn't " ++
             "write the teams-zig items to the login keychain; is it locked?",
@@ -244,7 +244,8 @@ pub const ChildAgentBrowser = struct {
     io: std.Io,
     /// Tests run other programs in its place.
     program: []const u8,
-    /// How long one run may take; past it, the daemon is stuck (say, on a locked profile).
+    /// How long one run may take to give all its output; past it, the daemon is stuck (say, on
+    /// a locked profile).
     run_seconds_max: u32,
 
     /// The most arguments one run takes (`open` with its options is the longest).
@@ -279,10 +280,12 @@ pub const ChildAgentBrowser = struct {
             .expand_arg0 = .no_expand,
             .progress_node = .none,
             .create_no_window = true,
-            .timeout = .{ .duration = .{
+            // A deadline, not a duration: std restarts a duration at each read, so output now
+            // and then would extend it. Waiting for the exit after the output ends has no limit.
+            .timeout = .{ .deadline = .fromNow(child.io, .{
                 .raw = .fromSeconds(child.run_seconds_max),
                 .clock = .awake,
-            } },
+            }) },
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.FileNotFound => return error.AgentBrowserMissing,
@@ -345,6 +348,7 @@ const parse_options: std.json.ParseOptions = .{
     .ignore_unknown_fields = true,
     .max_value_len = output_size_max,
     .allocate = .alloc_if_needed,
+    .parse_numbers = true,
 };
 
 const token_body_prefix = "skypetoken=";
@@ -569,6 +573,10 @@ test "ChildAgentBrowser tells a missing program, a failed run and too much outpu
     );
     const stuck = shell.interface().run(gpa, &.{ "-c", "sleep 5" });
     try std.testing.expectError(error.AgentBrowserTimedOut, stuck);
+    // Output now and then doesn't extend the limit: it is on the whole run.
+    const trickle_script = "for i in 1 2 3 4; do echo x; sleep 0.4; done";
+    const trickle = shell.interface().run(gpa, &.{ "-c", trickle_script });
+    try std.testing.expectError(error.AgentBrowserTimedOut, trickle);
 }
 
 /// Gives scripted outputs, one per run, and records each run's arguments.
@@ -706,6 +714,19 @@ test "signIn reports a failed open, a closed window and output it can't read" {
     try std.testing.expectEqualStrings("--session teams-zig close", garbled.runs.items[2]);
 }
 
+test "signIn stops at the first poll that shows both values" {
+    var fake: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = fake_found } } };
+    defer fake.deinit();
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+
+    var signed_in = try testSignIn(&fake, &discard.writer);
+    defer signed_in.deinit();
+
+    try std.testing.expectEqualStrings("FAKE-SIGNED-IN", signed_in.token);
+    // open, one poll, close.
+    try std.testing.expectEqual(3, fake.runs.items.len);
+}
+
 test "login signs in, stores the token and region, deletes the cache and says so" {
     var tmp = std.testing.tmpDir(.{
         .access_sub_paths = true,
@@ -730,8 +751,8 @@ test "login signs in, stores the token and region, deletes the cache and says so
 
     var service_buffer: [64]u8 = undefined;
     const service_name = keychain.testServiceName(&service_buffer);
-    defer keychain.testDelete(.{ .service_name = service_name, .account = "skype-token" });
-    defer keychain.testDelete(.{ .service_name = service_name, .account = "region" });
+    defer keychain.testDelete(&.{ .service_name = service_name, .account = "skype-token" });
+    defer keychain.testDelete(&.{ .service_name = service_name, .account = "region" });
 
     var fake: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = fake_found } } };
     defer fake.deinit();
@@ -746,13 +767,13 @@ test "login signs in, stores the token and region, deletes the cache and says so
         .poll_count_max = 3,
     });
 
-    const token = try keychain.read(std.testing.allocator, std.testing.io, .{
+    const token = try keychain.read(std.testing.allocator, std.testing.io, &.{
         .service_name = service_name,
         .account = "skype-token",
     });
     defer std.testing.allocator.free(token);
     try std.testing.expectEqualStrings("FAKE-SIGNED-IN", token);
-    const region = try keychain.read(std.testing.allocator, std.testing.io, .{
+    const region = try keychain.read(std.testing.allocator, std.testing.io, &.{
         .service_name = service_name,
         .account = "region",
     });
@@ -789,17 +810,4 @@ test "writeHint names the fix and never a value agent-browser gave" {
             "then run `agent-browser install`",
         writer.buffered(),
     );
-}
-
-test "signIn stops at the first poll that shows both values" {
-    var fake: FakeAgentBrowser = .{ .outputs = &.{ .{ .text = "" }, .{ .text = fake_found } } };
-    defer fake.deinit();
-    var discard: std.Io.Writer.Discarding = .init(&.{});
-
-    var signed_in = try testSignIn(&fake, &discard.writer);
-    defer signed_in.deinit();
-
-    try std.testing.expectEqualStrings("FAKE-SIGNED-IN", signed_in.token);
-    // open, one poll, close.
-    try std.testing.expectEqual(3, fake.runs.items.len);
 }

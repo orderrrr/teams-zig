@@ -423,7 +423,7 @@ pub fn readCredentials(
         }
     }
 
-    const token = try keychain.read(gpa, io, .{
+    const token = try keychain.read(gpa, io, &.{
         .service_name = keychain.service,
         .account = "skype-token",
     });
@@ -435,7 +435,7 @@ pub fn readCredentials(
     // An empty item means no real token was ever stored.
     if (token.len == 0) return error.ItemNotFound;
 
-    const region_name = keychain.read(gpa, io, .{
+    const region_name = keychain.read(gpa, io, &.{
         .service_name = keychain.service,
         .account = "region",
     }) catch |err| switch (err) {

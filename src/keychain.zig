@@ -28,15 +28,19 @@ pub const ItemName = struct {
 
 /// Reads one item. Owned by the caller. No time limit: when the keychain is locked, `security`
 /// waits for the user to unlock it in a dialog.
-pub fn read(gpa: std.mem.Allocator, io: Io, name: ItemName) ReadError![]u8 {
+pub fn read(gpa: std.mem.Allocator, io: Io, name: *const ItemName) ReadError![]u8 {
     std.debug.assert(name.service_name.len > 0);
     std.debug.assert(name.account.len > 0);
-    const service_name = name.service_name;
-    const account = name.account;
     const result = std.process.run(gpa, io, .{
         .exe = .detect,
         .argv = &.{
-            security_path, "find-generic-password", "-s", service_name, "-a", account, "-w",
+            security_path,
+            "find-generic-password",
+            "-s",
+            name.service_name,
+            "-a",
+            name.account,
+            "-w",
         },
         .stderr_limit = .limited(value_size_max),
         .stdout_limit = .limited(value_size_max),
@@ -131,7 +135,7 @@ pub fn write(
     }
 
     for (items) |item| {
-        const stored = try read(gpa, io, .{
+        const stored = try read(gpa, io, &.{
             .service_name = service_name,
             .account = item.account,
         });
@@ -190,7 +194,7 @@ pub fn testServiceName(buffer: *[64]u8) []const u8 {
 
 /// Deletes a test item. A failure is only warned about, so it can't hide the test's own result,
 /// but the leftover item is named so it can be deleted by hand.
-pub fn testDelete(name: ItemName) void {
+pub fn testDelete(name: *const ItemName) void {
     const result = std.process.run(std.testing.allocator, std.testing.io, .{
         .exe = .detect,
         .argv = &.{
@@ -227,8 +231,8 @@ pub fn testDelete(name: ItemName) void {
 test "write stores each item, replacing an older value, and read gives it back" {
     var buffer: [64]u8 = undefined;
     const service_name = testServiceName(&buffer);
-    defer testDelete(.{ .service_name = service_name, .account = "fake-token" });
-    defer testDelete(.{ .service_name = service_name, .account = "fake-region" });
+    defer testDelete(&.{ .service_name = service_name, .account = "fake-token" });
+    defer testDelete(&.{ .service_name = service_name, .account = "fake-region" });
 
     try write(std.testing.allocator, std.testing.io, service_name, &.{
         .{ .account = "fake-token", .value = "FAKE.old-1" },
@@ -238,13 +242,13 @@ test "write stores each item, replacing an older value, and read gives it back" 
         .{ .account = "fake-region", .value = "emea" },
     });
 
-    const token = try read(std.testing.allocator, std.testing.io, .{
+    const token = try read(std.testing.allocator, std.testing.io, &.{
         .service_name = service_name,
         .account = "fake-token",
     });
     defer std.testing.allocator.free(token);
     try std.testing.expectEqualStrings("FAKE.new-2_=+/%", token);
-    const region = try read(std.testing.allocator, std.testing.io, .{
+    const region = try read(std.testing.allocator, std.testing.io, &.{
         .service_name = service_name,
         .account = "fake-region",
     });
