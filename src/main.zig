@@ -4,6 +4,7 @@ const teams = @import("teams");
 const chat = teams.chat;
 const core_foundation = teams.macos.core_foundation;
 const commands = @import("commands.zig");
+const Server = @import("Server.zig");
 const Command = commands.Command;
 const Clock = commands.Clock;
 const connect = commands.connect;
@@ -130,4 +131,5 @@ test "requestsStalled fires only after the limit, and never while idle" {
 
 test {
     _ = commands;
+    _ = Server;
 }
