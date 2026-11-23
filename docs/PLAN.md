@@ -347,7 +347,7 @@ Plan decisions:
 - `initialize` answers with the client's protocol version if it is `2025-06-18` or `2025-11-25`, and with `2025-11-25` otherwise. Both versions have no JSON-RPC batches, and the server uses no feature that differs between them. A JSON array (a batch) gets `-32600`.
 - The server announces only the `tools` capability. No resources, prompts, logging, progress or cancellation.
 - Tool annotations: the four reads have `readOnlyHint: true`. `send` has `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false` and `openWorldHint: true`, so a client can ask before each send.
-- Limits: a request line is at most 256 KiB (16 KiB of text can grow about six times with JSON escapes). A longer line gets `-32700` and is skipped up to its newline. A tool's text is at most 1 MiB, written into a fixed buffer; more fails the call with a hint to ask for fewer messages.
+- Limits: a request line is shorter than 256 KiB (16 KiB of text can grow about six times with JSON escapes). A longer line gets `-32700` and is skipped up to its newline; a line past 64 MiB stops the server, since its input is not MCP. Each request is parsed in a fixed 2 MiB of memory, and one that needs more gets `-32603`. A tool's text is at most 1 MiB, written into a fixed buffer; more fails the call with a hint to ask for fewer.
 - Calls run one at a time, in the order they arrive. End of stdin ends the server with exit code 0.
 - stdout carries only protocol messages. stderr carries only the watchdog's line.
 - The watchdog starts once with the server. It counts only time spent waiting on the Chat Service, so time spent waiting for the next request does not count. A stall past 60 seconds ends the server, as it ends the CLI.
@@ -377,3 +377,9 @@ After the gate, the owner registers the server in Claude Code; agents do not cha
 ### Out of M6
 
 `watch` as a tool, and any server-to-client messages (notifications, progress, logging). Resources and prompts. Cancelling a call. Running calls in parallel. HTTP transport. Any write but `send`.
+
+## M6 gate
+
+- **Round 1** (mr-review, STYLE.md and Tiger Style reviews of `c918fcf..32d024a`). STYLE: helpers carry their caller's name (`serveLongLine`, `answerInitialize`, `answerCallRun`, `Tool.commandCount`), `run_fn`, one path for a missing or non-string field, `Runner.run` as a method. Tiger Style: lines at most 100 columns; no allocation while serving (a static 2 MiB request memory, `-32603` when a request needs more, the hint written after the text in room kept for it); all parse options explicit; pair assertions on `watch` and on `UnexpectedStatus`'s status; comptime asserts on the request size and on `Tool`'s names; `*const` for `Id` and `std.json.Value`; `@divExact`; unit names last; types before methods; the event loop marked unbounded and the skip bounded at 64 MiB; a test under 70 lines. mr-review: a test that a `tools/call` notification runs nothing, and the one-session test the plan asked for in M6.9. `main`'s tests now compile `serveMcp`, which they did not reach before.
+- **Round 2** (reviews of `32d024a..99c7c64`). STYLE: one fallback in `answerInitialize`. Tiger Style: two aliases gone, `text_size_max` no longer means two things, the request allocator made where it is used, the skipped newline asserted. mr-review: one `parse_options` for the server and its tests, a test that a line past 64 MiB stops the server, and these limits in the plan.
+
