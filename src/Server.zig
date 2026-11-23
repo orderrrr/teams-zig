@@ -964,6 +964,9 @@ test "tools/call answers bad arguments with isError and the usage, a bad call wi
         \\{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fake"}}
         \\{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}}
         \\{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"chats","arguments":[]}}
+        \\{"jsonrpc":"2.0","id":5,"method":"tools/call",
+    ++
+        \\"params":{"name":"send","arguments":{"chat":"48:notes","text":"fake\r"}}}
         \\
     ,
         \\{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text",
@@ -976,6 +979,13 @@ test "tools/call answers bad arguments with isError and the usage, a bad call wi
         \\{"jsonrpc":"2.0","id":4,"error":{"code":-32602,
     ++
         \\"message":"Invalid params: a tool's arguments are an object"}}
+        \\{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text",
+    ++
+        \\"text":"bad arguments for send; it takes chat: its exact name or id;
+    ++
+        \\ text: Markdown, at most 16 KiB of UTF-8, not only whitespace,
+    ++
+        \\ with no control bytes but tab and newline"}],"isError":true}}
         \\
     );
 }

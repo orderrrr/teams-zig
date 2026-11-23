@@ -241,8 +241,10 @@ pub const Command = union(enum) {
         if (chat_text.len == 0) return null;
         if (std.mem.trim(u8, text, &std.ascii.whitespace).len == 0) return null;
         for (text) |byte| {
-            if (byte == '\t' or byte == '\n') continue;
-            if (std.ascii.isControl(byte)) return null;
+            switch (byte) {
+                '\t', '\n' => {},
+                else => if (std.ascii.isControl(byte)) return null,
+            }
         }
         return .{ .send = .{ .chat = .parse(chat_text), .text = text } };
     }
@@ -1304,10 +1306,13 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     try std.testing.expectEqualStrings("fake", send.text);
     try std.testing.expectEqual(null, Command.initSend("", "fake"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", " \n"));
-    // Tab and newline stay; other control bytes, which argv can't carry but JSON can, don't.
+    // Tab and newline stay; every other control byte is refused, from argv or JSON. Bytes from
+    // space up, UTF-8 included, pass.
     try std.testing.expect(Command.initSend("48:notes", "fake\tone\nfake two") != null);
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x00"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\r\n"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x1b[31m"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x7f"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\x1f"));
+    try std.testing.expect(Command.initSend("48:notes", "fake \x20 é") != null);
 }
