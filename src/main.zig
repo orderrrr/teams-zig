@@ -121,8 +121,9 @@ var mcp_request_memory: [Server.request_memory_size_max]u8 = undefined;
 var mcp_output_buffer: [Server.output_size_max]u8 = undefined;
 
 /// Runs each tool's command with one client kept across calls, so its connection is reused. The
-/// keychain is read again only when there is no client: at the first call, and after a token or
-/// connection failure drops it. A read tool then runs once more; `send` never does.
+/// token and region are read for every call and compared with the kept client's in memory; a
+/// change (a new sign-in) drops the client. A token or connection failure drops it too; a read
+/// tool then runs once more, and `send` never does.
 const McpRunner = struct {
     gpa: std.mem.Allocator,
     io: Io,
@@ -197,12 +198,23 @@ const McpRunner = struct {
 
     fn runOnce(runner: *McpRunner, command: *const Command, output: *Io.Writer) ?Server.Failure {
         const now_seconds = Io.Clock.awake.now(runner.io).toSeconds();
+        // Read for every call, so a token a new sign-in stored is used at once: a kept client
+        // with another token or region is dropped, and the new one forgets the cached user.
+        var credentials = commands.readCredentials(
+            runner.gpa,
+            runner.io,
+            runner.environment,
+        ) catch |err| return .{ .err = err, .status = null };
+        defer credentials.deinit();
+        if (runner.kept) |*kept| {
+            if (!runOnceSameCredentials(&kept.client, &credentials)) runner.dropClient();
+        }
         if (command.* == .send) {
             if (runner.kept) |*kept| {
                 if (sendsFresh(now_seconds, kept.used_at_seconds)) runner.dropClient();
             }
         }
-        const client = runner.connected(now_seconds) catch |err| {
+        const client = runner.connected(now_seconds, &credentials) catch |err| {
             return .{ .err = err, .status = null };
         };
         defer if (runner.kept) |*kept| {
@@ -262,19 +274,34 @@ const McpRunner = struct {
         return now_seconds -| used_at_seconds > send_idle_seconds_max;
     }
 
-    /// The kept client, connecting first (and reading the keychain) if there is none.
-    fn connected(runner: *McpRunner, now_seconds: i64) commands.CommandError!*chat.Client {
+    /// Whether the kept `client` still sends the token and region just read: if not, a new
+    /// sign-in stored others, and the client is dropped. Compared in memory only.
+    fn runOnceSameCredentials(
+        client: *const chat.Client,
+        credentials: *const commands.Credentials,
+    ) bool {
+        if (client.region != credentials.region) return false;
+        return client.usesToken(credentials.token);
+    }
+
+    /// The kept client, connecting first with `credentials` if there is none.
+    fn connected(
+        runner: *McpRunner,
+        now_seconds: i64,
+        credentials: *const commands.Credentials,
+    ) commands.CommandError!*chat.Client {
         if (runner.kept) |*kept| return &kept.client;
         runner.kept = .{
             .client = undefined,
             .used_at_seconds = now_seconds,
             .cached_self_stale = true,
         };
-        connect(&runner.kept.?.client, runner.gpa, runner.io, runner.environment) catch |err| {
+        const client = &runner.kept.?.client;
+        client.init(runner.gpa, runner.io, credentials.region, credentials.token) catch |err| {
             runner.kept = null;
             return err;
         };
-        return &runner.kept.?.client;
+        return client;
     }
 };
 
@@ -472,4 +499,25 @@ test "the CLI says on stderr when the cache can't be saved" {
     const line_start = "teams-zig: couldn't save the cache: ";
     try std.testing.expect(std.mem.startsWith(u8, out.written(), line_start));
     try std.testing.expect(std.mem.endsWith(u8, out.written(), "\n"));
+}
+
+test "McpRunner keeps its client only for the same token and region" {
+    var client: chat.Client = undefined;
+    try client.init(std.testing.allocator, std.testing.io, .emea, "fake-token");
+    defer client.deinit();
+
+    const token = try std.testing.allocator.dupe(u8, "fake-token");
+    var credentials: commands.Credentials = .{
+        .gpa = std.testing.allocator,
+        .token = token,
+        .region = .emea,
+    };
+    defer credentials.deinit();
+    try std.testing.expect(McpRunner.runOnceSameCredentials(&client, &credentials));
+
+    credentials.region = .amer;
+    try std.testing.expect(!McpRunner.runOnceSameCredentials(&client, &credentials));
+    credentials.region = .emea;
+    credentials.token[0] = 'F';
+    try std.testing.expect(!McpRunner.runOnceSameCredentials(&client, &credentials));
 }
