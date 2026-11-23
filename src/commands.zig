@@ -387,7 +387,7 @@ fn runChats(
     defer names_arena.deinit();
 
     const arena = names_arena.allocator();
-    const names = try otherPersonNames(client, arena, list.items, user.mri);
+    const names = try otherPersonNames(client, cache, arena, list.items, user.mri);
     started_at.store(requests_idle, .release);
 
     for (list.items, names) |*conversation, name| {
@@ -740,12 +740,13 @@ fn findChat(
     for (list.items, names) |*conversation, *other_name| {
         other_name.* = switch (nameSource(conversation, user.mri)) {
             .known => |known| known,
-            .none, .lookup => null,
+            .lookup => cache.personName(conversation.id),
+            .none => null,
         };
     }
     var match = matchChat(list.items, names, name);
     if (match == .none) {
-        names = try otherPersonNames(client, arena, list.items, user.mri);
+        names = try otherPersonNames(client, cache, arena, list.items, user.mri);
         match = matchChat(list.items, names, name);
     }
 
@@ -820,9 +821,11 @@ fn chatName(conversation: *const chat.Conversation, other_name: ?[]const u8) ?[]
 }
 
 /// The other person's name for each 1:1 chat in `conversations`, owned by `arena`; null where
-/// there's none to show. At most `name_lookup_count_limit` chats get a lookup, one request each.
+/// there's none to show. A cached name saves a lookup; past the cache, at most
+/// `name_lookup_count_limit` chats get a lookup, one request each. Every name found is cached.
 fn otherPersonNames(
     client: *chat.Client,
+    cache: *Cache,
     arena: std.mem.Allocator,
     conversations: []const chat.Conversation,
     self_mri: []const u8,
@@ -834,11 +837,15 @@ fn otherPersonNames(
             .none => null,
             .known => |known| try arena.dupe(u8, known),
             .lookup => lookup: {
+                if (cache.personName(conversation.id)) |cached| {
+                    break :lookup try arena.dupe(u8, cached);
+                }
                 if (name_lookup_count_left == 0) break :lookup null;
                 name_lookup_count_left -= 1;
                 break :lookup try lookUpOtherName(client, arena, conversation.id, self_mri);
             },
         };
+        if (name.*) |found| try cache.putPerson(conversation.id, found);
     }
     return names;
 }
@@ -1352,4 +1359,41 @@ test "selfUser takes your user from the cache without a request" {
     try std.testing.expectEqualStrings("8:orgid:fake-self", user.mri);
     try std.testing.expectEqualStrings("Fake Self", user.name);
     try std.testing.expectEqual(null, client.response_status);
+}
+
+test "otherPersonNames takes cached names, with no lookup, and caches the names it knows" {
+    var client: chat.Client = undefined;
+    // A fake token: a lookup would fail and set `response_status`.
+    try client.init(std.testing.allocator, std.testing.io, .emea, "fake-token");
+    defer client.deinit();
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const self_mri = "8:orgid:fake-self";
+    const template: chat.Conversation = .{
+        .id = "19:fake-self_fake-a@unq.gbl.spaces",
+        .kind = .chat,
+        .topic = null,
+        .last_message_at = null,
+        .last_sender = self_mri,
+        .last_sender_name = "Fake Self",
+        .last_message_id = null,
+        .read_up_to_id = null,
+    };
+    var conversations: [2]chat.Conversation = @splat(template);
+    // You wrote last here, so its name needs a lookup, unless it is cached.
+    try cache.putPerson(conversations[0].id, "Fake A");
+    // The other person wrote last here, so the name is known, and gets cached.
+    conversations[1].id = "19:fake-self_fake-b@unq.gbl.spaces";
+    conversations[1].last_sender = "8:orgid:fake-b";
+    conversations[1].last_sender_name = "Fake B";
+
+    const arena = arena_state.allocator();
+    const names = try otherPersonNames(&client, &cache, arena, &conversations, self_mri);
+    try std.testing.expectEqualStrings("Fake A", names[0].?);
+    try std.testing.expectEqualStrings("Fake B", names[1].?);
+    try std.testing.expectEqual(null, client.response_status);
+    try std.testing.expectEqualStrings("Fake B", cache.personName(conversations[1].id).?);
 }
