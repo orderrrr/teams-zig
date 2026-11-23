@@ -489,6 +489,10 @@ On 2026-11-23, reads only, three runs each, with a temporary `HOME` holding a wa
 
 The CLI still pays about 0.7 s per run to connect; the front door (M7.1–M7.3) is meant to cut that.
 
+### M7.13 live send
+
+On 2026-11-23, with the owner's go-ahead in the work session ("send to notes whenever you need"): one `send` to `48:notes`, text "M7 front-door send check: **bold**, `code`.", through the front door, your user from the cache. By id, not by name: the notes chat has no name (`chats` shows "(no topic)"), so it can't be named; the name path was checked live with `messages <name>` (M7.9). The message arrived once at 17:34, read back with `messages 48:notes 3` as typed. The command's own output wasn't captured by the agent's shell, so its "Sent" line and exit code weren't seen; nothing was retried.
+
 ### Out of M7
 
 Parallel lookups. Paging sizes. A cache age limit. Caching message content. Any write but `send`.

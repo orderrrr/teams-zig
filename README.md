@@ -18,6 +18,8 @@ scripts/teams-token.fish
 
 The script signs in through agent-browser. It stores the skype token and region in the login keychain.
 
+teams-zig keeps a cache in `~/Library/Caches/teams-zig/cache.txt`: your user, the names in 1:1 chats and which chat each name picks. The cache holds no token. The script deletes it at each sign-in.
+
 ## Use it as an MCP server in Claude Code
 
 1. Build with `zig build`.

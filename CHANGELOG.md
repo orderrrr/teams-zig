@@ -2,6 +2,15 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.10.0 (M7): faster reads and sends
+
+- Requests go through the Teams front door (`teams.microsoft.com/api/chatsvc/{region}/v1`), an edge near you, not the Chat Service's own host. A new connection costs about 0.15 s, not 0.7 s.
+- Lists come gzipped: the 100-chat list drops from 306 KB to 68 KB.
+- teams-zig remembers your user, the other person's name in 1:1 chats, and which chat each name picks, in `~/Library/Caches/teams-zig/cache.txt` (readable only by you; no token). `scripts/teams-token.fish` deletes it at each sign-in. `whoami` always asks the service.
+- A name the cache knows takes one request for `messages` and `send`. If its chat answers 404, the name is forgotten and the command fails; run it again to look the name up. Nothing is retried.
+- The MCP server keeps one connection across tool calls and reads the keychain again only after the token expires. A read tool runs once more after a token or connection failure; `send` never does. A send on a connection idle for more than 30 s starts on a fresh one.
+- Measured: `unread` 2.3–2.7 s before, 0.7–1.5 s now; MCP tool calls 0.5–0.9 s after the first.
+
 ## 0.9.0 (M6): an MCP server
 
 - `teams-zig mcp` serves `whoami`, `chats`, `messages`, `unread` and `send` as MCP tools over stdin and stdout, so an agent such as Claude Code can use them. Each tool takes the command's arguments as JSON (`chats {count}`, `messages {chat, count}`, `send {chat, text}`) and returns the text the command prints. `watch` is not a tool, since it never ends.
