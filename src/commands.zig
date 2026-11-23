@@ -1318,5 +1318,6 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     // U+00A0, the first character after them, passes.
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x9b31m"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x80"));
+    try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x9f"));
     try std.testing.expect(Command.initSend("48:notes", "fake\xc2\xa0") != null);
 }

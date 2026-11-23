@@ -406,4 +406,5 @@ Owner's answers to the round-6 report (2026-11-23):
 - **Round 9:** all three reviews found nothing new. Gate passed again. Two owner questions from round 7 are open (the CLI's usage line for a refused send; C1 control characters in `initSend`), and the M6.12 live send waits for the owner's go-ahead in the work session.
 
 Owner's answers to the round-7 questions (2026-11-23): the CLI's usage line for `send` gives its rules (at most 16 KiB of UTF-8, with no control characters but tab and newline); `Command.initSend` uses `chat.text.controlLenAt`, now pub, so UTF-8 C1 controls are refused too.
+- **Round 10** (reviews of `abd2256..5a6072b`, the round-7 answers applied). Tiger Style: a test refuses U+009F, the last C1 control, so both ends of the range are pinned. mr-review and STYLE: nothing new. Deferred, for the owner: nothing checks that argv text is valid UTF-8, so a lone 8-bit C1 byte (`0x9B`) from the CLI passes, as `messages` would show it.
 
