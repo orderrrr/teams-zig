@@ -2,6 +2,14 @@
 
 One entry per milestone. The version lives in `build.zig.zon`.
 
+## 0.9.0 (M6): an MCP server
+
+- `teams-zig mcp` serves `whoami`, `chats`, `messages`, `unread` and `send` as MCP tools over stdin and stdout, so an agent such as Claude Code can use them. Each tool takes the command's arguments as JSON (`chats {count}`, `messages {chat, count}`, `send {chat, text}`) and returns the text the command prints. `watch` is not a tool, since it never ends.
+- A failed call returns the command's hint, as the CLI prints it, marked as an error. Wrong arguments return what the tool takes.
+- Each call reads the token from the keychain again, so a token stored with `scripts/teams-token.fish` works without restarting the server. A Chat Service stall of more than 60 seconds ends the server, as it ends a command.
+- Register it in Claude Code with `claude mcp add --scope user teams-zig -- <repo>/zig-out/bin/teams-zig mcp`, and put `mcp__teams-zig__send` in the `ask` list of `~/.claude/settings.json`, so Claude Code asks before each send.
+- Writes to Teams: sending, through the `send` command or the `send` tool, is the only write.
+
 ## 0.8.1: `messages` shows code holding backticks unambiguously
 
 - Fixed: `messages` fences inline code with one more backtick than the longest run inside it, with a space inside each end when it holds a backtick, so code holding a backtick between `a` and `b` shows as ``` `` a`b `` ```. Before, it always used one backtick, which ended at the first backtick inside.
