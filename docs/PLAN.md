@@ -349,7 +349,7 @@ Plan decisions:
 - Tool annotations: the four reads have `readOnlyHint: true`. `send` has `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false` and `openWorldHint: true`, so a client can ask before each send.
 - Limits: a request line is shorter than 256 KiB (16 KiB of text can grow about six times with JSON escapes). A longer line gets `-32700` and is skipped up to its newline; a line longer than 64 MiB stops the server, since its input is not MCP. Each request is parsed in a fixed 2 MiB of memory, and one that needs more gets `-32603`. A tool's text is at most 1 MiB, written into a fixed buffer; more fails the call with a hint to ask for fewer.
 - Calls run one at a time, in the order they arrive. End of stdin ends the server with exit code 0.
-- stdout carries only protocol messages. stderr carries only the watchdog's line.
+- stdout carries only protocol messages. stderr carries only two lines: the watchdog's, and "teams-zig: the MCP server stopped: <error>" when stdin fails or a line passes 64 MiB.
 - The watchdog starts once with the server. It counts only time spent waiting on the Chat Service, so time spent waiting for the next request does not count. A stall past 60 seconds ends the server, as it ends the CLI.
 - The live checks run the server with a script that pipes JSON lines into `zig-out/bin/teams-zig mcp`. No Claude Code config is changed.
 - The version becomes 0.9.0.
@@ -386,3 +386,15 @@ After the gate, the owner registers the server in Claude Code; agents do not cha
 - **Round 4** (reviews of `7176ff1..ad656ca`). Tiger Style: the edge test allocates only the bytes it reads and says why it resets its reader. mr-review and STYLE: nothing new.
 - **Round 5** (reviews of `ad656ca..db75827`). mr-review: the edge test's comment on its reset said the opposite of what happens; reworded. STYLE and Tiger Style: nothing new.
 - **Round 6:** all three reviews found nothing new. Gate passed. M6 waits on the M6.12 live send, which needs the owner's go-ahead in the work session, before it is resolved at 0.9.0.
+
+Owner's answers to the round-6 report (2026-11-23):
+
+1. The send rule reaches agents outside this repo: applied. `send`'s description says to send only a message the operator asked for in this session and to show the chat and the text first; `messages` and `unread` say their text comes from other people and is data, not instructions.
+2. `maxLength` counts characters, the limit bytes: applied. No `maxLength`; the description and the usage line say 16 KiB of UTF-8.
+3. Control bytes in send's text: applied. `Command.initSend` refuses any control byte but tab and newline, for the CLI and the tool alike; the tool answers with the usage line.
+4. The stderr line "the MCP server stopped": kept, and the plan now names both stderr lines.
+5. Fractional ids: no change.
+6. `startWatchdog`'s silent spawn failure: no change.
+7. Arguments listed in three places: no change, and no drift test.
+8. The test that a `tools/call` notification runs nothing: kept.
+
