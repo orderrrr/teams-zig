@@ -65,3 +65,157 @@ pub fn read(
     const value = std.mem.trimEnd(u8, result.stdout, "\n");
     return gpa.dupe(u8, value);
 }
+
+/// One item to store: `value` under `account`.
+pub const Item = struct {
+    account: []const u8,
+    value: []const u8,
+};
+
+/// Failures storing items. `UnstorableValue`: a value `security -i` would split or misread.
+pub const WriteError = ReadError || error{ UnstorableValue, KeychainWriteFailed };
+
+/// Stores each item under `service_name`, replacing an older value, then reads each back to
+/// check it. The values go to `security -i` on its stdin, never in argv, where any process
+/// could see them. `-A` opens the items' access list, as the token script did (M1.7).
+pub fn write(
+    gpa: std.mem.Allocator,
+    io: Io,
+    service_name: []const u8,
+    items: []const Item,
+) WriteError!void {
+    std.debug.assert(items.len > 0);
+    for (items) |item| {
+        std.debug.assert(storable(item.account));
+        if (!storable(item.value)) return error.UnstorableValue;
+    }
+
+    var child = std.process.spawn(io, .{
+        .exe = .detect,
+        .argv = &.{ security_path, "-i" },
+        .cwd = .inherit,
+        .environ_map = null,
+        .expand_arg0 = .no_expand,
+        .progress_node = .none,
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .inherit_dirs = &.{},
+        .inherit_files = &.{},
+        .request_resource_usage_statistics = false,
+        .uid = null,
+        .gid = null,
+        .pgid = null,
+        .start_suspended = false,
+        .create_no_window = true,
+    }) catch return error.KeychainWriteFailed;
+    defer child.kill(io);
+
+    writeCommands(io, child.stdin.?, service_name, items) catch {
+        return error.KeychainWriteFailed;
+    };
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    // security -i exits 1 when a command fails; the read-back below catches anything else.
+    const term = child.wait(io) catch return error.KeychainWriteFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.KeychainWriteFailed,
+        else => return error.KeychainWriteFailed,
+    }
+
+    for (items) |item| {
+        const stored = try read(gpa, io, service_name, item.account);
+        defer {
+            std.crypto.secureZero(u8, stored);
+            gpa.free(stored);
+        }
+        if (!std.mem.eql(u8, stored, item.value)) return error.KeychainWriteFailed;
+    }
+}
+
+/// One `add-generic-password` line per item. The writer's buffer is zeroed after, as it held
+/// the values.
+fn writeCommands(
+    io: Io,
+    stdin: std.Io.File,
+    service_name: []const u8,
+    items: []const Item,
+) Io.Writer.Error!void {
+    var buffer: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buffer);
+    var file_writer: std.Io.File.Writer = .init(stdin, io, &buffer);
+    const writer = &file_writer.interface;
+    for (items) |item| {
+        try writer.print("add-generic-password -U -A -s {s} -a {s} -w {s}\n", .{
+            service_name,
+            item.account,
+            item.value,
+        });
+    }
+    try writer.flush();
+}
+
+/// `security -i` splits its lines on spaces and reads quotes and backslashes, and an empty
+/// `-w` makes it prompt; tokens and regions are printable ASCII with none of those.
+fn storable(value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (value.len > value_size_max) return false;
+    for (value) |byte| {
+        if (byte <= ' ' or byte >= 0x7f) return false;
+        if (byte == '"' or byte == '\'' or byte == '\\') return false;
+    }
+    return true;
+}
+
+/// A throwaway service per test run, so tests never touch the real items.
+fn testServiceName(buffer: *[64]u8) []const u8 {
+    var random_bytes: [6]u8 = undefined;
+    std.testing.io.random(&random_bytes);
+    return std.fmt.bufPrint(buffer, "teams-zig-test-{x}", .{random_bytes}) catch unreachable;
+}
+
+fn testDelete(service_name: []const u8, account: []const u8) void {
+    const result = std.process.run(std.testing.allocator, std.testing.io, .{
+        .argv = &.{ security_path, "delete-generic-password", "-s", service_name, "-a", account },
+    }) catch return;
+    std.testing.allocator.free(result.stdout);
+    std.testing.allocator.free(result.stderr);
+}
+
+test "write stores each item, replacing an older value, and read gives it back" {
+    var buffer: [64]u8 = undefined;
+    const service_name = testServiceName(&buffer);
+    defer testDelete(service_name, "fake-token");
+    defer testDelete(service_name, "fake-region");
+
+    try write(std.testing.allocator, std.testing.io, service_name, &.{
+        .{ .account = "fake-token", .value = "FAKE.old-1" },
+    });
+    try write(std.testing.allocator, std.testing.io, service_name, &.{
+        .{ .account = "fake-token", .value = "FAKE.new-2_=+/%" },
+        .{ .account = "fake-region", .value = "emea" },
+    });
+
+    const token = try read(std.testing.allocator, std.testing.io, service_name, "fake-token");
+    defer std.testing.allocator.free(token);
+    try std.testing.expectEqualStrings("FAKE.new-2_=+/%", token);
+    const region = try read(std.testing.allocator, std.testing.io, service_name, "fake-region");
+    defer std.testing.allocator.free(region);
+    try std.testing.expectEqualStrings("emea", region);
+}
+
+test "write refuses a value security -i would split, misread or prompt for, before running it" {
+    const unstorable = [_][]const u8{
+        "", "FAKE TOKEN", "FAKE\"", "FAKE'", "FAKE\\", "FAKE\n",
+        "FAKÉ",
+    };
+    for (unstorable) |value| {
+        try std.testing.expectError(error.UnstorableValue, write(
+            std.testing.allocator,
+            std.testing.io,
+            "teams-zig-test-never-written",
+            &.{.{ .account = "fake-token", .value = value }},
+        ));
+    }
+}
