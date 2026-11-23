@@ -1,5 +1,5 @@
-//! An authenticated connection to the Teams Chat Service,
-//! at `{region}.ng.msg.teams.microsoft.com/v1`.
+//! An authenticated connection to the Teams Chat Service, through its front door at
+//! `teams.microsoft.com/api/chatsvc/{region}/v1`.
 
 const Client = @This();
 
@@ -26,12 +26,35 @@ pub const Region = enum {
     emea,
     apac,
 
+    /// Where every request goes, and the only place the token goes: the Teams front door, an
+    /// edge near you (the old host is about 230 ms away; see docs/PLAN.md M7).
     pub fn baseUrl(region: Region) []const u8 {
+        return switch (region) {
+            inline else => |tag| "https://teams.microsoft.com/api/chatsvc/" ++ @tagName(tag) ++
+                "/v1",
+        };
+    }
+
+    /// The Chat Service's own host, which paging links may still name. `frontDoorUrl` moves
+    /// them to `baseUrl`; nothing is sent here.
+    fn oldBaseUrl(region: Region) []const u8 {
         return switch (region) {
             inline else => |tag| "https://" ++ @tagName(tag) ++ ".ng.msg.teams.microsoft.com/v1",
         };
     }
 };
+
+/// `url`, owned by the caller, with a link under the region's old host moved to the front door
+/// (same path and query). Any other link is copied as it is, for `checkLink` to judge.
+fn frontDoorUrl(
+    gpa: std.mem.Allocator,
+    region: Region,
+    url: []const u8,
+) error{OutOfMemory}![]u8 {
+    const old_base = region.oldBaseUrl();
+    if (!std.mem.startsWith(u8, url, old_base)) return gpa.dupe(u8, url);
+    return std.mem.concat(gpa, u8, &.{ region.baseUrl(), url[old_base.len..] });
+}
 
 pub const Error = error{
     /// The skype token was rejected: it expires after about a day, so rerun the token script.
@@ -163,7 +186,9 @@ pub fn get(client: *Client, path: []const u8) Error![]const u8 {
 pub fn getUrl(client: *Client, url: []const u8) Error![]const u8 {
     // Cleared first, so a status only ever describes this request.
     client.response_status = null;
-    const uri = try checkLink(client.region, url);
+    const moved = try frontDoorUrl(client.gpa, client.region, url);
+    defer client.gpa.free(moved);
+    const uri = try checkLink(client.region, moved);
     return client.fetch(uri, &.none);
 }
 
@@ -580,9 +605,23 @@ fn isUnreserved(byte: u8) bool {
     return std.mem.indexOfScalar(u8, "-._~", byte) != null;
 }
 
-test "baseUrl puts the region in the host" {
-    const expected = "https://emea.ng.msg.teams.microsoft.com/v1";
+test "baseUrl is the front door, with the region in the path" {
+    const expected = "https://teams.microsoft.com/api/chatsvc/emea/v1";
     try std.testing.expectEqualStrings(expected, Region.emea.baseUrl());
+}
+
+test "frontDoorUrl moves a link under the old host to the front door, and keeps others" {
+    const old = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/x?startTime=1&pageSize=5";
+    const moved = try frontDoorUrl(std.testing.allocator, .emea, old);
+    defer std.testing.allocator.free(moved);
+    const expected = "https://teams.microsoft.com/api/chatsvc/emea/v1" ++
+        "/users/ME/x?startTime=1&pageSize=5";
+    try std.testing.expectEqualStrings(expected, moved);
+
+    const other = "https://amer.ng.msg.teams.microsoft.com/v1/users/ME";
+    const kept = try frontDoorUrl(std.testing.allocator, .emea, other);
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings(other, kept);
 }
 
 test "messagesUrl percent-encodes the conversation id" {
@@ -593,7 +632,7 @@ test "messagesUrl percent-encodes the conversation id" {
     const url = try client.messagesUrl("19:fake@thread.v2", 50);
     defer std.testing.allocator.free(url);
 
-    const expected = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/" ++
+    const expected = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/" ++
         "19%3Afake%40thread.v2/messages?view=superchat&pageSize=50";
     try std.testing.expectEqualStrings(expected, url);
 }
@@ -611,6 +650,10 @@ test "getUrl refuses links outside the Chat Service base URL" {
         "https://emea.ng.msg.teams.microsoft.com/v1/x\r\nX-Injected: 1",
         "https://emea.ng.msg.teams.microsoft.com/v1/x HTTP/1.1",
         "https://emea.ng.msg.teams.microsoft.com/v1/caf\xc3\xa9",
+        "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME",
+        "https://teams.microsoft.com/api/chatsvc/emea/v1.evil.com/x",
+        "https://teams.microsoft.com/api/chatsvc/emea/v1",
+        "https://teams.microsoft.com/api/other/emea/v1/users/ME",
     };
     for (foreign_urls) |foreign_url| {
         try std.testing.expectError(error.ForeignLink, client.getUrl(foreign_url));
@@ -735,11 +778,10 @@ test "bodyEndCheck catches a body short of its content length" {
 }
 
 test "checkLink parses a link under the base URL" {
-    const link = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/messages?startTime=1";
+    const link = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/messages?startTime=1";
     const uri = try checkLink(.emea, link);
     try std.testing.expectEqualStrings("https", uri.scheme);
-    const host = uri.host.?.percent_encoded;
-    try std.testing.expectEqualStrings("emea.ng.msg.teams.microsoft.com", host);
+    try std.testing.expectEqualStrings("teams.microsoft.com", uri.host.?.percent_encoded);
 }
 
 test "collectMessages reads one page when limited to one" {
