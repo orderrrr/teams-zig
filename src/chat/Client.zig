@@ -14,8 +14,10 @@ http: std.http.Client,
 region: Region,
 /// The `Authentication` header value, `skypetoken=<token>`. Owned.
 authentication: []u8,
-/// Holds the latest response body. Allocated once, `body_size_max` long.
+/// Holds the latest response body, decompressed. Allocated once, `body_size_max` long.
 body_buffer: []u8,
+/// The window a gzip body is decompressed through. Allocated once, `flate.max_window_len` long.
+decompress_window: []u8,
 /// The status of the latest response, for error messages.
 response_status: ?std.http.Status = null,
 
@@ -129,7 +131,10 @@ pub fn init(
         .region = region,
         .authentication = authentication,
         .body_buffer = try gpa.alloc(u8, body_size_max),
+        .decompress_window = undefined,
     };
+    errdefer gpa.free(client.body_buffer);
+    client.decompress_window = try gpa.alloc(u8, std.compress.flate.max_window_len);
 }
 
 pub fn deinit(client: *Client) void {
@@ -138,6 +143,7 @@ pub fn deinit(client: *Client) void {
     std.crypto.secureZero(u8, client.authentication);
     client.gpa.free(client.authentication);
     client.gpa.free(client.body_buffer);
+    client.gpa.free(client.decompress_window);
     client.* = undefined;
 }
 
@@ -199,9 +205,9 @@ fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u
             .authorization = .default,
             .user_agent = .default,
             .connection = .default,
-            // Written out: with only identity enabled, std 0.17 sends a bare "accept-encoding" line
+            // Written out: std 0.17 writes a list of one encoding as a bare "accept-encoding" line
             // with no colon (it undoes the ", " of a list it never wrote), which gets a 400.
-            .accept_encoding = .{ .override = "identity" },
+            .accept_encoding = .{ .override = "gzip, identity" },
             .content_type = content_type,
         },
         .extra_headers = &.{
@@ -212,10 +218,11 @@ fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u
     }) catch |err| return requestError(err);
     defer request.deinit();
 
-    // Uncompressed only: receiveHead refuses any encoding not listed here, so the body never
-    // needs a decompressor (std's zstd path would need a bigger buffer than fetch gives it).
+    // gzip or none: receiveHead refuses any encoding not listed here, so `readBody` sees only
+    // these two (std's zstd path would need a bigger window than the client keeps).
     request.accept_encoding = @splat(false);
     request.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
+    request.accept_encoding[@backingInt(std.http.ContentEncoding.gzip)] = true;
 
     switch (payload.*) {
         .none => request.sendBodiless() catch return error.SendFailed,
@@ -232,17 +239,60 @@ fn fetch(client: *Client, uri: std.Uri, payload: *const Payload) Error![]const u
         else => return error.UnexpectedStatus,
     }
 
-    std.debug.assert(response.head.content_encoding == .identity);
+    const encoding = response.head.content_encoding;
+    std.debug.assert(encoding == .identity or encoding == .gzip);
 
     var body: std.Io.Writer = .fixed(client.body_buffer);
     var transfer_buffer: [64]u8 = undefined;
-    const reader = response.reader(&transfer_buffer);
+    const transfer = response.reader(&transfer_buffer);
     // Read here rather than through fetch: fetch unwraps bodyErr() on ReadFailed, which is null
     // when the connection drops mid-body, and crashes.
-    _ = reader.streamRemaining(&body) catch |err| return bodyError(err, response.bodyErr());
+    readBody(transfer, encoding, client.decompress_window, &body) catch |err| switch (err) {
+        error.ReadFailed => return bodyError(error.ReadFailed, response.bodyErr()),
+        else => |other| return other,
+    };
 
     try bodyEndCheck(request.reader.state);
     return body.buffered();
+}
+
+/// How reading a body fails. ReadFailed is the transfer's own failure, which `bodyError` sorts
+/// out from the response.
+const ReadBodyError = error{ ResponseTooLarge, BadResponse, ConnectionDropped, ReadFailed };
+
+/// Reads the whole body from `transfer` into `body`, decompressing a gzip body through `window`.
+/// The limit is `body`'s size, on the decompressed bytes.
+fn readBody(
+    transfer: *std.Io.Reader,
+    encoding: std.http.ContentEncoding,
+    window: []u8,
+    body: *std.Io.Writer,
+) ReadBodyError!void {
+    std.debug.assert(encoding == .identity or encoding == .gzip);
+    std.debug.assert(window.len >= std.compress.flate.max_window_len);
+    var decompress: std.http.Decompress = undefined;
+    const reader = decompress.init(transfer, window, encoding);
+    _ = reader.streamRemaining(body) catch |err| switch (err) {
+        error.WriteFailed => return error.ResponseTooLarge,
+        error.ReadFailed => {
+            // Identity: only the transfer can fail. gzip: the transfer, or the data itself.
+            if (decompress != .flate) return error.ReadFailed;
+            const flate_err = decompress.flate.err orelse return error.ReadFailed;
+            return switch (flate_err) {
+                error.ReadFailed => error.ReadFailed,
+                // The body ended before the gzip stream did.
+                error.EndOfStream => error.ConnectionDropped,
+                else => error.BadResponse,
+            };
+        },
+    };
+    // The decompressor stops at the end of the gzip data, before its footer and a chunked body's
+    // last chunk. Reading the rest leaves the connection ready for the next request.
+    if (decompress == .flate) {
+        _ = transfer.discardRemaining() catch |err| switch (err) {
+            error.ReadFailed => return error.ReadFailed,
+        };
+    }
 }
 
 /// Parses `url` if it's safe to send the token to: under the region's base URL, and free of
@@ -735,4 +785,72 @@ test "sendAnswerId reads the new message's id and rejects other shapes" {
     const late_body = "{\"OriginalArrivalTime\":253402214400000}";
     const late_id = sendAnswerId(std.testing.allocator, late_body);
     try std.testing.expectError(error.UnexpectedJson, late_id);
+}
+
+/// `{"fake":"gzip body"}`, gzipped.
+const fake_gzip_body =
+    "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\xab\x56\x4a\x4b\xcc\x4e\x55\xb2\x52\x4a\xaf\xca" ++
+    "\x2c\x50\x48\xca\x4f\xa9\x54\xaa\x05\x00\x07\xd3\x31\x79\x14\x00\x00\x00";
+
+/// Runs `readBody` over `transfer_bytes` into a body buffer of `body_size` bytes.
+fn expectReadBody(
+    transfer_bytes: []const u8,
+    encoding: std.http.ContentEncoding,
+    body_size: u32,
+    expected: ReadBodyError![]const u8,
+) !void {
+    var transfer: std.Io.Reader = .fixed(transfer_bytes);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    const body_buffer = try std.testing.allocator.alloc(u8, body_size);
+    defer std.testing.allocator.free(body_buffer);
+    var body: std.Io.Writer = .fixed(body_buffer);
+
+    const result = readBody(&transfer, encoding, &window, &body);
+    const expected_body = expected catch |expected_err| {
+        return std.testing.expectError(expected_err, result);
+    };
+    try result;
+    try std.testing.expectEqualStrings(expected_body, body.buffered());
+}
+
+test "readBody decompresses gzip and passes identity through" {
+    try expectReadBody(fake_gzip_body, .gzip, 64, "{\"fake\":\"gzip body\"}");
+    try expectReadBody("{\"fake\":1}", .identity, 64, "{\"fake\":1}");
+}
+
+test "readBody refuses a body larger than the buffer once decompressed" {
+    try expectReadBody(fake_gzip_body, .gzip, 8, error.ResponseTooLarge);
+    try expectReadBody("{\"fake\":1}", .identity, 4, error.ResponseTooLarge);
+}
+
+test "readBody calls a bad gzip header bad, and a cut body dropped" {
+    // A wrong magic number in the header. (std 0.17 doesn't check the footer's checksum; TLS
+    // already guards the bytes on the way.)
+    var wrong_header = fake_gzip_body.*;
+    wrong_header[0] ^= 0xff;
+    try expectReadBody(&wrong_header, .gzip, 64, error.BadResponse);
+    try expectReadBody(fake_gzip_body[0..20], .gzip, 64, error.ConnectionDropped);
+}
+
+test "readBody reads a chunked gzip body to its end, so the connection is ready again" {
+    // As the Chat Service sends it: one chunk of gzip, then the last, empty chunk.
+    const chunked = std.fmt.comptimePrint("{x}\r\n", .{fake_gzip_body.len}) ++ fake_gzip_body ++
+        "\r\n0\r\n\r\n";
+    var input: std.Io.Reader = .fixed(chunked);
+    var http_reader: std.http.Reader = .{
+        .in = &input,
+        .interface = undefined,
+        .state = .received_head,
+        .max_head_len = 0,
+        .side = .response,
+    };
+    var transfer_buffer: [64]u8 = undefined;
+    const transfer = http_reader.bodyReader(&transfer_buffer, .chunked, null);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var body_buffer: [64]u8 = undefined;
+    var body: std.Io.Writer = .fixed(&body_buffer);
+
+    try readBody(transfer, .gzip, &window, &body);
+    try std.testing.expectEqualStrings("{\"fake\":\"gzip body\"}", body.buffered());
+    try std.testing.expectEqual(.ready, http_reader.state);
 }
