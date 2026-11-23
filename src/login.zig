@@ -1,5 +1,5 @@
 //! `teams-zig login`: signs in to Teams in agent-browser and stores the skype token and region in
-//! the login keychain, as `scripts/teams-token.fish` did.
+//! the login keychain. It replaced the M1 token script, and keeps its steps and names.
 
 const std = @import("std");
 const teams = @import("teams");
