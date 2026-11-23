@@ -677,3 +677,4 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
 - **Round 4** (the same three reviews of `f813733`).
   - mr-review: `runLogin` takes `*const std.process.Init`, like the options below it (Tiger: more than 16 bytes); `serveMcp` keeps its M6 shape, outside M8. In the runner test, every run that should end on its own uses the 30 s runner; only the two that should hit the limit use the 1 s one.
   - STYLE and Tiger Style: no new findings.
+- **Round 5** (the same three reviews of `244d5c4`): STYLE and Tiger Style found nothing new; mr-review found nothing to fix, and one nit no rule covers (the `ChildAgentBrowser` test's name doesn't mention the timeout checks), which goes to the owner. **Gate passed.** M8 resolves after the owner's answers to the parked items and the release (M8.12).
