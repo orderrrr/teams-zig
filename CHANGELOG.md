@@ -7,7 +7,7 @@ One entry per milestone. The version lives in `build.zig.zon`.
 - `teams-zig login` replaces `scripts/teams-token.fish`, which is gone. It opens Teams in agent-browser (tested with 0.43.0) with the script's profile, waits up to 300 seconds for you to sign in, reads the skype token and region from the requests Teams makes, and closes the browser. It needs agent-browser on `PATH`, but no fish and no jq.
 - The token goes to the login keychain on the keychain tool's stdin, never on a command line, and `login` reads both items back to check them. It deletes the cache file, since the new token may be another account's.
 - Every hint that said "run scripts/teams-token.fish" now says "run teams-zig login".
-- `zig build release` builds `zig-out/release/teams-zig-aarch64-macos`, for Apple silicon Macs on macOS 15 or later. Releases on GitHub carry it as a tar file with a `SHA256SUMS` file. The binary has only the linker's ad-hoc signature, so after a browser download, remove the quarantine attribute (see the README).
+- `zig build release` builds `zig-out/release/teams-zig` for Apple silicon Macs on macOS 15 or later. Releases on GitHub carry it as a tar file with a `SHA256SUMS` file. The binary has only the linker's ad-hoc signature, so after a browser download, remove the quarantine attribute (see the README).
 - `zig build -Dtarget=aarch64-macos` works now: `build.zig` finds the macOS SDK for a named target.
 
 ## 0.10.0 (M7): faster reads and sends

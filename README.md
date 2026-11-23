@@ -46,7 +46,7 @@ zig build
 
 The binary is `zig-out/bin/teams-zig`. It needs Zig 0.17 and the Xcode Command Line Tools.
 
-`zig build release` builds the release binary, `zig-out/release/teams-zig-aarch64-macos`.
+`zig build release` builds the release binary for Apple silicon, `zig-out/release/teams-zig`.
 
 ## Sign in
 
@@ -72,7 +72,7 @@ teams-zig login
 
 Teams opens in a browser window. Sign in if Teams asks. `login` stores the skype token and region in the login keychain, then closes the window. The skype token lasts about a day; when a command says it has expired, run `teams-zig login` again.
 
-teams-zig keeps a cache in `~/Library/Caches/teams-zig/cache.txt`: your user, the names in 1:1 chats and which chat each name picks. The cache holds no token. The script deletes it at each sign-in.
+teams-zig keeps a cache in `~/Library/Caches/teams-zig/cache.txt`: your user, the names in 1:1 chats and which chat each name picks. The cache holds no token. `teams-zig login` deletes it at each sign-in.
 
 ## Use it as an MCP server in Claude Code
 

@@ -567,7 +567,7 @@ The same steps as `scripts/teams-token.fish`, with the same names, so a profile 
 - **The cache file** (`~/Library/Caches/teams-zig/cache.txt`, M7) is deleted after each sign-in that stores a token, as the script does after M7.10. M7's front-door base URL and the MCP server's token check on each call stay as they are: a running server picks up the new token at its next call.
 - **Hints.** Every error hint that says "run scripts/teams-token.fish" says "run teams-zig login", and so does `usage`.
 - **Release targets.** `aarch64-macos` only. Minimum macOS is Zig 0.17's default, 15.0.
-- **Release build.** A new `zig build release` step builds `aarch64-macos` with `-Doptimize=ReleaseSafe` into `zig-out/release/teams-zig-aarch64-macos`. When the target is macOS and not native, `build.zig` adds the SDK search paths from `std.zig.system.darwin.getSdk`. Plain `zig build` stays as now. The build machine needs Xcode or the Command Line Tools, as today.
+- **Release build.** A new `zig build release` step builds `aarch64-macos` with `-Doptimize=ReleaseSafe` into `zig-out/release/teams-zig` (renamed in the M8 gate, so the tar file holds `teams-zig`, as the README's install steps expect). When the target is macOS and not native, `build.zig` adds the SDK search paths from `std.zig.system.darwin.getSdk`. Plain `zig build` stays as now. The build machine needs Xcode or the Command Line Tools, as today.
 - **Publish.** The owner builds locally and runs `gh release create`. Each release has `teams-zig-<version>-aarch64-macos.tar.gz` (tar keeps the execute bit, which a raw browser download loses) and a `SHA256SUMS` file.
 - **Gatekeeper.** No Developer ID signing and no notarization: both need a paid Apple Developer account. The README tells users to run `xattr -d com.apple.quarantine` on a browser download.
 - **README.** "Sign in" says `login` needs agent-browser, and how to install it: `brew install agent-browser` (Homebrew's formula needs Node), then `agent-browser install`, which fetches its browser.
@@ -597,7 +597,21 @@ From a copy of `HEAD` in a scratch directory; the repo was not changed.
 9. **M8.9 release step.** `zig build release` as above. Check the binary with `file`, `codesign -dv` and `otool -L`, and run it.
 10. **M8.10 README install.** Download, check `SHA256SUMS`, `tar -xzf`, `xattr -d com.apple.quarantine`, put the binary on `PATH`, install agent-browser, `teams-zig login`, and `claude mcp add` with the installed path.
 11. **M8.11 0.11.0 and gate.** Version, CHANGELOG, then the milestone gate.
-12. **M8.12 first release.** *Owner step, after the gate.* The owner pushes `main`, tags `v0.11.0`, runs `zig build release`, makes the tar file and `SHA256SUMS`, and runs `gh release create v0.11.0 --title v0.11.0 --notes-file <CHANGELOG part> <files>`. Agents never push. Then one check: download the asset with a browser, follow the README, and run `teams-zig --help`.
+12. **M8.12 first release.** *Owner step, after the gate.* Agents never push. The owner runs, from the repo:
+
+    ```sh
+    git push microslopgithub main
+    git tag v0.11.0
+    git push microslopgithub v0.11.0
+    zig build release
+    mkdir -p zig-out/dist
+    tar -czf zig-out/dist/teams-zig-0.11.0-aarch64-macos.tar.gz -C zig-out/release teams-zig
+    (cd zig-out/dist; shasum -a 256 teams-zig-0.11.0-aarch64-macos.tar.gz > SHA256SUMS)
+    gh release create v0.11.0 --repo orderrrr/teams-zig --title v0.11.0 \
+        --notes-file <the 0.11.0 part of CHANGELOG.md> zig-out/dist/*
+    ```
+
+    Then one check: download the asset with a browser, follow the README's install steps, and run `teams-zig` (it prints its usage).
 
 ### M8.1 agent-browser output
 
@@ -643,3 +657,11 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
 - `POST https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode` with client id `1fec8e78-…` accepted the v2 scope `https://api.spaces.skype.com/.default offline_access`. It answered `user_code`, `device_code`, `verification_uri` (`https://login.microsoft.com/device`), `expires_in` 900, `interval` and `message`.
 - The check was stopped while it waited for the sign-in. No token was issued, `authz` and the refresh were not tried, and nothing was written to the keychain.
 - The loopback redirect page (`http://localhost:8400`) was opened; its result was not recorded.
+
+## M8 gate
+
+- **Round 1** (mr-review, STYLE.md and Tiger Style reviews of `349edeb..a054511`).
+  - mr-review: each agent-browser run now has a 60 s limit (`AgentBrowserTimedOut`), so a stuck daemon can't hang `login`; the `main.zig` comment that claimed a limit is now true. `close` runs after a failed `open` too, as the plan said ("on every failure"). The release binary is `zig-out/release/teams-zig`, so the tar file holds what the README's install steps use, and M8.12 now lists the exact commands. Stale "the script" lines in the README and `commands.zig` name `teams-zig login`. New tests: `isLogin`, a sign-in found at the first poll, a run past its time limit, and the close after a failed open.
+  - STYLE: `SignedIn` keeps its allocator (6.3); the seam passes the caller's allocator to agent-browser runs, so one allocator allocates and frees the output (6.1, 6.4); helper names carry their caller's (`findRegionName`, `signInClose`, `writeStorable`, 1.6); the test cleanup warns, naming the item, when a delete fails (4.3); `catch unreachable` and `catch return` say why.
+  - Tiger Style: `login.zig` puts `login` first, then `signIn`, the runner and `find`; typed limits; `@divExact` for the poll count; `keychain.read` takes an `ItemName` struct, so service and account can't swap; `write` asserts its service name; `signIn` asserts the token's length; a comptime assert ties `token_size_max` to the keychain's limit; the JSON parse has `max_value_len`; library calls in new code pass every option; `runLogin` passes the poll defaults; `writeStorable` is a `switch`, not compound conditions.
+  - To the owner: one output agent-browser gives that doesn't parse ends the sign-in (the script polled on); the first poll comes after 2 s and run time isn't counted, so the wait can be longer than the "300 seconds" shown; a failed cache delete exits 1 with no "Stored" line; keychain calls still have no time limit, so an unlock dialog can wait; `xcrun` runs at each `zig build` (about 5 ms); arena copies of escaped JSON strings aren't zeroed.

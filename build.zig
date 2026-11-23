@@ -2,7 +2,6 @@ const std = @import("std");
 
 /// The release binary's target: Apple silicon Macs (the owner's answer, docs/PLAN.md M8).
 const release_target_query: std.Target.Query = .{ .cpu_arch = .aarch64, .os_tag = .macos };
-const release_name = "teams-zig-aarch64-macos";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .whitelist = null, .default_target = .{} });
@@ -32,16 +31,42 @@ pub fn build(b: *std.Build) void {
     const release_target = b.resolveTargetQuery(release_target_query);
     const release_teams = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
+        .imports = &.{},
         .target = release_target,
         .optimize = .ReleaseSafe,
+        .link_libc = null,
+        .link_libcpp = null,
+        .single_threaded = null,
+        .strip = null,
+        .unwind_tables = null,
+        .dwarf_format = null,
+        .code_model = .default,
+        .stack_protector = null,
+        .stack_check = null,
+        .sanitize_c = null,
+        .sanitize_thread = null,
+        .fuzz = null,
+        .valgrind = null,
+        .pic = null,
+        .red_zone = null,
+        .omit_frame_pointer = null,
+        .error_tracing = null,
+        .no_builtin = null,
+        .patchable_function_entry = 0,
     });
     linkMacos(b, release_teams, release_target);
     const release_exe = addExe(b, release_teams, release_target, .ReleaseSafe);
+    // Named teams-zig, as users run it; the release's tar file name carries the target.
     const install_release = b.addInstallArtifact(release_exe, .{
         .dest_dir = .{ .override = .{ .custom = "release" } },
-        .dest_sub_path = release_name,
+        .pdb_dir = .default,
+        .compiler_rt_dyn_lib_dir = .default,
+        .h_dir = .default,
+        .implib_dir = .default,
+        .dylib_symlinks = null,
+        .dest_sub_path = "teams-zig",
     });
-    const release_step = b.step("release", "Build zig-out/release/" ++ release_name);
+    const release_step = b.step("release", "Build zig-out/release/teams-zig for aarch64-macos");
     release_step.dependOn(&install_release.step);
 }
 
