@@ -236,6 +236,7 @@ test "requestsStalled fires only after the limit, and never while idle" {
 test {
     _ = commands;
     _ = Server;
+    _ = @import("Cache.zig");
     // Tests don't call `main`; this compiles the MCP path, which nothing else in them reaches.
     _ = &serveMcp;
 }
