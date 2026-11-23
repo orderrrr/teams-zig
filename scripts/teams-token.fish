@@ -67,3 +67,7 @@ or begin
     exit 1
 end
 echo "Stored the skype token and region $region in the login keychain." >&2
+
+# A new token may be another account, so teams-zig's cache (your user, chat names and ids) is
+# dropped; teams-zig builds it again as it runs. See Cache.sub_path in src/Cache.zig.
+rm -f $HOME/Library/Caches/teams-zig/cache.txt
