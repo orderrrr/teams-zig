@@ -6,6 +6,7 @@ const writeVisible = chat.text.writeVisible;
 const Seen = @import("Seen.zig");
 const short_time = @import("short_time.zig");
 const core_foundation = teams.macos.core_foundation;
+const Cache = @import("Cache.zig");
 
 /// Shared with scripts/teams-token.fish, which writes these items.
 const keychain_service = "teams-zig";
@@ -253,6 +254,7 @@ pub const Command = union(enum) {
     pub fn run(
         command: *const Command,
         client: *chat.Client,
+        cache: *Cache,
         io: Io,
         clock: *Clock,
         stdout: *Io.Writer,
@@ -261,10 +263,13 @@ pub const Command = union(enum) {
     ) RunError!void {
         switch (command.*) {
             .watch => try watch(client, io, clock, stdout, stderr, started_at),
-            .unread => try runUnread(client, clock, stdout, started_at),
+            .unread => try runUnread(client, cache, clock, stdout, started_at),
             .whoami => {
+                // Always asked: whoami is the check that the token works. The answer refreshes
+                // the cache.
                 const user = try client.whoami();
                 defer user.deinit();
+                try cache.putSelf(&.{ .mri = user.mri, .name = user.name, .upn = user.upn });
 
                 started_at.store(requests_idle, .release);
 
@@ -273,9 +278,9 @@ pub const Command = union(enum) {
                 try writeVisible(stdout, user.upn);
                 try stdout.writeAll(">\n");
             },
-            .send => |send| try runSend(client, clock, stdout, started_at, &send),
+            .send => |send| try runSend(client, cache, clock, stdout, started_at, &send),
             .chats => |conversation_count| {
-                try runChats(client, clock, stdout, started_at, conversation_count);
+                try runChats(client, cache, clock, stdout, started_at, conversation_count);
             },
             .messages => |messages| {
                 // Holds a looked-up chat's id; freed with the command.
@@ -286,6 +291,7 @@ pub const Command = union(enum) {
                     .id => |id| id,
                     .name => |name| try findChat(
                         client,
+                        cache,
                         id_arena.allocator(),
                         name,
                         clock,
@@ -313,6 +319,7 @@ pub const Command = union(enum) {
 /// refused before any request.
 fn runSend(
     client: *chat.Client,
+    cache: *Cache,
     clock: *const Clock,
     stdout: *Io.Writer,
     started_at: *std.atomic.Value(i64),
@@ -327,7 +334,7 @@ fn runSend(
     const arena = send_arena.allocator();
     const conversation_id = switch (send.chat) {
         .id => |id| id,
-        .name => |name| try findChat(client, arena, name, clock, stdout, started_at),
+        .name => |name| try findChat(client, cache, arena, name, clock, stdout, started_at),
     };
 
     var html: Io.Writer.Allocating = .init(arena);
@@ -337,9 +344,7 @@ fn runSend(
     std.debug.assert(html.written().len > 0);
     if (html.written().len > chat.Client.content_size_max) return error.SendTextTooLong;
 
-    const user = try client.whoami();
-    defer user.deinit();
-
+    const user = try selfUser(client, cache);
     const message_id = try client.send(conversation_id, &.{
         .content = html.written(),
         .display_name = user.name,
@@ -353,16 +358,26 @@ fn runSend(
     try stdout.print("Sent {s}.\n", .{clock.shortTimeAt(&time_buffer, at_seconds)});
 }
 
+/// Your user: the cached one, or asked of the service once and then cached. Borrowed from the
+/// cache.
+fn selfUser(client: *chat.Client, cache: *Cache) RunError!Cache.User {
+    if (cache.self_user) |user| return user;
+    const user = try client.whoami();
+    defer user.deinit();
+    try cache.putSelf(&.{ .mri = user.mri, .name = user.name, .upn = user.upn });
+    return cache.self_user.?;
+}
+
 /// Lists your `conversation_count` newest chats, one `printChat` row each.
 fn runChats(
     client: *chat.Client,
+    cache: *Cache,
     clock: *const Clock,
     stdout: *Io.Writer,
     started_at: *std.atomic.Value(i64),
     conversation_count: u16,
 ) RunError!void {
-    const user = try client.whoami();
-    defer user.deinit();
+    const user = try selfUser(client, cache);
 
     const list = try client.conversations(conversation_count);
     defer list.deinit();
@@ -637,12 +652,12 @@ const UnreadChat = struct {
 /// ones not shown. Every request finishes before the first line is written.
 fn runUnread(
     client: *chat.Client,
+    cache: *Cache,
     clock: *const Clock,
     stdout: *Io.Writer,
     started_at: *std.atomic.Value(i64),
 ) RunError!void {
-    const user = try client.whoami();
-    defer user.deinit();
+    const user = try selfUser(client, cache);
 
     const list = try client.conversations(conversation_count_default);
     defer list.deinit();
@@ -705,6 +720,7 @@ fn watchErrorRetries(err: RunError, status: ?std.http.Status) bool {
 /// Several matches are listed on `stdout`, with their ids, before ChatNameAmbiguous.
 fn findChat(
     client: *chat.Client,
+    cache: *Cache,
     arena: std.mem.Allocator,
     name: []const u8,
     clock: *const Clock,
@@ -712,8 +728,7 @@ fn findChat(
     started_at: *std.atomic.Value(i64),
 ) RunError![]const u8 {
     std.debug.assert(name.len > 0);
-    const user = try client.whoami();
-    defer user.deinit();
+    const user = try selfUser(client, cache);
 
     const list = try client.conversations(conversation_count_limit);
     defer list.deinit();
@@ -1240,16 +1255,18 @@ test "runSend refuses text too long to send before any request" {
     var started_at: std.atomic.Value(i64) = .init(requests_idle);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
 
     const long_text: [send_text_size_max + 1]u8 = @splat('a');
     const too_long: Command.Send = .{ .chat = .{ .id = "48:notes" }, .text = &long_text };
-    const too_long_result = runSend(&client, &clock, &out.writer, &started_at, &too_long);
+    const too_long_result = runSend(&client, &cache, &clock, &out.writer, &started_at, &too_long);
     try std.testing.expectError(error.SendTextTooLong, too_long_result);
 
     // Under the text cap, but `"` becomes `&quot;`, so the HTML is far over its own.
     const quotes: [send_text_size_max]u8 = @splat('"');
     const quoted: Command.Send = .{ .chat = .{ .id = "48:notes" }, .text = &quotes };
-    const quoted_result = runSend(&client, &clock, &out.writer, &started_at, &quoted);
+    const quoted_result = runSend(&client, &cache, &clock, &out.writer, &started_at, &quoted);
     try std.testing.expectError(error.SendTextTooLong, quoted_result);
     try std.testing.expectEqual(null, client.response_status);
     try std.testing.expectEqualStrings("", out.written());
@@ -1320,4 +1337,19 @@ test "Command.init… apply the CLI's limits to typed arguments" {
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x80"));
     try std.testing.expectEqual(null, Command.initSend("48:notes", "fake\xc2\x9f"));
     try std.testing.expect(Command.initSend("48:notes", "fake\xc2\xa0") != null);
+}
+
+test "selfUser takes your user from the cache without a request" {
+    var client: chat.Client = undefined;
+    // A fake token: a request would fail with another error, and `response_status` would be set.
+    try client.init(std.testing.allocator, std.testing.io, .emea, "fake-token");
+    defer client.deinit();
+    var cache: Cache = .init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.putSelf(&.{ .mri = "8:orgid:fake-self", .name = "Fake Self", .upn = "fake@x" });
+
+    const user = try selfUser(&client, &cache);
+    try std.testing.expectEqualStrings("8:orgid:fake-self", user.mri);
+    try std.testing.expectEqualStrings("Fake Self", user.name);
+    try std.testing.expectEqual(null, client.response_status);
 }

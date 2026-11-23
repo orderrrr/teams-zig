@@ -5,6 +5,7 @@ const chat = teams.chat;
 const core_foundation = teams.macos.core_foundation;
 const commands = @import("commands.zig");
 const Server = @import("Server.zig");
+const Cache = @import("Cache.zig");
 const Command = commands.Command;
 const Clock = commands.Clock;
 const connect = commands.connect;
@@ -43,9 +44,17 @@ pub fn main(init: std.process.Init) !u8 {
     const zone = core_foundation.TimeZone.copySystem();
     defer core_foundation.release(zone);
 
+    const home = openHome(init.io, init.environ_map);
+    defer if (home) |dir| dir.close(init.io);
+    var cache = try loadCache(init.gpa, init.io, home);
+    defer cache.deinit();
+    // Saved even after a failure: what was learned, or a dropped entry, still holds.
+    defer saveCache(&cache, init.io, home);
+
     var clock: Clock = .{ .zone = zone, .now_seconds = Io.Clock.real.now(init.io).toSeconds() };
     requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
-    command.run(&client, init.io, &clock, stdout, stderr, &requests_started_at) catch |err| {
+    const started_at = &requests_started_at;
+    command.run(&client, &cache, init.io, &clock, stdout, stderr, started_at) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
         // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
         // would only hide that.
@@ -127,6 +136,15 @@ const McpRunner = struct {
         };
         defer client.deinit();
 
+        // Read for every call, so a cache deleted at sign-in takes effect at once.
+        const home = openHome(runner.io, runner.environment);
+        defer if (home) |dir| dir.close(runner.io);
+        var cache = loadCache(runner.gpa, runner.io, home) catch |err| {
+            return .{ .err = err, .status = null };
+        };
+        defer cache.deinit();
+        defer saveCache(&cache, runner.io, home);
+
         var clock: Clock = .{
             .zone = runner.zone,
             .now_seconds = Io.Clock.real.now(runner.io).toSeconds(),
@@ -136,6 +154,7 @@ const McpRunner = struct {
         defer requests_started_at.store(requests_idle, .release);
         command.run(
             &client,
+            &cache,
             runner.io,
             &clock,
             output,
@@ -149,6 +168,28 @@ const McpRunner = struct {
         return null;
     }
 };
+
+/// Your home directory, which holds the cache (see `Cache.sub_path`), or null without one: then
+/// the cache stays empty and isn't saved.
+fn openHome(io: Io, environment: *const std.process.Environ.Map) ?Io.Dir {
+    const home_path = environment.get("HOME") orelse return null;
+    if (!std.fs.path.isAbsolute(home_path)) return null;
+    return Io.Dir.openDirAbsolute(io, home_path, .{}) catch null;
+}
+
+/// The cache under `home`, or an empty one without a home.
+fn loadCache(gpa: std.mem.Allocator, io: Io, home: ?Io.Dir) error{OutOfMemory}!Cache {
+    const dir = home orelse return .init(gpa);
+    return Cache.load(gpa, io, dir);
+}
+
+/// Saves `cache` under `home` if it changed. A failed save only costs requests next time, so
+/// the command goes on without it.
+fn saveCache(cache: *const Cache, io: Io, home: ?Io.Dir) void {
+    const dir = home orelse return;
+    if (!cache.changed) return;
+    cache.save(io, dir) catch {};
+}
 
 /// Starts the watchdog thread. Without it a stalled request would hang forever; if the thread
 /// can't start, commands still run, just unbounded.

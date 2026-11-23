@@ -14,6 +14,8 @@ self_user: ?User = null,
 persons: std.StringArrayHashMapUnmanaged([]const u8) = .empty,
 /// Lower-cased chat name to chat id.
 chats: std.StringArrayHashMapUnmanaged([]const u8) = .empty,
+/// Whether anything changed since `load`, so `save` has something to write.
+changed: bool = false,
 
 /// The most `person` entries kept; past it, new ones are dropped.
 pub const person_count_max = 1024;
@@ -32,6 +34,11 @@ pub const User = struct {
     mri: []const u8,
     name: []const u8,
     upn: []const u8,
+
+    fn storable(user: *const User) bool {
+        return Cache.storable(user.mri) and Cache.storable(user.name) and
+            Cache.storable(user.upn);
+    }
 };
 
 /// Where the cache file lives, under your home directory. Only `scripts/teams-token.fish`
@@ -94,6 +101,8 @@ pub fn parse(cache: *Cache, text: []const u8) error{OutOfMemory}!void {
         error.OutOfMemory => return error.OutOfMemory,
         error.BadLine => cache.clear(),
     };
+    // What was just read is what the file holds.
+    cache.changed = false;
 }
 
 fn parseLines(cache: *Cache, text: []const u8) error{ OutOfMemory, BadLine }!void {
@@ -107,7 +116,9 @@ fn parseLines(cache: *Cache, text: []const u8) error{ OutOfMemory, BadLine }!voi
         if (std.mem.eql(u8, kind, "self")) {
             const third = fields.next() orelse return error.BadLine;
             if (fields.next() != null) return error.BadLine;
-            try cache.putSelf(&.{ .mri = first, .name = second, .upn = third });
+            const user: User = .{ .mri = first, .name = second, .upn = third };
+            if (!user.storable()) return error.BadLine;
+            try cache.putSelf(&user);
             continue;
         }
         if (fields.next() != null) return error.BadLine;
@@ -133,7 +144,10 @@ fn clear(cache: *Cache) void {
 /// Writes the cache in the form `parse` reads.
 pub fn write(cache: *const Cache, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     if (cache.self_user) |user| {
-        try writer.print("self\t{s}\t{s}\t{s}\n", .{ user.mri, user.name, user.upn });
+        // A user that can't go on a line is kept for this run only.
+        if (user.storable()) {
+            try writer.print("self\t{s}\t{s}\t{s}\n", .{ user.mri, user.name, user.upn });
+        }
     }
     for (cache.persons.keys(), cache.persons.values()) |id, name| {
         try writer.print("person\t{s}\t{s}\n", .{ id, name });
@@ -143,10 +157,11 @@ pub fn write(cache: *const Cache, writer: *std.Io.Writer) std.Io.Writer.Error!vo
     }
 }
 
-/// Remembers your user. A field that can't be stored (see `storable`) leaves it unchanged.
+/// Remembers your user. One that can't go on a line (see `storable`) is kept for this run, but
+/// not written.
 pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
-    if (!storable(user.mri) or !storable(user.name) or !storable(user.upn)) return;
     const arena = cache.arena.allocator();
+    cache.changed = true;
     cache.self_user = .{
         .mri = try arena.dupe(u8, user.mri),
         .name = try arena.dupe(u8, user.name),
@@ -157,22 +172,22 @@ pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
 /// Remembers the other person's name in the 1:1 chat `id`. Dropped past `person_count_max`, or
 /// if either can't be stored.
 pub fn putPerson(cache: *Cache, id: []const u8, name: []const u8) error{OutOfMemory}!void {
-    try putEntry(&cache.persons, cache.arena.allocator(), person_count_max, id, name);
+    try cache.putEntry(&cache.persons, person_count_max, id, name);
 }
 
 /// Remembers that `name` (any case) picks the chat `id`. Dropped past `chat_count_max`, or if
 /// either can't be stored.
 pub fn putChat(cache: *Cache, name: []const u8, id: []const u8) error{OutOfMemory}!void {
-    const arena = cache.arena.allocator();
-    const name_lower = try std.ascii.allocLowerString(arena, name);
-    try putEntry(&cache.chats, arena, chat_count_max, name_lower, id);
+    var name_buffer: [256]u8 = undefined;
+    if (name.len > name_buffer.len) return;
+    try cache.putEntry(&cache.chats, chat_count_max, std.ascii.lowerString(&name_buffer, name), id);
 }
 
 /// Forgets `name` (any case), as when its chat id answers 404.
 pub fn removeChat(cache: *Cache, name: []const u8) void {
     var name_buffer: [256]u8 = undefined;
     if (name.len > name_buffer.len) return;
-    _ = cache.chats.orderedRemove(std.ascii.lowerString(&name_buffer, name));
+    if (cache.chats.orderedRemove(std.ascii.lowerString(&name_buffer, name))) cache.changed = true;
 }
 
 /// The chat id `name` (any case) picks, if remembered. Borrowed from the cache.
@@ -188,19 +203,23 @@ pub fn personName(cache: *const Cache, id: []const u8) ?[]const u8 {
 }
 
 fn putEntry(
+    cache: *Cache,
     map: *std.StringArrayHashMapUnmanaged([]const u8),
-    arena: std.mem.Allocator,
     count_max: u32,
     key: []const u8,
     value: []const u8,
 ) error{OutOfMemory}!void {
     if (!storable(key) or !storable(value)) return;
+    const arena = cache.arena.allocator();
     if (map.getPtr(key)) |existing| {
+        if (std.mem.eql(u8, existing.*, value)) return;
         existing.* = try arena.dupe(u8, value);
+        cache.changed = true;
         return;
     }
     if (map.count() >= count_max) return;
     try map.put(arena, try arena.dupe(u8, key), try arena.dupe(u8, value));
+    cache.changed = true;
 }
 
 /// Whether `value` fits on a cache line: not empty, at most 256 bytes, and no tab, newline or
