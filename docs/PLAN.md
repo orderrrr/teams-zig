@@ -500,98 +500,6 @@ On 2026-11-23, with the owner's go-ahead in the work session ("send to notes whe
 
 Parallel lookups. Paging sizes. A cache age limit. Caching message content. Any write but `send`.
 
-## M8: sign-in in the binary, and a release on GitHub
-
-Asked for by the owner on 2026-11-23. Two goals:
-
-1. `teams-zig login` replaces `scripts/teams-token.fish`. A user then needs no fish, agent-browser or jq.
-2. A standalone binary on the GitHub releases page of `orderrrr/teams-zig`. A user downloads it and runs `login`, the CLI and `mcp` with no Zig compiler.
-
-Plan approved by the owner on 2026-11-23, with the answers below. M8 starts after M7 is resolved. The live sign-ins (M8.1, M8.10) and the push, tag and release (M8.15) each wait for the owner's go-ahead at that moment in the work session.
-
-Owner decisions (2026-11-23):
-
-- **Client id.** Sign in as the Teams desktop client, `1fec8e78-bce4-4aaf-ab1b-5451cc387264`. The owner knows security tools may flag these sign-ins.
-- **No automatic renewal in M8.** On `TokenExpired`, the CLI and the MCP server report the error as now; `teams-zig login` renews.
-- **Targets.** `aarch64-macos` only.
-- **Publish.** A local build plus `gh release create`, run by the owner. No GitHub Actions workflow.
-- **The script.** M8.11 deletes `scripts/teams-token.fish` and changes the line about it in `CLAUDE.md`.
-
-### Protocol facts
-
-Checked by reading docs only. No request with a token and no sign-in was made during planning.
-
-- **Skype token from a Bearer token.** `POST https://teams.microsoft.com/api/authsvc/v1.0/authz` with `Authorization: Bearer <token>` and no body returns the skype token. Sources: `inspo/teams-api/.github/copilot-instructions.md` ("Gotchas"); AADInternals `Teams_utils.ps1` (<https://github.com/Gerenios/AADInternals/blob/master/Teams_utils.ps1>).
-- **The authz answer.** `tokens.skypeToken`, `tokens.expiresIn`, `region` (for example `emea`), `partition` (for example `emea01`) and `regionGtms.chatService`. Source: fossteams `authz.go` (<https://pkg.go.dev/github.com/fossteams/teams-api/pkg>, 2022). *Not checked live:* the field names may have changed since 2022.
-- **The Bearer token's audience** is `https://api.spaces.skype.com`. Source: AADInternals, and the inspo table of the two tokens.
-- **Client id.** `1fec8e78-bce4-4aaf-ab1b-5451cc387264` is the Teams desktop and mobile client, a public client and a member of the "family of client ids" (FOCI). AADInternals uses it for the `api.spaces.skype.com` token. Sources: AADInternals; <https://raw.githubusercontent.com/secureworks/family-of-client-ids-research/main/known-foci-clients.csv>. The web client `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` is a single-page app: its refresh tokens last 24 hours and its redirect goes only to the Teams web host, so it does not fit a CLI. Source: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens>.
-- **Device code flow.** `POST https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode` with `client_id` and `scope`. The answer has `device_code`, `user_code`, `verification_uri`, `expires_in` (900 s by default), `interval` and `message`. The client polls `/oauth2/v2.0/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`. The errors are `authorization_pending`, `authorization_declined`, `bad_verification_code` and `expired_token`; RFC 8628 adds `slow_down`. A refresh token comes only if the scope holds `offline_access`. Source: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>.
-- **Authorization code flow with PKCE.** `/oauth2/v2.0/authorize` with `code_challenge` and `code_challenge_method=S256`, then `/oauth2/v2.0/token` with `code_verifier`. A public client sends no secret. The redirect URI must be registered on the app; for `http://localhost` the port is ignored. The code lives about one minute. Sources: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow>, <https://learn.microsoft.com/en-us/entra/identity-platform/reply-url>.
-- **Redirect URIs of the Teams client.** `https://login.microsoftonline.com/common/oauth2/nativeclient` is in use with this client id (<https://cyberpress.org/steals-microsoft-entra/>). *Not checked:* whether a loopback `http://localhost` redirect is registered for it. M8.1 checks this.
-- **Refresh tokens** last 90 days by default (24 hours for single-page apps). Each use returns a new refresh token, which replaces the old one. Source: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens>. So `refresh token → Bearer token → authz` renews the skype token, which lasts about 24 hours, with no new sign-in. *Not checked live.*
-- **Conditional Access** can block the device code flow ("Authentication flows" condition), and Microsoft's page tells admins to block it where it is not used. Source: <https://learn.microsoft.com/en-us/entra/identity/conditional-access/policy-block-authentication-flows>. A device code sign-in also carries no device identity, so a policy that needs a compliant or joined device fails it too.
-- **Detection.** Security tools flag sign-ins with this client id from unusual tools, because attack tools (TeamFiltration, token theft) use it. Sources: <https://www.elastic.co/guide/en/security/8.19/entra-id-sign-in-teamfiltration-user-agent-detected.html>, <https://cyberpress.org/steals-microsoft-entra/>. The script's sign-in looks like the Teams web client, so this risk is new in M8.
-- **std has what the flows need.** `std.Io.net.IpAddress.listen` and `Server.accept` (loopback listener), `std.base64.url_safe_no_pad`, `Io.randomSecure`, and SHA-256 in `std.crypto`. Checked in the Zig 0.17.1 sources.
-- **`/usr/bin/security -i`** reads commands on stdin until end of input (`man security`). So a token can go to the keychain on stdin and never in argv. The script puts it in argv today.
-
-### Facts checked on this Mac (2026-11-23)
-
-From a copy of `HEAD` in a scratch directory; the repo was not changed.
-
-- `zig build -Dtarget=aarch64-macos` and `-Dtarget=x86_64-macos` both fail today: "unable to find system framework CoreFoundation". With an explicit target, Zig does not look for the macOS SDK.
-- With the SDK's `System/Library/Frameworks` and `usr/lib` added as search paths (path from `xcrun --show-sdk-path`), both targets build. `std.zig.system.darwin.getSdk` gives that path from `build.zig`.
-- The `aarch64` binary is 1.3 MB, ad-hoc signed by the linker (`flags=adhoc,linker-signed`), links only CoreFoundation, Security, libSystem and libobjc, and has `minos 15.0`. It runs.
-- The `x86_64` binary is 1.5 MB, `minos 15.0`, not signed. It could not run here: this Mac has no Rosetta ("Bad CPU type in executable").
-- With a `com.apple.quarantine` attribute (as a browser download gets), the binary is killed at start (exit 137) and `spctl` says "rejected". After `xattr -d com.apple.quarantine`, it runs.
-- The repo on GitHub is public, has no `.github/` folder and no releases. Local `main` is ahead of `microslopgithub/main`.
-
-### Plan decisions
-
-- **One client id**: `1fec8e78-bce4-4aaf-ab1b-5451cc387264`, tenant `organizations` (work and school accounts only), scope `https://api.spaces.skype.com/.default offline_access`. If the v2 endpoint refuses that scope, M8.1 tries the v1 form (`resource=`), which AADInternals uses.
-- **Default flow: authorization code with PKCE in the system browser.** Reasons: the "block device code" policy does not stop it, and the system browser carries the device's sign-in state (for example the Enterprise SSO plug-in), so a "compliant device" policy can pass. `/usr/bin/open` opens the URL; the URL holds no secret. The redirect is a loopback listener on `127.0.0.1` if M8.1 finds it allowed. If not, the redirect is `nativeclient` and the user pastes the final URL from the address bar into the terminal.
-- **Second flow: `teams-zig login --device`**, the device code flow, for a Mac with no browser at hand (for example over SSH). It prints Microsoft's `message` (the URL and the user code), then polls at `interval`, and stops at `expires_in`.
-- **Renewal.** `teams-zig login` first tries the stored refresh token. It opens a browser only when there is no refresh token or Microsoft refuses it.
-- **Keychain contract.** The `teams-zig` service gets a third account, `refresh-token`. `skype-token` and `region` stay as they are, so the rest of the code does not change. All three go through `/usr/bin/security -i` on stdin, with `-U -A` as now, so the readers still need no prompt (M1.7). A value is checked for printable ASCII with no quote or space before it is written.
-- **Region**: `region` from the authz answer, if it is `amer`, `emea` or `apac`. Else the region from the `regionGtms.chatService` host (`{region}.ng.msg.teams.microsoft.com`). Else `login` fails and names the field it could not read (never its value).
-- **Hosts.** The Bearer token goes only to `teams.microsoft.com` (authz). The refresh token and the code go only to `login.microsoftonline.com`. Redirects are refused, as in M1.8.
-- **No secret is printed**: no token, code, verifier or refresh token in output, logs, errors, tests or chat. Microsoft's `error` and `error_description` (which hold `AADSTS` codes) are printed, since they hold no secret. Tests use fake values only.
-- **The cache file** (`~/Library/Caches/teams-zig/cache.txt`, M7) is deleted after each sign-in that stores a new token, as the script does after M7.10.
-- **Release targets.** `aarch64-macos` only (the owner's answer). Minimum macOS is Zig 0.17's default, 15.0.
-- **Release build.** A new `zig build release` step builds each release target with `-Doptimize=ReleaseSafe` into `zig-out/release/teams-zig-<target>`. When the target is macOS and not native, `build.zig` adds the SDK search paths from `std.zig.system.darwin.getSdk`. Plain `zig build` stays as now. The build machine needs Xcode or the Command Line Tools, as today.
-- **Publish.** A local build plus `gh release create`, run by the owner (the owner's answer). Each release has one `teams-zig-<version>-<target>.tar.gz` per target (tar keeps the execute bit, which a raw browser download loses) and a `SHA256SUMS` file.
-- **Gatekeeper.** No Developer ID signing and no notarization in M8: both need a paid Apple Developer account. The README tells users to run `xattr -d com.apple.quarantine` on a browser download, or to use `curl`. *Not checked:* that a file from `curl` or `gh release download` gets no quarantine attribute.
-- The version becomes 0.11.0. M8 comes after M7 is resolved.
-
-### Chunks
-
-1. **M8.1 protocol check (live).** *Needs the owner's go-ahead in the work session.* (a) Open the authorize URL with a `http://localhost:<port>` redirect in the browser. The owner says whether Microsoft shows the sign-in page or error `AADSTS50011` (redirect not registered), then closes the window without signing in. (b) One device code sign-in by the owner, then one authz POST, with a small Zig test program that is not committed, or curl with tokens on stdin. Record only the status, the authz field names and the token lifetimes. Nothing goes to the keychain. If authz refuses the token, stop and tell the owner; the rest of M8.2–M8.12 depends on it.
-2. **M8.2 PKCE values.** Verifier from 32 random bytes in base64url, S256 challenge, and a random `state`. Tests with the RFC 7636 appendix B example.
-3. **M8.3 authorize URL.** Builds the URL from the client id, tenant, scope, redirect, challenge and state, with form escapes. Tests.
-4. **M8.4 redirect capture.** The loopback listener: one `GET` on `127.0.0.1`, read `code` and `state` (or `error`), check `state`, answer a short "you can close this window" page, then close. Or, if M8.1 found no loopback, parse the pasted `nativeclient` URL. Limits: request at most 8 KiB, wait at most 300 s. Tests with fixed request bytes: good, wrong state, error, overlong.
-5. **M8.5 token requests.** Form bodies for `authorization_code`, `device_code` and `refresh_token`. Parse the answer (`access_token`, `refresh_token`, `expires_in`) and the error answer (`error`, `error_description`). Tests with fake JSON.
-6. **M8.6 device code flow.** Request the code, print `message`, poll at `interval` (plus 5 s on `slow_down`), stop at `expires_in`. Tests with a fake transport and a fake clock.
-7. **M8.7 authz exchange.** POST with the Bearer token; parse `tokens.skypeToken`, `tokens.expiresIn` and the region as above. Tests with fake JSON: each region source, no region, no token.
-8. **M8.8 keychain write on stdin.** Write items through `/usr/bin/security -i`. Tests use a throwaway service name and fake values, and delete what they write, as M1.4 does.
-9. **M8.9 `login` command.** Refresh token first, then the browser flow, or the device flow with `--device`. Store the three items, delete the cache file, and print "Signed in; region <region>; the skype token lasts <hours> hours." `usage` and the error hints name `teams-zig login` instead of the script. Tests of each path with fakes.
-10. **M8.10 live sign-in.** *Needs the owner's go-ahead in the work session; it writes the real keychain items.* `teams-zig login` (browser), then `whoami`; `teams-zig login` again (refresh token, no browser); then `teams-zig login --device`. If the org blocks a flow, record the `AADSTS` code. Report no token values.
-11. **M8.11 retire the script.** Delete `scripts/teams-token.fish`. README "Sign in" becomes `teams-zig login`. The first paragraph of `CLAUDE.md` names `teams-zig login` instead of the script (the owner's answer).
-12. **M8.12 release step.** `zig build release` as above. Check each binary with `file`, `codesign -dv` and `otool -L`, and run the native one.
-13. **M8.13 README install.** Download, check `SHA256SUMS`, `tar -xzf`, `xattr -d com.apple.quarantine`, put the binary on `PATH`, `teams-zig login`, and `claude mcp add` with the installed path.
-14. **M8.14 0.11.0 and gate.** Version, CHANGELOG, then the milestone gate.
-15. **M8.15 first release.** *Owner step, after the gate.* The owner pushes `main`, then tags `v0.11.0`, runs `zig build release`, makes the tar files and `SHA256SUMS`, and runs `gh release create v0.11.0 --title v0.11.0 --notes-file <CHANGELOG part> <files>`. Agents never push. Then one check: download the asset with a browser, follow the README, and run `teams-zig --help`.
-
-### Owner approvals in this plan
-
-- New outside tools: `/usr/bin/open` (system), and Microsoft's sign-in service with the Teams client id.
-- Secrets and the keychain: a new `refresh-token` item; the writes in M8.8 tests (fake values) and M8.10 (real).
-- Live sign-ins: M8.1 and M8.10, each confirmed at that moment.
-- Push, tag and release: M8.15, by the owner.
-- `CLAUDE.md` and README changes: M8.11 and M8.13.
-
-### Out of M8
-
-Developer ID signing and notarization. Homebrew. A universal (`lipo`) binary. Linux or Windows. A GitHub Actions workflow. Renewal inside the CLI or MCP server on `TokenExpired` (the owner's answer). Bearer-token APIs (search, profiles). Personal Microsoft accounts. Any write to Teams.
-
 ## M7 gate
 
 - **Round 1** (mr-review, STYLE.md and Tiger Style reviews of `3f85955..fda277a`). mr-review's blocker: a full cache (about 1.06 MB) was larger than the 256 KiB a load read, so it would be thrown away and refilled forever; the file limit is now computed from the line sizes, with comptime asserts and a full-cache test. Per the plan, a full listing now rewrites the chat-name map, so a name that became ambiguous is forgotten. The gzip drain reads at most one byte past the gzip stream (data there is `BadResponse`), and its comment is right about the footer. STYLE: `FoundChat` a union (3.1), `McpRunner.dropClient` apart from `deinit` (4.4), the client and its last use one optional (3.5), helper names with their caller's (1.6). Tiger Style: `fetch` under 70 lines (`fetchOptions`), pair and count asserts, split compound conditions, typed limits, units in names, explicit options, edge tests. Four findings went to the owner: a running MCP server keeping the old account after a sign-in, the silent cache-save failure, the 30 s send idle rule, and the longer parameter lists.
@@ -619,3 +527,111 @@ Owner's answers to Q5 and Q6 (2026-11-23):
 - **Round 11** (reviews of `fc2c49b..8ddfd90`). Tiger Style: blank lines around the cache's allocation and `defer`s in `runOnce` and in the `readCredentials` test; that test's name and a top comment cover the cases it refuses. mr-review and STYLE: nothing new.
 - **Round 12:** all three reviews found nothing new. Gate passed, with every owner question answered. M7 resolved at 0.10.0.
 
+## M8: `teams-zig login` and a release on GitHub
+
+Asked for by the owner on 2026-11-23. Two goals:
+
+1. `teams-zig login` replaces `scripts/teams-token.fish`. It runs agent-browser as the script does, but parses its output in Zig, so a user needs no fish and no jq.
+2. A standalone binary on the GitHub releases page of `orderrrr/teams-zig`. A user downloads it and runs `login`, the CLI and `mcp` with no Zig compiler.
+
+The first plan (approved 2026-11-23) signed in with Microsoft's OAuth flows. The owner changed M8 on 2026-11-23: `login` wraps agent-browser, and the OAuth work moves to a later milestone, together with the embedded sign-in window. The owner approved this revised plan on 2026-11-23, with the answers below. The live sign-in (M8.7) and the push, tag and release (M8.12) each wait for the owner's go-ahead at that moment in the work session.
+
+Owner decisions (2026-11-23):
+
+- **Targets.** `aarch64-macos` only.
+- **Publish.** A local build plus `gh release create`, run by the owner. No GitHub Actions workflow.
+- **The script.** M8.7 deletes `scripts/teams-token.fish` and changes the line about it in `CLAUDE.md`.
+- **Node.** `login` needs agent-browser, and Homebrew's agent-browser needs Node. The CLI, the MCP server and the release binary do not.
+- **agent-browser version.** The README names the tested version, 0.43.0. Nothing pins a version.
+- **agent-browser's browser.** The README lists `agent-browser install` as the user's step. Agents never run it.
+- **For the later sign-in milestone, not M8:** the Teams desktop client id `1fec8e78-bce4-4aaf-ab1b-5451cc387264` (the owner knows security tools may flag it), and no automatic renewal on `TokenExpired`.
+
+### How `login` signs in
+
+The same steps as `scripts/teams-token.fish`, with the same names, so a profile that is already signed in keeps working:
+
+1. Run `agent-browser --session teams-zig --headed --profile "~/Library/Application Support/teams-zig/browser" open https://teams.microsoft.com`. The profile directory is created first.
+2. Tell the user to sign in in the browser window, and wait up to 300 s.
+3. Every 2 s, run `agent-browser --session teams-zig network requests --json` and parse its output in Zig.
+4. Take the skype token from the body of a `POST` to a URL ending in `/v1/skypetokenauth` (`skypetoken=<token>`), else from an `x-skypetoken` header (any case, with any `skypetoken=` prefix removed). Take the region from a URL that starts `https://{region}.ng.msg.teams.microsoft.com/` or `https://teams.cloud.microsoft/api/chatsvc/{region}/` or `.../api/mt/{region}/`. The region must be `amer`, `emea` or `apac`. Stop when both are found.
+5. Run `agent-browser --session teams-zig close`, on success and on every failure.
+6. Write `skype-token` and `region` to the `teams-zig` keychain service, delete the cache file, and print "Stored the skype token and region <region> in the login keychain."
+
+### Plan decisions
+
+- **agent-browser is a child process**, found on `PATH` as `agent-browser`. Arguments go in argv; nothing secret does. `--session teams-zig` replaces the script's `AGENT_BROWSER_SESSION` variable, so `login` sets no environment. If the binary is missing, `login` fails with a hint that names the install commands (`brew install agent-browser`, then `agent-browser install`).
+- **The JSON contract** is what the script reads today: `.data.requests[]` with `method`, `url`, `postData` and `headers`. Parsing ignores other fields. Output that does not match fails `login` with an error that names agent-browser's version check (`agent-browser --version`), never the output. M8.1 records the shape from agent-browser 0.43.0 on a page with no sign-in.
+- **Limits (Tiger Style).** One `network requests` output is at most 64 MiB; more fails `login` with `AgentBrowserOutputTooLarge`. The wait is at most 300 s, polled every 2 s. A token is at most 16 KiB.
+- **No secret is printed.** Not the token, and not agent-browser's output, which holds it. Errors name what was missing ("no skype token seen in 300 seconds"), as the script's do.
+- **Keychain write on stdin.** `login` runs `/usr/bin/security -i` and writes two `add-generic-password -U -A -s teams-zig -a <account> -w <value>` lines on its stdin, so the token is never in argv (the script puts it in argv today). `-U -A` as now, so the readers need no prompt (M1.7). Before the write, each value is checked for printable ASCII with no space, quote or backslash, since `security -i` splits its lines on those. `security -i` may exit 0 after a failed line (*not checked*), so `login` reads both items back through the existing reader and compares them; a mismatch is `KeychainWriteFailed`.
+- **The cache file** (`~/Library/Caches/teams-zig/cache.txt`, M7) is deleted after each sign-in that stores a token, as the script does after M7.10. M7's front-door base URL and the MCP server's token check on each call stay as they are: a running server picks up the new token at its next call.
+- **Hints.** Every error hint that says "run scripts/teams-token.fish" says "run teams-zig login", and so does `usage`.
+- **Release targets.** `aarch64-macos` only. Minimum macOS is Zig 0.17's default, 15.0.
+- **Release build.** A new `zig build release` step builds `aarch64-macos` with `-Doptimize=ReleaseSafe` into `zig-out/release/teams-zig-aarch64-macos`. When the target is macOS and not native, `build.zig` adds the SDK search paths from `std.zig.system.darwin.getSdk`. Plain `zig build` stays as now. The build machine needs Xcode or the Command Line Tools, as today.
+- **Publish.** The owner builds locally and runs `gh release create`. Each release has `teams-zig-<version>-aarch64-macos.tar.gz` (tar keeps the execute bit, which a raw browser download loses) and a `SHA256SUMS` file.
+- **Gatekeeper.** No Developer ID signing and no notarization: both need a paid Apple Developer account. The README tells users to run `xattr -d com.apple.quarantine` on a browser download.
+- **README.** "Sign in" says `login` needs agent-browser, and how to install it: `brew install agent-browser` (Homebrew's formula needs Node), then `agent-browser install`, which fetches its browser.
+- The version becomes 0.11.0.
+
+### Facts checked on this Mac (2026-11-23)
+
+From a copy of `HEAD` in a scratch directory; the repo was not changed.
+
+- `zig build -Dtarget=aarch64-macos` and `-Dtarget=x86_64-macos` both fail today: "unable to find system framework CoreFoundation". With an explicit target, Zig does not look for the macOS SDK.
+- With the SDK's `System/Library/Frameworks` and `usr/lib` added as search paths (path from `xcrun --show-sdk-path`), both targets build. `std.zig.system.darwin.getSdk` gives that path from `build.zig`.
+- The `aarch64` binary is 1.3 MB, ad-hoc signed by the linker (`flags=adhoc,linker-signed`), links only CoreFoundation, Security, libSystem and libobjc, and has `minos 15.0`. It runs.
+- The `x86_64` binary is 1.5 MB, `minos 15.0`, not signed. It could not run here: this Mac has no Rosetta ("Bad CPU type in executable").
+- With a `com.apple.quarantine` attribute (as a browser download gets), the binary is killed at start (exit 137) and `spctl` says "rejected". After `xattr -d com.apple.quarantine`, it runs.
+- The repo on GitHub is public, has no `.github/` folder and no releases. Local `main` is ahead of `microslopgithub/main`.
+
+### Chunks
+
+1. **M8.1 agent-browser output.** Run agent-browser 0.43.0 on `https://example.com` (no Teams, no sign-in), save `network requests --json`, and check it has the fields the script reads. Write the test fixtures from that shape, with fake tokens and fake URLs only.
+2. **M8.2 find the token and region.** A function that takes one `network requests` output and returns the skype token and region it finds, if any. Tests: the POST body, the header (mixed case, with and without the prefix), each region pattern, an unknown region, neither, bad JSON, a token over 16 KiB.
+3. **M8.3 run agent-browser.** Run it as a child with given arguments; read its stdout up to 64 MiB; report a missing binary, a non-zero exit and too much output as distinct errors. A seam lets tests fake it. Tests with the fake.
+4. **M8.4 sign-in loop.** Open, poll every 2 s up to 300 s, stop when both values are found, always close. Tests with the fake runner and a fake clock: found at once, found late, time out, browser closed (non-zero exit), close after each failure.
+5. **M8.5 keychain write on stdin.** `security -i` with the two lines, the value check, and the read-back. Tests use a throwaway service name and fake values, and delete what they write, as M1.4 does.
+6. **M8.6 `login` command.** `teams-zig login` in `Command.parse` and `usage`; the loop, the write, the cache delete and the message. Hints name `teams-zig login`. Tests of the wiring with fakes.
+7. **M8.7 live sign-in.** *Needs the owner's go-ahead in the work session; it writes the real keychain items.* `teams-zig login`, then `whoami` and `chats 3`. Counts only; no token values.
+8. **M8.8 retire the script.** Delete `scripts/teams-token.fish`. README "Sign in" becomes `teams-zig login`, with the agent-browser install. The first paragraph of `CLAUDE.md` names `teams-zig login` instead of the script.
+9. **M8.9 release step.** `zig build release` as above. Check the binary with `file`, `codesign -dv` and `otool -L`, and run it.
+10. **M8.10 README install.** Download, check `SHA256SUMS`, `tar -xzf`, `xattr -d com.apple.quarantine`, put the binary on `PATH`, install agent-browser, `teams-zig login`, and `claude mcp add` with the installed path.
+11. **M8.11 0.11.0 and gate.** Version, CHANGELOG, then the milestone gate.
+12. **M8.12 first release.** *Owner step, after the gate.* The owner pushes `main`, tags `v0.11.0`, runs `zig build release`, makes the tar file and `SHA256SUMS`, and runs `gh release create v0.11.0 --title v0.11.0 --notes-file <CHANGELOG part> <files>`. Agents never push. Then one check: download the asset with a browser, follow the README, and run `teams-zig --help`.
+
+### Owner approvals in this plan
+
+- agent-browser stays an outside tool (approved in M1.5), now run by `teams-zig login`.
+- The keychain: the writes in M8.5's tests (fake values) and M8.7 (real).
+- The live sign-in: M8.7, confirmed at that moment.
+- Push, tag and release: M8.12, by the owner.
+- `CLAUDE.md` and README changes: M8.8 and M8.10.
+
+### Out of M8
+
+Sign-in without agent-browser, for a later milestone: the device code flow, the authorization code flow with PKCE and a loopback or pasted redirect, the `authz` exchange, a `refresh-token` keychain item, and renewal with it. Developer ID signing and notarization. Homebrew for teams-zig. A universal (`lipo`) binary. Intel Macs. Linux or Windows. A GitHub Actions workflow. Bearer-token APIs (search, profiles). Personal Microsoft accounts. Any write to Teams.
+
+An embedded sign-in window (`WKWebView` or `ASWebAuthenticationSession`) instead of the system browser: a candidate for M9 (the owner's answer, 2026-11-23).
+
+### Sign-in protocol research (for the later milestone)
+
+Read from docs during M8 planning. No request with a token was made.
+
+- **Skype token from a Bearer token.** `POST https://teams.microsoft.com/api/authsvc/v1.0/authz` with `Authorization: Bearer <token>` and no body returns the skype token. Sources: `inspo/teams-api/.github/copilot-instructions.md` ("Gotchas"); AADInternals `Teams_utils.ps1` (<https://github.com/Gerenios/AADInternals/blob/master/Teams_utils.ps1>).
+- **The authz answer.** `tokens.skypeToken`, `tokens.expiresIn`, `region` (for example `emea`), `partition` (for example `emea01`) and `regionGtms.chatService`. Source: fossteams `authz.go` (<https://pkg.go.dev/github.com/fossteams/teams-api/pkg>, 2022). *Not checked live:* the field names may have changed since 2022.
+- **The Bearer token's audience** is `https://api.spaces.skype.com`. Source: AADInternals, and the inspo table of the two tokens.
+- **Client id.** `1fec8e78-bce4-4aaf-ab1b-5451cc387264` is the Teams desktop and mobile client, a public client and a member of the "family of client ids" (FOCI). AADInternals uses it for the `api.spaces.skype.com` token. Sources: AADInternals; <https://raw.githubusercontent.com/secureworks/family-of-client-ids-research/main/known-foci-clients.csv>. The web client `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` is a single-page app: its refresh tokens last 24 hours and its redirect goes only to the Teams web host, so it does not fit a CLI. Source: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens>.
+- **Device code flow.** `POST https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode` with `client_id` and `scope`. The answer has `device_code`, `user_code`, `verification_uri`, `expires_in` (900 s by default), `interval` and `message`. The client polls `/oauth2/v2.0/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`. The errors are `authorization_pending`, `authorization_declined`, `bad_verification_code` and `expired_token`; RFC 8628 adds `slow_down`. A refresh token comes only if the scope holds `offline_access`. Source: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>.
+- **Authorization code flow with PKCE.** `/oauth2/v2.0/authorize` with `code_challenge` and `code_challenge_method=S256`, then `/oauth2/v2.0/token` with `code_verifier`. A public client sends no secret. The redirect URI must be registered on the app; for `http://localhost` the port is ignored. The code lives about one minute. Sources: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow>, <https://learn.microsoft.com/en-us/entra/identity-platform/reply-url>.
+- **Redirect URIs of the Teams client.** `https://login.microsoftonline.com/common/oauth2/nativeclient` is in use with this client id (<https://cyberpress.org/steals-microsoft-entra/>). *Not checked:* whether a loopback `http://localhost` redirect is registered for it. M8.1 opened the authorize page with this redirect; the result was not recorded before M8 changed.
+- **Refresh tokens** last 90 days by default (24 hours for single-page apps). Each use returns a new refresh token, which replaces the old one. Source: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens>. So `refresh token → Bearer token → authz` renews the skype token, which lasts about 24 hours, with no new sign-in. *Not checked live.*
+- **Conditional Access** can block the device code flow ("Authentication flows" condition), and Microsoft's page tells admins to block it where it is not used. Source: <https://learn.microsoft.com/en-us/entra/identity/conditional-access/policy-block-authentication-flows>. A device code sign-in also carries no device identity, so a policy that needs a compliant or joined device fails it too.
+- **Detection.** Security tools flag sign-ins with this client id from unusual tools, because attack tools (TeamFiltration, token theft) use it. Sources: <https://www.elastic.co/guide/en/security/8.19/entra-id-sign-in-teamfiltration-user-agent-detected.html>, <https://cyberpress.org/steals-microsoft-entra/>. The script's sign-in looks like the Teams web client, so this risk is new in M8.
+- **std has what the flows need.** `std.Io.net.IpAddress.listen` and `Server.accept` (loopback listener), `std.base64.url_safe_no_pad`, `Io.randomSecure`, and SHA-256 in `std.crypto`. Checked in the Zig 0.17.1 sources.
+- **`/usr/bin/security -i`** reads commands on stdin until end of input (`man security`). So a token can go to the keychain on stdin and never in argv. The script puts it in argv today.
+
+M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 changed:
+
+- `POST https://login.microsoftonline.com/organizations/oauth2/v2.0/devicecode` with client id `1fec8e78-…` accepted the v2 scope `https://api.spaces.skype.com/.default offline_access`. It answered `user_code`, `device_code`, `verification_uri` (`https://login.microsoft.com/device`), `expires_in` 900, `interval` and `message`.
+- The check was stopped while it waited for the sign-in. No token was issued, `authz` and the refresh were not tried, and nothing was written to the keychain.
+- The loopback redirect page (`http://localhost:8400`) was opened; its result was not recorded.
