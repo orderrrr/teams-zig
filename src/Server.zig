@@ -26,6 +26,7 @@ const ErrorCode = enum(i32) {
     parse_error = -32700,
     invalid_request = -32600,
     method_not_found = -32601,
+    invalid_params = -32602,
 };
 
 /// A request's id, echoed in its answer. MCP never uses null.
@@ -103,6 +104,7 @@ fn answer(server: *Server, arena: std.mem.Allocator, line: []const u8) Error!voi
     if (std.mem.eql(u8, request.method, "tools/list")) {
         return server.answerResult(id, RawJson{ .text = tools_list });
     }
+    if (std.mem.eql(u8, request.method, "tools/call")) return server.answerCall(arena, id, &request.params);
     return server.answerError(id, .method_not_found, "Method not found");
 }
 
@@ -122,6 +124,125 @@ fn initializeResult(params: *const std.json.ObjectMap) InitializeResult {
         break :version protocol_versions[0];
     };
     return .{ .protocolVersion = version };
+}
+
+/// Answers a `tools/call`: a call whose name or arguments object is missing or wrong is a
+/// protocol error; arguments the tool refuses are a tool error, so the agent can correct them.
+fn answerCall(
+    server: *Server,
+    arena: std.mem.Allocator,
+    id: Id,
+    params: *const std.json.ObjectMap,
+) Error!void {
+    const name = params.get("name") orelse {
+        return server.answerError(id, .invalid_params, "Invalid params: tools/call needs a tool name");
+    };
+    if (name != .string) {
+        return server.answerError(id, .invalid_params, "Invalid params: tools/call needs a tool name");
+    }
+    const tool = std.meta.stringToEnum(Tool, name.string) orelse {
+        const message = try std.fmt.allocPrint(arena, "Unknown tool: {s}", .{name.string});
+        return server.answerError(id, .invalid_params, message);
+    };
+    const arguments: std.json.ObjectMap = if (params.get("arguments")) |arguments| switch (arguments) {
+        .object => |arguments_object| arguments_object,
+        else => return server.answerError(
+            id,
+            .invalid_params,
+            "Invalid params: a tool's arguments are an object",
+        ),
+    } else .empty;
+
+    const command = tool.command(&arguments) orelse {
+        const message = try std.fmt.allocPrint(
+            arena,
+            "bad arguments for {t}; it takes {s}",
+            .{ tool, tool.usage() },
+        );
+        return server.answerResult(id, CallResult{ .content = &.{.{ .text = message }}, .isError = true });
+    };
+    _ = command;
+    return server.answerError(id, .method_not_found, "Method not found");
+}
+
+/// A `tools/call` result: the command's text, and whether it failed. Field names are MCP's.
+const CallResult = struct {
+    content: []const TextContent,
+    isError: bool,
+
+    const TextContent = struct {
+        type: []const u8 = "text",
+        text: []const u8,
+    };
+};
+
+/// The tools, named as the CLI commands they run.
+const Tool = enum {
+    whoami,
+    chats,
+    messages,
+    unread,
+    send,
+
+    /// The command that `arguments` ask for, with the CLI's checks, or null if they are wrong:
+    /// a field the tool doesn't take, a field of the wrong type, or a value the CLI refuses.
+    /// Borrows `arguments`.
+    fn command(tool: Tool, arguments: *const std.json.ObjectMap) ?commands.Command {
+        const fields_taken: []const []const u8 = switch (tool) {
+            .whoami, .unread => &.{},
+            .chats => &.{"count"},
+            .messages => &.{ "chat", "count" },
+            .send => &.{ "chat", "text" },
+        };
+        for (arguments.keys()) |key| {
+            for (fields_taken) |taken| {
+                if (std.mem.eql(u8, key, taken)) break;
+            } else return null;
+        }
+        return switch (tool) {
+            .whoami => .whoami,
+            .unread => .unread,
+            .chats => commands.Command.initChats(argumentCount(arguments) catch return null),
+            .messages => commands.Command.initMessages(
+                argumentString(arguments, "chat") orelse return null,
+                argumentCount(arguments) catch return null,
+            ),
+            .send => commands.Command.initSend(
+                argumentString(arguments, "chat") orelse return null,
+                argumentString(arguments, "text") orelse return null,
+            ),
+        };
+    }
+
+    /// The arguments the tool takes, for the error that wrong ones get.
+    fn usage(tool: Tool) []const u8 {
+        return switch (tool) {
+            .whoami, .unread => "no arguments",
+            .chats => std.fmt.comptimePrint(
+                "count (optional): 1 to {d}",
+                .{commands.conversation_count_limit},
+            ),
+            .messages => std.fmt.comptimePrint(
+                "chat: its exact name or id; count (optional): 1 to {d}",
+                .{commands.message_count_limit},
+            ),
+            .send => "chat: its exact name or id; text: Markdown, not only whitespace",
+        };
+    }
+};
+
+/// The `count` argument: null if absent, or an error if it isn't a whole number that fits.
+fn argumentCount(arguments: *const std.json.ObjectMap) error{WrongArgument}!?u32 {
+    const count = arguments.get("count") orelse return null;
+    if (count != .integer) return error.WrongArgument;
+    return std.math.cast(u32, count.integer) orelse error.WrongArgument;
+}
+
+/// The string argument `name`, or null if it is absent or not a string. Borrows `arguments`.
+fn argumentString(arguments: *const std.json.ObjectMap, name: []const u8) ?[]const u8 {
+    const value = arguments.get(name) orelse return null;
+    if (value != .string) return null;
+    return value.string;
 }
 
 /// The `tools/list` result: each tool takes the CLI command's arguments, with its limits. Field
@@ -445,6 +566,131 @@ test "tools/list lists the five tools with their arguments and hints" {
         \\"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":true}}
     ++
         \\]}}
+        \\
+    );
+}
+
+/// Parses `arguments_json` as a tool call's arguments for `tool`.
+fn expectToolCommand(tool: Tool, arguments_json: []const u8) !?commands.Command {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const value = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        arena_state.allocator(),
+        arguments_json,
+        .{},
+    );
+    const command = tool.command(&value.object) orelse return null;
+    // The command borrows the arguments; copy out what the tests check before they go.
+    return switch (command) {
+        .whoami, .unread, .chats, .watch => command,
+        .messages => |messages| .{ .messages = .{ .chat = .{ .id = "" }, .count = messages.count } },
+        .send => .{ .send = .{ .chat = .{ .id = "" }, .text = "" } },
+    };
+}
+
+test "Tool.command takes each tool's arguments with the CLI's limits" {
+    try std.testing.expectEqual(.whoami, (try expectToolCommand(.whoami, "{}")).?);
+    try std.testing.expectEqual(.unread, (try expectToolCommand(.unread, "{}")).?);
+    try std.testing.expectEqual(50, (try expectToolCommand(.chats, "{}")).?.chats);
+    try std.testing.expectEqual(100, (try expectToolCommand(.chats,
+        \\{"count":100}
+    )).?.chats);
+    try std.testing.expectEqual(12800, (try expectToolCommand(.messages,
+        \\{"chat":"48:notes","count":12800}
+    )).?.messages.count);
+    try std.testing.expectEqual(50, (try expectToolCommand(.messages,
+        \\{"chat":"Fake Person"}
+    )).?.messages.count);
+    try std.testing.expect((try expectToolCommand(.send,
+        \\{"chat":"48:notes","text":"**fake**"}
+    )) != null);
+
+    const refused = [_]struct { Tool, []const u8 }{
+        .{
+            .whoami,
+            \\{"count":1}
+        },
+        .{
+            .unread,
+            \\{"fake":true}
+        },
+        .{
+            .chats,
+            \\{"count":0}
+        },
+        .{
+            .chats,
+            \\{"count":101}
+        },
+        .{
+            .chats,
+            \\{"count":"10"}
+        },
+        .{
+            .chats,
+            \\{"count":10.5}
+        },
+        .{
+            .chats,
+            \\{"count":-1}
+        },
+        .{
+            .chats,
+            \\{"count":10,"fake":1}
+        },
+        .{
+            .messages,
+            \\{}
+        },
+        .{
+            .messages,
+            \\{"chat":""}
+        },
+        .{
+            .messages,
+            \\{"chat":5}
+        },
+        .{
+            .messages,
+            \\{"chat":"48:notes","count":12801}
+        },
+        .{
+            .send,
+            \\{"chat":"48:notes"}
+        },
+        .{
+            .send,
+            \\{"chat":"48:notes","text":" \n"}
+        },
+        .{
+            .send,
+            \\{"text":"fake"}
+        },
+        .{
+            .send,
+            \\{"chat":"48:notes","text":"fake","fake":1}
+        },
+    };
+    for (refused) |case| {
+        const tool, const arguments = case;
+        try std.testing.expectEqual(null, try expectToolCommand(tool, arguments));
+    }
+}
+
+test "tools/call answers bad arguments with isError and the usage, and an unknown tool with -32602" {
+    try expectAnswers(
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"chats","arguments":{"count":0}}}
+        \\{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fake"}}
+        \\{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}}
+        \\{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"chats","arguments":[]}}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"bad arguments for chats; it takes count (optional): 1 to 100"}],"isError":true}}
+        \\{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Unknown tool: fake"}}
+        \\{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"Invalid params: tools/call needs a tool name"}}
+        \\{"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid params: a tool's arguments are an object"}}
         \\
     );
 }
