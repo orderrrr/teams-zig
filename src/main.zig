@@ -84,9 +84,9 @@ fn serveMcp(init: std.process.Init, stderr: *Io.Writer) !u8 {
         .stderr = stderr,
     };
     var server: Server = .{
-        .gpa = init.gpa,
         .reader = &stdin_file_reader.interface,
         .writer = &stdout_file_writer.interface,
+        .request_memory = &mcp_request_memory,
         .output_buffer = &mcp_output_buffer,
         .runner = runner.interface(),
     };
@@ -100,6 +100,7 @@ fn serveMcp(init: std.process.Init, stderr: *Io.Writer) !u8 {
 
 /// Static, since they are large and live as long as the server (STYLE 6.5).
 var mcp_request_buffer: [Server.request_size_max]u8 = undefined;
+var mcp_request_memory: [Server.request_memory_size_max]u8 = undefined;
 var mcp_output_buffer: [Server.output_size_max]u8 = undefined;
 
 /// Runs each tool's command as one CLI run does: it reads the token again, so one that the token
@@ -113,11 +114,13 @@ const McpRunner = struct {
     stderr: *Io.Writer,
 
     fn interface(runner: *McpRunner) Server.Runner {
-        return .{ .context = runner, .runFn = run };
+        return .{ .context = runner, .run_fn = run };
     }
 
     fn run(context: *anyopaque, command: *const Command, output: *Io.Writer) ?Server.Failure {
         const runner: *McpRunner = @ptrCast(@alignCast(context));
+        // `watch` never ends, so no tool runs it.
+        std.debug.assert(command.* != .watch);
         var client: chat.Client = undefined;
         connect(&client, runner.gpa, runner.io, runner.environment) catch |err| {
             return .{ .err = err, .status = null };
@@ -131,7 +134,10 @@ const McpRunner = struct {
         requests_started_at.store(Io.Clock.awake.now(runner.io).toSeconds(), .release);
         // A failed command leaves the clock running; the server waits next, which mustn't count.
         defer requests_started_at.store(requests_idle, .release);
-        command.run(&client, runner.io, &clock, output, runner.stderr, &requests_started_at) catch |err| {
+        const started_at = &requests_started_at;
+        command.run(&client, runner.io, &clock, output, runner.stderr, started_at) catch |err| {
+            // Client sets response_status before it returns UnexpectedStatus.
+            if (err == error.UnexpectedStatus) std.debug.assert(client.response_status != null);
             return .{ .err = err, .status = client.response_status };
         };
         return null;
@@ -222,6 +228,8 @@ test "requestsStalled fires only after the limit, and never while idle" {
 test {
     _ = commands;
     _ = Server;
+    // Tests don't call `main`; this compiles the MCP path, which nothing else in them reaches.
+    _ = &serveMcp;
 }
 
 test "servesMcp takes mcp alone" {

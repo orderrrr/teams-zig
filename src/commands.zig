@@ -1270,7 +1270,8 @@ test "reportError writes the hint as one teams-zig line and exits 1" {
     defer out.deinit();
 
     try std.testing.expectEqual(1, try reportError(&out.writer, error.ConnectFailed, null));
-    try std.testing.expectEqual(1, try reportError(&out.writer, error.UnexpectedStatus, .forbidden));
+    const forbidden = try reportError(&out.writer, error.UnexpectedStatus, .forbidden);
+    try std.testing.expectEqual(1, forbidden);
     try std.testing.expectEqualStrings(
         \\teams-zig: couldn't reach the Chat Service; check the network
         \\teams-zig: the Chat Service answered HTTP 403
