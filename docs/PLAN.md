@@ -471,6 +471,10 @@ Plan decisions:
 
 On 2026-11-23, with the owner's go-ahead in the work session: one `GET /users/ME/properties` through `https://teams.microsoft.com/api/chatsvc/emea/v1`, the token on stdin to curl. HTTP 200 in 0.58 s (TCP 0.04 s, TLS 0.10 s), 20,581 bytes, the same body size as on the old host, where the first authenticated read took about 1.17 s. The switch (M7.2) goes ahead.
 
+### M7.3 front-door live read
+
+Reads only, temporary `HOME` with a warm cache: `whoami` 1.10 s, `chats 5` 0.48 s, `messages 48:notes 250` 0.49 s, `unread` 0.70 s, all exit 0. Paging links (`backwardLink`) come back under `teams.microsoft.com/api/chatsvc/emea/v1` already, so the old-host move in `frontDoorUrl` is only a fallback.
+
 ### M7.12 timings (before the front door)
 
 On 2026-11-23, reads only, three runs each, with a temporary `HOME` holding a warm cache (the real cache path is first written by the owner's own runs). Speed report figures in brackets.
