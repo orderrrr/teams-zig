@@ -409,3 +409,64 @@ Owner's answers to the round-7 questions (2026-11-23): the CLI's usage line for 
 - **Round 10** (reviews of `abd2256..5a6072b`, the round-7 answers applied). Tiger Style: a test refuses U+009F, the last C1 control, so both ends of the range are pinned. mr-review and STYLE: nothing new. Deferred, for the owner: nothing checks that argv text is valid UTF-8, so a lone 8-bit C1 byte (`0x9B`) from the CLI passes, as `messages` would show it.
 - **Round 11:** all three reviews found nothing new. Gate passed. With the M6.12 live send done, M6 is resolved at 0.9.0, pending the owner's step to register the server.
 
+
+## M7: faster reads and sends
+
+Asked for by the owner on 2026-11-23, after the speed report: teams-zig is slow because the Chat Service host (`{region}.ng.msg.teams.microsoft.com`) is about 230 ms away, every process and every MCP call opens a new connection (about 0.7 s), requests run one after another (about 0.3 s each, with `whoami` before most commands and name lookups for 1:1 chats), and lists come uncompressed. Plan approved by the owner on 2026-11-23, with these answers: the cache file is `~/Library/Caches/teams-zig/cache.txt`; chat-name entries have no age limit; M7.13 is one live send by name to `48:notes`, confirmed by the owner at that moment in the work session. The front-door check (M7.1) waits for the owner's go-ahead in the work session; M7.2 and M7.3 start only after it succeeds.
+
+Owner decisions (2026-11-23):
+
+- **Front door.** Requests go to `https://teams.microsoft.com/api/chatsvc/{region}/v1`, whose edge is 25–45 ms away. First one authenticated `whoami` GET checks that the skype token works there; the switch happens only if it does. The owner knows the check sends the token to `teams.microsoft.com`.
+- **Disk cache** of three kinds of entry: your own user (the `whoami` result), the other person's name in 1:1 chats, and a map from chat name to chat id. `messages <name>` and `send <name>` use the map. The owner knows a stale entry can make `send` post to the wrong chat.
+- **MCP keeps one client** and its connection across tool calls, and reads the keychain again only after the token expires. A read call may reconnect once; a send call never retries.
+- **gzip.** Requests ask for gzip bodies, decompressed with `std.compress.flate`.
+
+Expected gains (from the speed report):
+
+| Fix | Saves |
+|---|---|
+| Front door | ~0.5 s on every CLI command and every MCP call (a new connection plus the first request: 0.31–0.37 s, against 0.86–1.04 s) |
+| Cache: your user | ~0.3–0.55 s on `chats`, `unread`, `messages <name>` and `send`; ~0.6 s on `send <name>`, which asks twice |
+| Cache: chat name to id | the 100-chat list (~0.86 s) and up to 40 lookups (~0.32 s each) on `messages <name>` and `send <name>` |
+| Cache: 1:1 names | ~0.32 s per 1:1 chat where you wrote last, on `chats` and on a name that misses the map |
+| MCP client kept | ~0.7 s per call after the first (~0.2 s once the front door is in) |
+| gzip | ~0.4–0.5 s where the chat list is read: `unread` (50 chats, 149 KB) and a name that misses the map (100 chats, 306 KB to 68 KB) |
+
+Plan decisions:
+
+- The token goes only to the front door. `checkLink` accepts links under the front-door base only. Paging links the service sends under the old `ng.msg` base are rewritten to the front-door base, same path and query, before they are checked; any other host stays `ForeignLink`. M7.2 records which host the links name.
+- The cache holds no token. It holds ids and names, so the file is created with mode 0600. Its path is `~/Library/Caches/teams-zig/cache.txt` (the owner's answer); tests never touch it.
+- The format is text, one entry per line, tab-separated: `self <mri> <name> <upn>`, `person <1:1 chat id> <name>`, `chat <name, lower-cased ASCII> <chat id>`. A value holding a tab, a newline or another control character is not cached.
+- Limits (Tiger Style): at most 1024 `person` and 1024 `chat` entries, and the file at most 256 KiB. Past a limit, new entries are dropped until the next full list rewrites the map. A file that is too large or doesn't parse counts as empty and is rewritten.
+- Writes are whole-file and atomic: a temporary file in the same directory, then a rename. A CLI run and the MCP server writing at once means the last writer wins, which a cache can afford.
+- The cache is read at the start of each CLI run and each MCP call, so a deleted file takes effect at once.
+- `scripts/teams-token.fish` deletes the cache file at each new sign-in, since a new token may be another account. teams-zig itself never deletes it, except to drop one bad entry (below).
+- `whoami` (the command and the tool) always asks the service, since it is the check that the token works, and writes the `self` entry. Every other command takes `self` from the cache and asks only on a miss. `send` takes the display name from the same entry.
+- The name map is written by every command that lists chats with names (`chats`, a name lookup that misses). Only names that pick exactly one chat in that list are stored, so an ambiguous name still lists its chats and fails as now. A name the map doesn't have is looked up as now.
+- A `chat` entry whose id answers 404 is dropped from the cache and the command fails with `NotFound`, whose hint says to run it again. Nothing is retried in the same run, for `send` or for reads; a rerun resolves the name fresh. All of `send`'s other checks stay: size, control characters, no retry.
+- `person` entries are never stale in practice: a 1:1 chat's other person doesn't change. A cached name is used instead of a lookup; a lookup's result is stored.
+- MCP: `McpRunner` keeps the `Client` between calls. On `TokenExpired` it reads the keychain again, builds a new client and, for a read tool, runs the call once more; `send` reports the error. On `ConnectFailed`, `SendFailed` or `ConnectionDropped` a read tool reconnects and runs once more; `send` reports the error, whose hint already says to check the chat. One retry at most, and the output buffer starts empty for it.
+- gzip: `Accept-Encoding: gzip, identity`. A gzip body is decompressed into the same 8 MiB body buffer, so the limit is on the decompressed size; past it, `ResponseTooLarge` as now. Other encodings are still refused.
+- No change to the watchdog, the request limits or the tools' arguments and text.
+- The version becomes 0.10.0.
+
+### Chunks
+
+1. **M7.1 front-door check.** One `whoami` GET through `https://teams.microsoft.com/api/chatsvc/{region}/v1/users/ME/properties`, token on stdin to curl, never in argv, files or output. Record the status and time only. *Needs the owner's go-ahead in the work session.* If it fails, M7.2 and M7.3 are dropped and the owner is told; the other chunks do not depend on the front door.
+2. **M7.2 front-door base URL.** `Region.baseUrl` gives the front door. `checkLink` accepts it and rewrites old-base paging links to it. Tests with fake links: front door accepted, old base rewritten, other hosts refused.
+3. **M7.3 front-door live read.** `whoami`, `chats 5`, and `messages 48:notes 250` (which follows a paging link) through the new base. Counts and times only; record the links' host.
+4. **M7.4 gzip.** Ask for gzip; decompress with `std.compress.flate` into the body buffer. Tests on the decompress step with a fake gzip body, an oversize one and a broken one.
+5. **M7.5 cache format.** A `Cache` type: parse and write the three kinds of entry, the limits, a bad line or file counting as empty. Tests with fake ids and names.
+6. **M7.6 cache file.** Load from and save to the cache path: a missing file is an empty cache, mode 0600, atomic rename, the size limit. Tests use a temporary directory, never the real path.
+7. **M7.7 your user from the cache.** `chats`, `unread`, name lookups and `send` take `self` from the cache; `whoami` refreshes it. `send <name>` asks at most once. Tests with a fake cache and no network.
+8. **M7.8 1:1 names from the cache.** `otherPersonNames` uses cached names and stores lookups. Tests.
+9. **M7.9 chat name to id.** `findChat` tries the map first; listings write it; a 404 drops the entry, with no retry. Tests, including an ambiguous name and a dropped entry.
+10. **M7.10 sign-in deletes the cache.** `scripts/teams-token.fish` removes the cache file after it stores a new token.
+11. **M7.11 MCP keeps its client.** `McpRunner` holds the client across calls, with the reconnect and the one retry for reads only. Tests with a fake runner path for each failure.
+12. **M7.12 live read check and timings.** The speed report's four commands, CLI and MCP, three runs each, against its numbers. Reads only.
+13. **M7.13 one live send by name.** One `send` to `48:notes` by its name through the cache, after the owner's go-ahead at that moment. Read back with `messages`; never retried.
+14. **M7.14 0.10.0 and gate.** Version, CHANGELOG, README if the cache needs a line, then the milestone gate.
+
+### Out of M7
+
+Parallel lookups. Paging sizes. A cache age limit. Caching message content. Any write but `send`.
