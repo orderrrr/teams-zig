@@ -53,8 +53,15 @@ pub fn main(init: std.process.Init) !u8 {
 
     var clock: Clock = .{ .zone = zone, .now_seconds = Io.Clock.real.now(init.io).toSeconds() };
     requests_started_at.store(Io.Clock.awake.now(init.io).toSeconds(), .release);
-    const started_at = &requests_started_at;
-    command.run(&client, &cache, init.io, &clock, stdout, stderr, started_at) catch |err| {
+    command.run(
+        &client,
+        &cache,
+        init.io,
+        &clock,
+        stdout,
+        stderr,
+        &requests_started_at,
+    ) catch |err| {
         const exit_code = try reportError(stderr, err, client.response_status);
         // The run error is the one worth reporting; a failed flush (say, a closed pipe) after it
         // would only hide that.
@@ -125,21 +132,32 @@ const McpRunner = struct {
     stderr: *Io.Writer,
     /// Null until the first call, and after a failure that drops it. Initialized in place, since
     /// the client must not move once its connections exist.
-    client: ?chat.Client = null,
-    /// When the kept client last finished a call, in awake-clock seconds.
-    client_used_at: i64 = 0,
+    kept: ?Kept = null,
+
+    /// The client kept across calls, and when it last finished one.
+    const Kept = struct {
+        client: chat.Client,
+        /// Awake-clock seconds.
+        used_at_seconds: i64,
+    };
 
     /// A send on a connection idle longer than this starts on a fresh one: the service may have
     /// closed it, and a send can't be retried. Reads just retry once.
-    const send_idle_seconds_max = 30;
+    const send_idle_seconds_max: i64 = 30;
 
     fn interface(runner: *McpRunner) Server.Runner {
         return .{ .context = runner, .run_fn = run };
     }
 
     fn deinit(runner: *McpRunner) void {
-        if (runner.client) |*client| client.deinit();
-        runner.client = null;
+        runner.dropClient();
+        runner.* = undefined;
+    }
+
+    /// Closes the kept client, so the next call connects again and reads the keychain.
+    fn dropClient(runner: *McpRunner) void {
+        if (runner.kept) |*kept| kept.client.deinit();
+        runner.kept = null;
     }
 
     fn run(context: *anyopaque, command: *const Command, output: *Io.Writer) ?Server.Failure {
@@ -172,10 +190,18 @@ const McpRunner = struct {
     }
 
     fn runOnce(runner: *McpRunner, command: *const Command, output: *Io.Writer) ?Server.Failure {
-        const now = Io.Clock.awake.now(runner.io).toSeconds();
-        if (command.* == .send and sendsFresh(now, runner.client_used_at)) runner.deinit();
-        const client = runner.connected() catch |err| return .{ .err = err, .status = null };
-        defer runner.client_used_at = Io.Clock.awake.now(runner.io).toSeconds();
+        const now_seconds = Io.Clock.awake.now(runner.io).toSeconds();
+        if (command.* == .send) {
+            if (runner.kept) |kept| {
+                if (sendsFresh(now_seconds, kept.used_at_seconds)) runner.dropClient();
+            }
+        }
+        const client = runner.connected(now_seconds) catch |err| {
+            return .{ .err = err, .status = null };
+        };
+        defer if (runner.kept) |*kept| {
+            kept.used_at_seconds = Io.Clock.awake.now(runner.io).toSeconds();
+        };
 
         // Read for every call, so a cache deleted at sign-in takes effect at once.
         const home = openHome(runner.io, runner.environment);
@@ -205,27 +231,27 @@ const McpRunner = struct {
             // Client sets response_status before it returns UnexpectedStatus.
             if (err == error.UnexpectedStatus) std.debug.assert(client.response_status != null);
             const failure: Server.Failure = .{ .err = err, .status = client.response_status };
-            if (dropsClient(err)) runner.deinit();
+            if (dropsClient(err)) runner.dropClient();
             return failure;
         };
         return null;
     }
 
-    /// Whether a send at `now` should start on a fresh connection, the kept one last used at
-    /// `used_at` (both awake-clock seconds).
-    fn sendsFresh(now: i64, used_at: i64) bool {
-        return now -| used_at > send_idle_seconds_max;
+    /// Whether a send at `now_seconds` should start on a fresh connection, the kept one last
+    /// used at `used_at_seconds` (both awake-clock seconds).
+    fn sendsFresh(now_seconds: i64, used_at_seconds: i64) bool {
+        return now_seconds -| used_at_seconds > send_idle_seconds_max;
     }
 
     /// The kept client, connecting first (and reading the keychain) if there is none.
-    fn connected(runner: *McpRunner) commands.CommandError!*chat.Client {
-        if (runner.client) |*client| return client;
-        runner.client = @as(chat.Client, undefined);
-        connect(&runner.client.?, runner.gpa, runner.io, runner.environment) catch |err| {
-            runner.client = null;
+    fn connected(runner: *McpRunner, now_seconds: i64) commands.CommandError!*chat.Client {
+        if (runner.kept) |*kept| return &kept.client;
+        runner.kept = .{ .client = undefined, .used_at_seconds = now_seconds };
+        connect(&runner.kept.?.client, runner.gpa, runner.io, runner.environment) catch |err| {
+            runner.kept = null;
             return err;
         };
-        return &runner.client.?;
+        return &runner.kept.?.client;
     }
 };
 
@@ -234,7 +260,12 @@ const McpRunner = struct {
 fn openHome(io: Io, environment: *const std.process.Environ.Map) ?Io.Dir {
     const home_path = environment.get("HOME") orelse return null;
     if (!std.fs.path.isAbsolute(home_path)) return null;
-    return Io.Dir.openDirAbsolute(io, home_path, .{}) catch null;
+    const options: Io.Dir.OpenOptions = .{
+        .access_sub_paths = true,
+        .iterate = false,
+        .follow_symlinks = true,
+    };
+    return Io.Dir.openDirAbsolute(io, home_path, options) catch null;
 }
 
 /// The cache under `home`, or an empty one without a home.
