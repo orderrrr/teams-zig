@@ -23,6 +23,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // The MCP server's `serverInfo` names this version.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    exe.root_module.addOptions("build_options", build_options);
     b.installArtifact(exe);
 
     const run_command = b.addRunArtifact(exe);

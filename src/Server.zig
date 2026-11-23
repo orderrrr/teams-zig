@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const teams = @import("teams");
 const json = teams.chat.json;
+const build_options = @import("build_options");
 
 const Server = @This();
 
@@ -94,8 +95,43 @@ fn answer(server: *Server, arena: std.mem.Allocator, line: []const u8) Error!voi
     };
     // Notifications get no answer.
     const id = request.id orelse return;
+    if (std.mem.eql(u8, request.method, "initialize")) {
+        return server.answerResult(id, initializeResult(&request.params));
+    }
+    if (std.mem.eql(u8, request.method, "ping")) return server.answerResult(id, Empty{});
     return server.answerError(id, .method_not_found, "Method not found");
 }
+
+/// The protocol versions served, newest first. The server uses nothing that differs between
+/// them, and neither has JSON-RPC batches.
+const protocol_versions = [_][]const u8{ "2025-11-25", "2025-06-18" };
+
+/// What `initialize` answers: the client's protocol version if it is served, else the newest
+/// (the client then decides whether to go on), and the tools capability.
+fn initializeResult(params: *const std.json.ObjectMap) InitializeResult {
+    const version: []const u8 = version: {
+        const asked = params.get("protocolVersion") orelse break :version protocol_versions[0];
+        if (asked != .string) break :version protocol_versions[0];
+        for (protocol_versions) |served| {
+            if (std.mem.eql(u8, asked.string, served)) break :version served;
+        }
+        break :version protocol_versions[0];
+    };
+    return .{ .protocolVersion = version };
+}
+
+/// An empty JSON object. (An empty `.{}` is a tuple, which std.json writes as `[]`.)
+const Empty = struct {};
+
+/// Field names are MCP's.
+const InitializeResult = struct {
+    protocolVersion: []const u8,
+    capabilities: struct { tools: Empty = .{} } = .{},
+    serverInfo: struct {
+        name: []const u8 = "teams-zig",
+        version: []const u8 = build_options.version,
+    } = .{},
+};
 
 /// A JSON-RPC request's envelope: `{"jsonrpc":"2.0","id":…,"method":…,"params":{…}}`.
 const Request = struct {
@@ -138,6 +174,24 @@ const Request = struct {
     }
 };
 
+/// Writes a JSON-RPC answer carrying `result` as one line.
+fn answerResult(server: *Server, id: Id, result: anytype) Error!void {
+    const answer_value: struct {
+        jsonrpc: []const u8 = "2.0",
+        id: Id,
+        result: @TypeOf(result),
+    } = .{ .id = id, .result = result };
+    try server.writeLine(answer_value);
+}
+
+/// Writes `value` as one line of JSON, and sends it.
+fn writeLine(server: *Server, value: anytype) Error!void {
+    // Minified JSON escapes every newline inside strings, so the answer stays on one line.
+    try std.json.Stringify.value(value, json.stringify_options, server.writer);
+    try server.writer.writeByte('\n');
+    try server.writer.flush();
+}
+
 /// Writes a JSON-RPC error answer as one line. `id` is null when the request's id can't be read.
 fn answerError(server: *Server, id: ?Id, code: ErrorCode, message: []const u8) Error!void {
     const Answer = struct {
@@ -149,9 +203,7 @@ fn answerError(server: *Server, id: ?Id, code: ErrorCode, message: []const u8) E
         .code = @backingInt(code),
         .message = message,
     } };
-    try std.json.Stringify.value(error_answer, json.stringify_options, server.writer);
-    try server.writer.writeByte('\n');
-    try server.writer.flush();
+    try server.writeLine(error_answer);
 }
 
 /// Reads `source` through a buffer smaller than it, as stdin is read. (std.testing.ReaderIndirect
@@ -255,4 +307,38 @@ test "a line longer than the reader's buffer gets -32700 and is skipped to its n
         \\{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error: the request line is too long"}}
         \\
     , out.written());
+}
+
+test "initialize answers with the client's version when known, and the newest otherwise" {
+    const server_info =
+        \\"capabilities":{"tools":{}},"serverInfo":{"name":"teams-zig","version":"
+    ++ build_options.version ++
+        \\"}}}
+    ;
+    try expectAnswers(
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake","version":"1"}}}
+        \\{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fake","version":"1"}}}
+        \\{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"fake","version":"1"}}}
+        \\{"jsonrpc":"2.0","id":4,"method":"initialize"}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18",
+    ++ server_info ++ "\n" ++
+        \\{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25",
+    ++ server_info ++ "\n" ++
+        \\{"jsonrpc":"2.0","id":3,"result":{"protocolVersion":"2025-11-25",
+    ++ server_info ++ "\n" ++
+        \\{"jsonrpc":"2.0","id":4,"result":{"protocolVersion":"2025-11-25",
+    ++ server_info ++ "\n");
+}
+
+test "ping gets an empty result, and notifications/initialized no answer" {
+    try expectAnswers(
+        \\{"jsonrpc":"2.0","method":"notifications/initialized"}
+        \\{"jsonrpc":"2.0","id":"fake-ping","method":"ping"}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":"fake-ping","result":{}}
+        \\
+    );
 }
