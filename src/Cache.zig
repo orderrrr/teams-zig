@@ -192,9 +192,9 @@ pub fn putSelf(cache: *Cache, user: *const User) error{OutOfMemory}!void {
 }
 
 /// Forgets your user, as when a new token may be another account; the next command asks the
-/// service once.
+/// service once. The cache is marked changed even if this load held no user, since a load that
+/// failed (and so came back empty) may hide one still in the file: the save rewrites it.
 pub fn forgetSelf(cache: *Cache) void {
-    if (cache.self_user == null) return;
     cache.self_user = null;
     cache.changed = true;
 }
@@ -452,11 +452,11 @@ test "clearChats forgets every chat name" {
     try std.testing.expect(cache.changed);
 }
 
-test "forgetSelf drops your user, and marks the cache changed only if there was one" {
+test "forgetSelf drops your user, and marks the cache changed even when there was none" {
     var cache: Cache = .init(std.testing.allocator);
     defer cache.deinit();
     cache.forgetSelf();
-    try std.testing.expect(!cache.changed);
+    try std.testing.expect(cache.changed);
 
     try cache.putSelf(&.{ .mri = "8:orgid:fake-self", .name = "Fake Self", .upn = "fake@x" });
     cache.changed = false;

@@ -141,9 +141,9 @@ const McpRunner = struct {
         client: chat.Client,
         /// Awake-clock seconds.
         used_at_seconds: i64,
-        /// True from connecting until a call forgets the cached user and saves that: a new
-        /// client read the keychain, and its token may be another account's. Kept here, not
-        /// per call, so a failed load or save forgets it again on the next call.
+        /// True from connecting until a call forgets the cached user and writes the file
+        /// without it: a new client read the keychain, and its token may be another account's.
+        /// Kept here, not per call, so a failed save, or no home, forgets it again next call.
         cached_self_stale: bool,
     };
 
@@ -221,7 +221,10 @@ const McpRunner = struct {
             // watchdog's line and a failure that ends it. A failed save costs requests later,
             // and leaves the cached user marked stale, to forget again.
             if (saveCache(&cache, runner.io, home)) {
-                if (runner.kept) |*kept| kept.cached_self_stale = false;
+                // Without a home nothing was written, so the file may still hold the old user.
+                if (home != null) {
+                    if (runner.kept) |*kept| kept.cached_self_stale = false;
+                }
             } else |_| {}
         }
         // The cached user may be the old token's, after a sign-in to another account.
@@ -446,7 +449,15 @@ test "the CLI says on stderr when the cache can't be saved" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Library",
         .data = "fake",
-        .flags = test_create_options,
+        .flags = .{
+            .read = false,
+            .truncate = true,
+            .exclusive = false,
+            .lock = .none,
+            .lock_nonblocking = false,
+            .permissions = .default_file,
+            .resolve_beneath = false,
+        },
     });
 
     var cache: Cache = .init(std.testing.allocator);
@@ -460,14 +471,3 @@ test "the CLI says on stderr when the cache can't be saved" {
     try std.testing.expect(std.mem.startsWith(u8, out.written(), line_start));
     try std.testing.expect(std.mem.endsWith(u8, out.written(), "\n"));
 }
-
-/// Options for files the tests create, spelled out.
-const test_create_options: Io.Dir.CreateFileOptions = .{
-    .read = false,
-    .truncate = true,
-    .exclusive = false,
-    .lock = .none,
-    .lock_nonblocking = false,
-    .permissions = .default_file,
-    .resolve_beneath = false,
-};
