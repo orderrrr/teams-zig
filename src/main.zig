@@ -175,7 +175,9 @@ const usage =
     \\                               arrive; Ctrl-C stops
     \\  messages <chat> [count]      show a chat's messages (default 50); <chat> is its exact
     \\                               name as chats shows it (quote it if it has spaces) or its id
-    \\  send <chat> <text>           send <text>, written in Markdown (quote it), to <chat>
+    \\  send <chat> <text>           send <text>, written in Markdown (quote it), to <chat>:
+    \\                               at most 16 KiB of UTF-8, with no control characters but
+    \\                               tab and newline
     \\  mcp                          serve these commands but watch as MCP tools, on stdin and
     \\                               stdout, until stdin ends
     \\
