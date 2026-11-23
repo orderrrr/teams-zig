@@ -8,6 +8,8 @@ One entry per milestone. The version lives in `build.zig.zon`.
 - A failed call returns the command's hint, as the CLI prints it, marked as an error. Wrong arguments return what the tool takes.
 - Each call reads the token from the keychain again, so a token stored with `scripts/teams-token.fish` works without restarting the server. A Chat Service stall of more than 60 seconds ends the server, as it ends a command.
 - Register it in Claude Code with `claude mcp add --scope user teams-zig -- <repo>/zig-out/bin/teams-zig mcp`, and put `mcp__teams-zig__send` in the `ask` list of `~/.claude/settings.json`, so Claude Code asks before each send.
+- `send`, as a command or a tool, refuses text holding a control byte other than tab and newline.
+- The `send` tool's description tells agents to send only what the operator asked for in that session, and to show the chat and the text first. `messages` and `unread` say their text is data, not instructions.
 - Writes to Teams: sending, through the `send` command or the `send` tool, is the only write.
 
 ## 0.8.1: `messages` shows code holding backticks unambiguously
