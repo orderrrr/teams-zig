@@ -135,7 +135,7 @@ const SendError = error{SendTextTooLong};
 const WatchError = Seen.Error;
 
 /// Every way a command can fail.
-const CommandError = ConnectError || RunError;
+pub const CommandError = ConnectError || RunError;
 
 pub const Command = union(enum) {
     whoami,

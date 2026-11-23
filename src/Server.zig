@@ -14,6 +14,27 @@ gpa: std.mem.Allocator,
 /// Its buffer's size is the longest request line taken (see `request_size_max`).
 reader: *Io.Reader,
 writer: *Io.Writer,
+/// Holds one command's text; its size is the most a tool call returns (see `output_size_max`).
+output_buffer: []u8,
+runner: Runner,
+
+/// The most text a tool call returns, the size `main` gives `output_buffer`. Far more than an
+/// agent can use; `messages` with a large count can still reach it.
+pub const output_size_max = 1024 * 1024;
+
+/// Runs the tools' commands: connecting, then `commands.Command.run`, in `main`; a fake in tests.
+pub const Runner = struct {
+    context: *anyopaque,
+    /// Writes the command's text to `output`; returns how it failed, or null.
+    runFn: *const fn (context: *anyopaque, command: *const commands.Command, output: *Io.Writer) ?Failure,
+};
+
+/// How a command failed, for its hint (see `commands.writeErrorHint`).
+pub const Failure = struct {
+    err: commands.CommandError,
+    /// The response's status, set whenever `err` is UnexpectedStatus.
+    status: ?std.http.Status,
+};
 
 /// The longest request line, the size `main` gives the stdin reader's buffer. A `send` of 16 KiB
 /// can grow about six times with JSON escapes, so this leaves room.
@@ -161,8 +182,30 @@ fn answerCall(
         );
         return server.answerResult(id, CallResult{ .content = &.{.{ .text = message }}, .isError = true });
     };
-    _ = command;
-    return server.answerError(id, .method_not_found, "Method not found");
+    // `watch` never ends, so no tool runs it.
+    std.debug.assert(command != .watch);
+
+    var output: Io.Writer = .fixed(server.output_buffer);
+    const failure = server.runner.runFn(server.runner.context, &command, &output) orelse {
+        return server.answerResult(id, CallResult{
+            .content = &.{.{ .text = output.buffered() }},
+            .isError = false,
+        });
+    };
+
+    var text: Io.Writer.Allocating = .init(arena);
+    // Only `output` fails with WriteFailed, and a fixed writer fails only when it is full.
+    if (failure.err == error.WriteFailed) {
+        try text.writer.print(
+            "the output is larger than teams-zig returns ({d} bytes); ask for fewer chats or messages",
+            .{server.output_buffer.len},
+        );
+    } else {
+        // An Allocating writer fails only when it can't grow.
+        text.writer.writeAll(output.buffered()) catch return error.OutOfMemory;
+        commands.writeErrorHint(&text.writer, failure.err, failure.status) catch return error.OutOfMemory;
+    }
+    return server.answerResult(id, CallResult{ .content = &.{.{ .text = text.written() }}, .isError = true });
 }
 
 /// A `tools/call` result: the command's text, and whether it failed. Field names are MCP's.
@@ -407,16 +450,53 @@ const SliceReader = struct {
     }
 };
 
-/// Runs `server` over `input` and checks that its answers are `expected`.
+/// Runs `server` over `input` and checks that its answers are `expected`. No command runs.
 fn expectAnswers(input: []const u8, expected: []const u8) !void {
+    var runner: FakeRunner = .{ .output = "", .failure = null, .runs_allowed = false };
+    var output_buffer: [64]u8 = undefined;
+    try expectAnswersWith(&runner, &output_buffer, input, expected);
+}
+
+/// Runs `server` over `input`, with `runner` for its commands, and checks its answers.
+fn expectAnswersWith(
+    runner: *FakeRunner,
+    output_buffer: []u8,
+    input: []const u8,
+    expected: []const u8,
+) !void {
     var reader: Io.Reader = .fixed(input);
     var out: Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
-    var server: Server = .{ .gpa = std.testing.allocator, .reader = &reader, .writer = &out.writer };
+    var server: Server = .{
+        .gpa = std.testing.allocator,
+        .reader = &reader,
+        .writer = &out.writer,
+        .output_buffer = output_buffer,
+        .runner = runner.interface(),
+    };
     try server.serve();
     try std.testing.expectEqualStrings(expected, out.written());
 }
+
+/// Writes `output` for every command, then fails with `failure` if it is set.
+const FakeRunner = struct {
+    output: []const u8,
+    failure: ?Failure,
+    runs_allowed: bool,
+
+    fn interface(fake: *FakeRunner) Runner {
+        return .{ .context = fake, .runFn = run };
+    }
+
+    fn run(context: *anyopaque, command: *const commands.Command, output: *Io.Writer) ?Failure {
+        const fake: *FakeRunner = @ptrCast(@alignCast(context));
+        std.debug.assert(fake.runs_allowed);
+        std.debug.assert(command.* != .watch);
+        output.writeAll(fake.output) catch |err| return .{ .err = err, .status = null };
+        return fake.failure;
+    }
+};
 
 test "an unknown method is answered with its id and -32601" {
     try expectAnswers(
@@ -480,10 +560,14 @@ test "a line longer than the reader's buffer gets -32700 and is skipped to its n
     var out: Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
+    var runner: FakeRunner = .{ .output = "", .failure = null, .runs_allowed = false };
+    var output_buffer: [64]u8 = undefined;
     var server: Server = .{
         .gpa = std.testing.allocator,
         .reader = &reader.interface,
         .writer = &out.writer,
+        .output_buffer = &output_buffer,
+        .runner = runner.interface(),
     };
     try server.serve();
     try std.testing.expectEqualStrings(
@@ -691,6 +775,52 @@ test "tools/call answers bad arguments with isError and the usage, and an unknow
         \\{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Unknown tool: fake"}}
         \\{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"Invalid params: tools/call needs a tool name"}}
         \\{"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid params: a tool's arguments are an object"}}
+        \\
+    );
+}
+
+test "tools/call answers with the command's text, or its text and hint when it fails" {
+    var output_buffer: [64]u8 = undefined;
+    var runner: FakeRunner = .{ .output = "Fake Person <fake@example.com>\n", .failure = null, .runs_allowed = true };
+    try expectAnswersWith(&runner, &output_buffer,
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whoami"}}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Fake Person <fake@example.com>\n"}],"isError":false}}
+        \\
+    );
+
+    runner = .{
+        .output = "  10:00  chat  Fake  19:fake@thread.v2\n",
+        .failure = .{ .err = error.ChatNameAmbiguous, .status = null },
+        .runs_allowed = true,
+    };
+    try expectAnswersWith(&runner, &output_buffer,
+        \\{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"messages","arguments":{"chat":"Fake"}}}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"  10:00  chat  Fake  19:fake@thread.v2\nseveral chats have that name; use one of the ids above"}],"isError":true}}
+        \\
+    );
+
+    runner = .{ .output = "", .failure = .{ .err = error.UnexpectedStatus, .status = .forbidden }, .runs_allowed = true };
+    try expectAnswersWith(&runner, &output_buffer,
+        \\{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"unread"}}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"the Chat Service answered HTTP 403"}],"isError":true}}
+        \\
+    );
+}
+
+test "tools/call refuses output larger than the output buffer" {
+    var output_buffer: [8]u8 = undefined;
+    var runner: FakeRunner = .{ .output = "more than eight bytes", .failure = null, .runs_allowed = true };
+    try expectAnswersWith(&runner, &output_buffer,
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"chats"}}
+        \\
+    ,
+        \\{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"the output is larger than teams-zig returns (8 bytes); ask for fewer chats or messages"}],"isError":true}}
         \\
     );
 }
