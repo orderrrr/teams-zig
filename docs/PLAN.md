@@ -687,3 +687,6 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
   - mr-review: two comments that still said a keychain read has no limit now say 120 s, and why writes have none; the CHANGELOG names the 120 s limit; the test's stand-in uses `exec sleep 5`, so no `sleep` outlives it. No rule covers these; each fixes the agent's own new change with no behaviour change, so they were applied and reported, not asked. Not changed: a laptop sleep during a read might end the 120 s early (unverified; the hint says to run again).
   - STYLE: the test's path is a stack buffer, not an allocation (6.5).
   - Tiger Style: `readUsing` and `ChildAgentBrowser.run` assert their program path isn't empty.
+- **Round 7** (the same three reviews of `ee7409a`).
+  - mr-review: `login` builds the profile path in a stack buffer too (STYLE 6.5, as round 6 did in the test), so it has no allocation or `OutOfMemory` arm; the `main.zig` comment names `read_seconds_max` instead of repeating "120 s".
+  - STYLE and Tiger Style: no new findings.

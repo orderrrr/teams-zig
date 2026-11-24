@@ -35,13 +35,13 @@ pub fn login(
     options: *const LoginOptions,
 ) LoginError!void {
     options.home.createDirPath(io, profile_sub_path) catch return error.ProfileDirFailed;
-    const profile_path = options.home.realPathFileAlloc(io, profile_sub_path, gpa) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.ProfileDirFailed,
-        };
-    };
-    defer gpa.free(profile_path);
+    var profile_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const profile_path_len = options.home.realPathFile(
+        io,
+        profile_sub_path,
+        &profile_path_buffer,
+    ) catch return error.ProfileDirFailed;
+    const profile_path = profile_path_buffer[0..profile_path_len];
 
     var signed_in = try signIn(gpa, io, agent_browser, &.{
         .profile_path = profile_path,
