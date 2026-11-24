@@ -690,3 +690,4 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
 - **Round 7** (the same three reviews of `ee7409a`).
   - mr-review: `login` builds the profile path in a stack buffer too (STYLE 6.5, as round 6 did in the test), so it has no allocation or `OutOfMemory` arm; the `main.zig` comment names `read_seconds_max` instead of repeating "120 s".
   - STYLE and Tiger Style: no new findings.
+- **Round 8** (the same three reviews of `4bb8357`): no new findings from mr-review, STYLE or Tiger Style. **Gate passed again** after the owner's answers. M8 resolves after the release (M8.12).
