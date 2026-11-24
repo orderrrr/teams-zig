@@ -17,8 +17,16 @@ const security_exit_item_not_found: u8 = 44;
 /// Far larger than any token; a bigger value means something else is stored there.
 pub const value_size_max: u32 = 64 * 1024;
 
-/// Failures reading a keychain item through `security`.
-pub const ReadError = error{ ItemNotFound, KeychainReadFailed, OutOfMemory };
+/// Failures reading a keychain item through `security`. `KeychainLocked`: no answer within
+/// `read_seconds_max`, which almost always means `security` is waiting for an unlock.
+pub const ReadError = error{ ItemNotFound, KeychainReadFailed, KeychainLocked, OutOfMemory };
+
+/// How long a read may wait: enough to unlock the keychain in its dialog, short enough that a
+/// locked keychain nobody is watching ends in a hint, not a hang (the owner's answer, M8 gate).
+const read_seconds_max: u32 = 120;
+
+/// What to tell the user after `KeychainLocked` (the owner's wording).
+pub const locked_hint = "Is the login keychain locked? Unlock it and run the command again.";
 
 /// One keychain item's name. A struct, so a service and an account can't swap places.
 pub const ItemName = struct {
@@ -26,15 +34,34 @@ pub const ItemName = struct {
     account: []const u8,
 };
 
-/// Reads one item. Owned by the caller. No time limit: when the keychain is locked, `security`
-/// waits for the user to unlock it in a dialog.
+/// Reads one item. Owned by the caller. When the keychain is locked, `security` waits for the
+/// user to unlock it in a dialog, for up to `read_seconds_max`.
 pub fn read(gpa: std.mem.Allocator, io: Io, name: *const ItemName) ReadError![]u8 {
+    return readUsing(gpa, io, name, &.{
+        .program = security_path,
+        .seconds_max = read_seconds_max,
+    });
+}
+
+/// What `read` runs, and for how long; tests use a stand-in program and a short limit.
+const ReadOptions = struct {
+    program: []const u8,
+    seconds_max: u32,
+};
+
+fn readUsing(
+    gpa: std.mem.Allocator,
+    io: Io,
+    name: *const ItemName,
+    options: *const ReadOptions,
+) ReadError![]u8 {
     std.debug.assert(name.service_name.len > 0);
     std.debug.assert(name.account.len > 0);
+    std.debug.assert(options.seconds_max > 0);
     const result = std.process.run(gpa, io, .{
         .exe = .detect,
         .argv = &.{
-            security_path,
+            options.program,
             "find-generic-password",
             "-s",
             name.service_name,
@@ -50,9 +77,14 @@ pub fn read(gpa: std.mem.Allocator, io: Io, name: *const ItemName) ReadError![]u
         .expand_arg0 = .no_expand,
         .progress_node = .none,
         .create_no_window = true,
-        .timeout = .none,
+        // A deadline, not a duration: std restarts a duration at each read.
+        .timeout = .{ .deadline = .fromNow(io, .{
+            .raw = .fromSeconds(options.seconds_max),
+            .clock = .awake,
+        }) },
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return error.KeychainLocked,
         else => return error.KeychainReadFailed,
     };
     gpa.free(result.stderr);
@@ -269,4 +301,39 @@ test "write refuses a value security -i would split, misread or prompt for, befo
             &.{.{ .account = "fake-token", .value = value }},
         ));
     }
+}
+
+test "read gives up after its time limit, as when the keychain is locked" {
+    var tmp = std.testing.tmpDir(.{
+        .access_sub_paths = true,
+        .iterate = false,
+        .follow_symlinks = true,
+    });
+    defer tmp.cleanup();
+    // Stands in for security waiting on an unlock dialog.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "fake-security",
+        .data = "#!/bin/sh\nsleep 5\n",
+        .flags = .{
+            .read = false,
+            .truncate = true,
+            .exclusive = false,
+            .lock = .none,
+            .lock_nonblocking = false,
+            .permissions = .fromMode(0o700),
+            .resolve_beneath = false,
+        },
+    });
+    const gpa = std.testing.allocator;
+    const program = try tmp.dir.realPathFileAlloc(std.testing.io, "fake-security", gpa);
+    defer gpa.free(program);
+
+    const name: ItemName = .{ .service_name = "teams-zig-test-never-read", .account = "fake" };
+    try std.testing.expectError(
+        error.KeychainLocked,
+        readUsing(gpa, std.testing.io, &name, &.{
+            .program = program,
+            .seconds_max = 1,
+        }),
+    );
 }

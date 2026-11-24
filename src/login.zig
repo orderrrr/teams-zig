@@ -87,6 +87,7 @@ pub fn writeHint(writer: *std.Io.Writer, err: LoginError) std.Io.Writer.Error!vo
             " seconds; did sign-in finish?",
         error.NoRegionSeen => "no Chat Service region seen in " ++ wait_seconds ++ " seconds",
         error.UnstorableValue => "the skype token has characters the keychain tool can't take",
+        error.KeychainLocked => keychain.locked_hint,
         error.ItemNotFound, error.KeychainReadFailed, error.KeychainWriteFailed => "couldn't " ++
             "write the teams-zig items to the login keychain; is it locked?",
         error.ProfileDirFailed => "couldn't make the browser profile folder ~/" ++ profile_sub_path,

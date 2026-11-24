@@ -996,6 +996,7 @@ pub fn writeErrorHint(
         error.InvalidToken => "the token contains a line break; " ++ rerun_login,
         error.UnknownRegion => "the region is missing or unknown; " ++ rerun_login ++
             " (in test mode, set " ++ region_variable ++ ")",
+        error.KeychainLocked => keychain.locked_hint,
         error.KeychainReadFailed => "couldn't read the teams-zig items with " ++
             keychain.security_path ++
             "; is the keychain locked?",
