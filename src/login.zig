@@ -547,7 +547,7 @@ test "find refuses output that isn't agent-browser's, and a token over the limit
     try std.testing.expectError(error.TokenTooLong, find(arena.allocator(), output));
 }
 
-test "ChildAgentBrowser tells a missing program, a failed run and too much output apart" {
+test "ChildAgentBrowser tells missing, failed, oversized and stuck runs apart" {
     const gpa = std.testing.allocator;
     var missing: ChildAgentBrowser = .{
         .io = std.testing.io,
