@@ -683,3 +683,7 @@ M8.1 of the first plan, run on 2026-11-23 with the owner's go-ahead, before M8 c
   - D: keychain reads give up after 120 s with `KeychainLocked` and the hint "Is the login keychain locked? Unlock it and run the command again."; writes keep no limit. A test runs a stand-in that sleeps, with no real keychain (`b086a19`).
   - F, G: kept (the owner's answer): escaped JSON copies and the partial output of a timed-out or oversized run are freed without zeroing.
   - H: the `ChildAgentBrowser` test's name names its timeout checks (`b7f28a5`).
+- **Round 6** (the same three reviews of `959cb4e..64b0829`: answers D and H).
+  - mr-review: two comments that still said a keychain read has no limit now say 120 s, and why writes have none; the CHANGELOG names the 120 s limit; the test's stand-in uses `exec sleep 5`, so no `sleep` outlives it. No rule covers these; each fixes the agent's own new change with no behaviour change, so they were applied and reported, not asked. Not changed: a laptop sleep during a read might end the 120 s early (unverified; the hint says to run again).
+  - STYLE: the test's path is a stack buffer, not an allocation (6.5).
+  - Tiger Style: `readUsing` and `ChildAgentBrowser.run` assert their program path isn't empty.

@@ -36,8 +36,8 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer client.deinit();
 
-    // Started after connect so a keychain unlock dialog (security shows one when the keychain is
-    // locked) can take as long as it needs.
+    // Started after connect, so the wait for a keychain unlock dialog (security shows one when
+    // the keychain is locked; `keychain.read` waits up to 120 s) doesn't count.
     startWatchdog(init.io);
 
     var stdout_buffer: [4096]u8 = undefined;

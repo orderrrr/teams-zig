@@ -267,6 +267,7 @@ pub const ChildAgentBrowser = struct {
         const child: *ChildAgentBrowser = @ptrCast(@alignCast(context));
         var argv_buffer: [argument_count_max + 1][]const u8 = undefined;
         std.debug.assert(arguments.len <= argument_count_max);
+        std.debug.assert(child.program.len > 0);
         std.debug.assert(child.run_seconds_max > 0);
         argv_buffer[0] = child.program;
         @memcpy(argv_buffer[1..][0..arguments.len], arguments);

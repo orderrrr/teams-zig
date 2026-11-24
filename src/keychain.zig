@@ -57,6 +57,7 @@ fn readUsing(
 ) ReadError![]u8 {
     std.debug.assert(name.service_name.len > 0);
     std.debug.assert(name.account.len > 0);
+    std.debug.assert(options.program.len > 0);
     std.debug.assert(options.seconds_max > 0);
     const result = std.process.run(gpa, io, .{
         .exe = .detect,
@@ -159,7 +160,8 @@ pub fn write(
     child.stdin = null;
 
     // security -i exits 1 when a command fails; the read-back below catches anything else. No
-    // time limit, as for `read`: a locked keychain waits for the user's unlock dialog.
+    // time limit, unlike `read` (the owner's answer): `login` runs with the user at the screen,
+    // so a locked keychain waits for the unlock dialog.
     const term = child.wait(io) catch return error.KeychainWriteFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.KeychainWriteFailed,
@@ -313,7 +315,7 @@ test "read gives up after its time limit, as when the keychain is locked" {
     // Stands in for security waiting on an unlock dialog.
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "fake-security",
-        .data = "#!/bin/sh\nsleep 5\n",
+        .data = "#!/bin/sh\nexec sleep 5\n",
         .flags = .{
             .read = false,
             .truncate = true,
@@ -324,14 +326,14 @@ test "read gives up after its time limit, as when the keychain is locked" {
             .resolve_beneath = false,
         },
     });
-    const gpa = std.testing.allocator;
-    const program = try tmp.dir.realPathFileAlloc(std.testing.io, "fake-security", gpa);
-    defer gpa.free(program);
+    var program_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const program_len = try tmp.dir.realPathFile(std.testing.io, "fake-security", &program_buffer);
+    const program = program_buffer[0..program_len];
 
     const name: ItemName = .{ .service_name = "teams-zig-test-never-read", .account = "fake" };
     try std.testing.expectError(
         error.KeychainLocked,
-        readUsing(gpa, std.testing.io, &name, &.{
+        readUsing(std.testing.allocator, std.testing.io, &name, &.{
             .program = program,
             .seconds_max = 1,
         }),
